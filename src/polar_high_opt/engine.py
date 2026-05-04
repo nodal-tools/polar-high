@@ -1047,14 +1047,17 @@ class Problem:
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
         col_value = np.asarray(sol.col_value, dtype=np.float64)
         row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
+        col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
         return Solution(
             optimal = status_ok,
             obj = h.getObjectiveValue(),
             col_value = col_value,
             row_dual = row_dual,
+            col_dual = col_dual,
             col_names = col_names,
             row_names = row_names,
             vars = dict(self._vars),
+            highs = h,
         )
 
 
@@ -1068,14 +1071,27 @@ class Solution:
     def __init__(self, *, optimal: bool, obj: float,
                  col_value: np.ndarray, row_dual: np.ndarray,
                  col_names: list[str], row_names: list[str],
-                 vars: dict[str, Var]):
+                 vars: dict[str, Var],
+                 col_dual: np.ndarray | None = None,
+                 highs: "highspy.Highs | None" = None):
         self.optimal = optimal
         self.obj = obj
         self.col_value = col_value
         self.row_dual = row_dual
+        # Reduced-cost duals (per-column).  ``None`` keeps backwards
+        # compatibility for callers that build :class:`Solution` directly
+        # without a live HiGHS instance; the live solve paths populate it.
+        self.col_dual = (np.zeros(len(col_value), dtype=np.float64)
+                         if col_dual is None else col_dual)
         self.col_names = col_names
         self.row_names = row_names
         self._vars = vars
+        # Live ``highspy.Highs`` instance the solution came from.  Output
+        # adapters (e.g. flextool's ``process_outputs`` writers, which read
+        # MPS variable / row names directly off the solver) consume this.
+        # ``None`` for callers that synthesise a Solution outside a real
+        # solve.
+        self.highs = highs
 
     def value(self, var_name: str) -> pl.DataFrame:
         """Long-form per-variable solution: ``(*dims, value)``."""
@@ -1695,14 +1711,18 @@ class WarmProblem:
         col_value = np.asarray(sol.col_value, dtype=np.float64)
         row_dual = (np.asarray(sol.row_dual, dtype=np.float64)
                     if sol.row_dual else np.zeros(self._n_rows))
+        col_dual = (np.asarray(sol.col_dual, dtype=np.float64)
+                    if sol.col_dual else np.zeros(self._n_cols))
         return Solution(
             optimal=status_ok,
             obj=h.getObjectiveValue(),
             col_value=col_value,
             row_dual=row_dual,
+            col_dual=col_dual,
             col_names=self._col_names,
             row_names=self._row_names,
             vars=dict(self._p._vars),
+            highs=h,
         )
 
     # -- internals -------------------------------------------------------
