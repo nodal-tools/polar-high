@@ -1,0 +1,19 @@
+# Build artefacts
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Local-only spike-era working files (not for the public repo)
+audit/
+progress.md
+handoff.md
+questions_for_user.md
+sets.md
+
+# venv / IDE / tool config
+.venv/
+.idea/
+.vscode/
+.claude/
+.pytest_cache/

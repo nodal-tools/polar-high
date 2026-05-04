@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polar-high-opt"
+version = "0.1.0"
+description = "Polars-backed LP eDSL.  Generic engine — knows nothing of flextool."
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "highspy",
+    "polars",
+    "numpy",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests/fixtures"]
+markers = [
+    "smoke: fast end-to-end smoke tests",
+]
