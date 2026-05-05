@@ -2,6 +2,36 @@
 
 A short list of things that move the needle on real models.
 
+## Threading
+
+`polar_high` defaults `POLARS_MAX_THREADS=1` at import time. On the
+indexed-LP build patterns the engine drives, polars's Rayon
+coordination overhead consistently exceeds the parallel speedup —
+single-thread is faster *and* leaner. The benchmark page has the
+numbers; the short version is "polars threading helps the matrix
+assembly by maybe 10–15 % at large N, while costing per-thread
+scratch memory at every N".
+
+To override:
+
+```bash
+# before launching python
+export POLARS_MAX_THREADS=8
+```
+
+```python
+# or programmatically, BEFORE importing polar_high
+import os
+os.environ["POLARS_MAX_THREADS"] = "8"
+
+import polar_high  # picks up your override; setdefault no-ops
+```
+
+The env var must be set before *any* import of polars (or anything
+that imports polars) — polars reads it once at module load. If
+you've already imported polars elsewhere in your process, the
+default is locked in.
+
 ## Solver options dominate
 
 For LPs of meaningful size, **HiGHS options matter more than
@@ -61,3 +91,24 @@ beyond that, HiGHS run time dominates and build cost is noise.
 If HiGHS dominates, your time is best spent on solver options. If
 build dominates, look at the constraint loop and at any Param chains
 that are accidentally re-collected on each access.
+
+## Releasing memory between solves
+
+In a long-running rolling-horizon or parameter-sweep loop, intermediate
+polars frames can stick around longer than you expect. The kernel does
+not call `gc.collect()` for you — that would pay a full mark-and-sweep
+without freeing the polars/Arrow buffers, which are released when their
+owning Python references drop. The right pattern is at the call site:
+
+```python
+for window in windows:
+    p = build_problem(window)
+    sol = p.solve()
+    write_outputs(sol)
+    del p, sol      # drop refs to LP, intermediates, Solution
+    gc.collect()    # optional; only useful if reference cycles linger
+```
+
+`del`-then-`gc.collect()` is most useful when you've observed RSS
+growing across iterations; in plain loops the refcount drop on
+re-binding is usually enough.

@@ -1,12 +1,12 @@
 # Alternatives
 
 There are several established Python and Python-adjacent toolchains
-for indexed mathematical programming. polar-high-opt's design choices
+for indexed mathematical programming. polar-high's design choices
 are best understood as reactions to specific limitations and as
 extensions of patterns it inherited from earlier languages.
 
 This page records the foundational decision of each alternative and
-why polar-high-opt made a different choice. It then surveys two
+why polar-high made a different choice. It then surveys two
 cross-cutting features — *term-based equation formulation* and
 *warm-starting / incremental modification* — where the comparison
 does not fall neatly along tool boundaries.
@@ -18,12 +18,12 @@ for indexed mathematical programs: `set`, `param`, `var`, named
 constraint blocks with explicit summations and quantifiers. AMPL and
 GAMS share the same family resemblance.
 
-**Why it inspired polar-high-opt.** MathProg is a *great language* —
+**Why it inspired polar-high.** MathProg is a *great language* —
 the way you write a constraint reads almost exactly like the math.
 The implementation, however, is showing its age: it is a
 single-threaded interpreter with no in-process API, no incremental
 modification, no built-in connection to modern data tooling, and a
-text-only data path. polar-high-opt deliberately keeps the *spirit*
+text-only data path. polar-high deliberately keeps the *spirit*
 of MathProg-style indexed declarations while moving the data and
 algebra into polars and the solver hand-off into a process-local
 HiGHS instance.
@@ -34,9 +34,9 @@ HiGHS instance.
 Variables, parameters, and constraints are Python objects; expressions
 are built by traversing those objects with operator overloading.
 
-**Where polar-high-opt diverges.** Building large indexed programs
+**Where polar-high diverges.** Building large indexed programs
 in Pyomo is slow because every coefficient is mediated by a Python
-object. polar-high-opt keeps the entire build in **polars frames**:
+object. polar-high keeps the entire build in **polars frames**:
 multiplications are joins, summations are group-bys, and the only
 Python in the hot path is the loop that iterates *constraint families*
 (not coefficients). On the energy-system models that motivated this
@@ -48,11 +48,11 @@ project, build time dropped roughly an order of magnitude.
 written in Julia. Macros generate efficient Julia code per model,
 so the build is fast even for large models.
 
-**Where polar-high-opt diverges.** JuMP is excellent — the speed
+**Where polar-high diverges.** JuMP is excellent — the speed
 problem of Pyomo is not present in JuMP. The hurdle is the
 **Julia toolchain**: a separate language, separate package manager,
 separate test/CI ecosystem, and an ahead-of-time compilation step
-that complicates short-lived workflows. polar-high-opt keeps the
+that complicates short-lived workflows. polar-high keeps the
 modeller in **plain Python** with first-class polars ergonomics, at
 the cost of being a less mature modelling language than JuMP.
 
@@ -62,7 +62,7 @@ the cost of being a less mature modelling language than JuMP.
 Variables and parameters are `xarray.DataArray`s; broadcasting follows
 xarray semantics.
 
-**Where polar-high-opt diverges.** linopy and polar-high-opt make the
+**Where polar-high diverges.** linopy and polar-high make the
 same architectural bet — *push the algebra into a fast columnar
 backend* — but choose different backends. **xarray vs polars** is the
 main axis:
@@ -75,7 +75,7 @@ main axis:
   numeric arrays, awkward for sparse irregular index sets that
   energy-system models tend to produce).
 
-For the indexed-but-sparse models polar-high-opt targets, polars'
+For the indexed-but-sparse models polar-high targets, polars'
 join-based semantics map more directly onto how the coefficient
 matrix is actually built.
 
@@ -84,8 +84,8 @@ matrix is actually built.
 **Foundational decision.** A thin solver-agnostic Python layer with
 solver-specific backends (Gurobi, COPT, HiGHS, …).
 
-**Where polar-high-opt diverges.** pyoptinterface stays close to the
-solver API, leaving the modelling layer to the user. polar-high-opt
+**Where polar-high diverges.** pyoptinterface stays close to the
+solver API, leaving the modelling layer to the user. polar-high
 is the **opposite end** of that tradeoff: it commits to an opinionated
 indexed-frame modelling layer, builds the matrix through HiGHS by
 default, and supports MPS export for any other LP solver.
@@ -96,11 +96,11 @@ default, and supports MPS export for any other LP solver.
 The modelling surface is shallow; performance comes from the
 underlying C++ solver and from a tightly integrated build path.
 
-**Where polar-high-opt diverges.** gurobipy is **bound to Gurobi**,
+**Where polar-high diverges.** gurobipy is **bound to Gurobi**,
 a commercial solver. Even with academic / free tiers, this is a
-licensing footprint that polar-high-opt avoids — the bundled solver
+licensing footprint that polar-high avoids — the bundled solver
 is **HiGHS** (open source, Apache-licensed via `highspy`). For users
-who do want a commercial solver, polar-high-opt still produces a
+who do want a commercial solver, polar-high still produces a
 standard MPS file (`Solution.highs.writeModel("model.mps")`), so
 Gurobi or any other LP solver can read the model.
 
@@ -111,7 +111,7 @@ algebraic expression. The expression compiles down to a sparse row,
 and the original named contributions are gone — when a parity check
 fails, you see "row drift", not "the `inflow` term is wrong".
 
-polar-high-opt accepts both forms:
+polar-high accepts both forms:
 
 ```python
 # expression form (familiar from Pyomo / JuMP / linopy)
@@ -163,7 +163,7 @@ alternative stands today:
 - **linopy** rebuilds the model per solve.
 - **GNU MathProg** has no incremental API.
 
-polar-high-opt's [`WarmProblem`](../guide/warm-starting.md) provides
+polar-high's [`WarmProblem`](../guide/warm-starting.md) provides
 the same family of incremental updates (RHS, objective coefficient,
 variable bound, single-coefficient edit) on top of HiGHS, plus a
 *Param-tracked auto-update* path: declare which Params are mutable,
@@ -185,5 +185,8 @@ depend on it without needing the user to bookkeep that mapping.
 | gurobipy | Commercial-solver tight loop | Bundled HiGHS, MPS to anything |
 
 Healthy technology choices come with tradeoffs; the tradeoffs above
-are the ones polar-high-opt accepts to make large indexed models
+are the ones polar-high accepts to make large indexed models
 build fast and read clearly in Python.
+
+For measured numbers — build time, solve time, peak memory across
+problem size — see the [benchmark](benchmark.md).

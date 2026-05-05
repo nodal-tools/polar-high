@@ -10,7 +10,7 @@ $$
 ## Building blocks
 
 ```python
-from polar_high_opt import (
+from polar_high import (
     CouplingEntry, CouplingSpec, LagrangianProblem,
 )
 ```

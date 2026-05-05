@@ -1,6 +1,6 @@
 # Concepts
 
-polar-high-opt's mental model is straightforward: **everything is a
+polar-high's mental model is straightforward: **everything is a
 polars DataFrame**. Variables, parameters, expressions, constraints —
 all carry their index sets explicitly as frame columns, and the
 operations on them (`*`, `+`, `Sum`, `Where`, `Lag`) are just

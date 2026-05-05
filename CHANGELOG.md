@@ -20,9 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Repo / docs URLs moved from `jkiviluo/polar-high-opt` to
-  `nodal-tools/polar-high-opt`; documentation site is hosted at
-  `https://nodal-tools.fi/polar-high-opt/`.
+- Repo / docs URLs moved from `jkiviluo/polar-high` to
+  `nodal-tools/polar-high`; documentation site is hosted at
+  `https://nodal-tools.fi/polar-high/`.
 - One-time `ruff format` reflow across the source tree.
 
 ### Fixed

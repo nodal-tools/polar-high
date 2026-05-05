@@ -1,6 +1,6 @@
 # Duals and bases
 
-polar-high-opt exposes the full HiGHS post-solve surface, not just
+polar-high exposes the full HiGHS post-solve surface, not just
 the primal solution.
 
 ## Constraint duals

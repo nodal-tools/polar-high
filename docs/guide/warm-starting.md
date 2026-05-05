@@ -8,7 +8,7 @@ without rebuilding the LP. `WarmProblem` does this on top of
 ## Lifecycle
 
 ```python
-from polar_high_opt import Problem, WarmProblem
+from polar_high import Problem, WarmProblem
 
 p = Problem()
 # ... add_var / add_cstr / set_objective as usual ...

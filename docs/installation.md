@@ -3,14 +3,14 @@
 ## From PyPI
 
 ```bash
-pip install polar-high-opt
+pip install polar-high
 ```
 
 ## From source
 
 ```bash
-git clone https://github.com/nodal-tools/polar-high-opt.git
-cd polar-high-opt
+git clone https://github.com/nodal-tools/polar-high.git
+cd polar-high
 pip install -e .
 ```
 
