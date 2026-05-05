@@ -9,7 +9,7 @@ pip install polar-high-opt
 ## From source
 
 ```bash
-git clone https://github.com/jkiviluo/polar-high-opt.git
+git clone https://github.com/nodal-tools/polar-high-opt.git
 cd polar-high-opt
 pip install -e .
 ```

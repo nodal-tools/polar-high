@@ -34,6 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+lint = ["ruff>=0.6"]
 docs = [
     "mkdocs-material",
     "mkdocstrings[python]",
@@ -42,10 +43,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jkiviluo/polar-high-opt"
-Documentation = "https://jkiviluo.github.io/polar-high-opt/"
-Issues = "https://github.com/jkiviluo/polar-high-opt/issues"
-Changelog = "https://github.com/jkiviluo/polar-high-opt/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/nodal-tools/polar-high-opt"
+Documentation = "https://nodal-tools.github.io/polar-high-opt/"
+Issues = "https://github.com/nodal-tools/polar-high-opt/issues"
+Changelog = "https://github.com/nodal-tools/polar-high-opt/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -56,3 +57,29 @@ pythonpath = ["tests/fixtures"]
 markers = [
     "smoke: fast end-to-end smoke tests",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["_archive"]
+
+[tool.ruff.lint]
+# E, F, W = pycodestyle errors/warnings + pyflakes
+# I       = isort (import ordering)
+# UP      = pyupgrade (modernize syntax for the target Python)
+# B       = flake8-bugbear (common pitfalls)
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # line length — handled by the formatter, not the linter
+    "E701",  # one-line `if/def: stmt` — intentional compact style here
+    "E702",  # semicolon-joined statements — intentional compact style here
+    "E741",  # ambiguous variable names (l, O, I) — common in math contexts
+    "B008",  # function call in default argument — common pattern with pl.DataFrame()
+    "B905",  # `zip()` without `strict=` — revisit when call sites are audited
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Benchmarks have throwaway locals and ad-hoc patterns
+"tests/_bench_*.py" = ["F841", "B007"]
+

@@ -19,7 +19,7 @@ kernel.
 ## Reporting issues
 
 Issue tracker:
-[github.com/jkiviluo/polar-high-opt/issues](https://github.com/jkiviluo/polar-high-opt/issues).
+[github.com/nodal-tools/polar-high-opt/issues](https://github.com/nodal-tools/polar-high-opt/issues).
 
 Please include:
 

@@ -16,6 +16,7 @@ Verify equivalence "from a couple of directions":
 These cover the "is my warm equivalent to my cold" question without
 re-running the entire flextool test fleet.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -24,33 +25,34 @@ import pytest
 
 import polar_high_opt as fp
 
-
 # ----------------------------------------------------------------------------
 # Helpers — same shape as tests/_bench_warm_vs_cold.py but inlined here so
 # the test is self-contained.
 
-def _build_synthetic_problem(n_t: int, cost: np.ndarray,
-                             demand: np.ndarray) -> fp.Problem:
+
+def _build_synthetic_problem(n_t: int, cost: np.ndarray, demand: np.ndarray) -> fp.Problem:
     p = fp.Problem()
     t_idx = pl.DataFrame({"t": np.arange(n_t, dtype=np.int64)})
     v_flow = p.add_var("v_flow", "t", t_idx, lower=0.0, upper=1.0e6)
     v_state = p.add_var("v_state", "t", t_idx, lower=0.0, upper=1.0e6)
 
-    lag = pl.DataFrame({"t": np.arange(1, n_t, dtype=np.int64),
-                        "t_prev": np.arange(0, n_t - 1, dtype=np.int64)})
+    lag = pl.DataFrame(
+        {"t": np.arange(1, n_t, dtype=np.int64), "t_prev": np.arange(0, n_t - 1, dtype=np.int64)}
+    )
     s_lag = fp.Lag(v_state, lag, time_dim="t", lag_col="t_prev")
 
-    demand_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_t, dtype=np.int64),
-                                              "value": demand}))
+    demand_p = fp.Param(
+        ("t",), pl.DataFrame({"t": np.arange(n_t, dtype=np.int64), "value": demand})
+    )
     p.add_cstr(
-        "balance", over=t_idx, sense="==",
-        lhs_terms={"v_flow": v_flow, "s_lag": s_lag,
-                   "minus_s": -v_state.to_expr()},
+        "balance",
+        over=t_idx,
+        sense="==",
+        lhs_terms={"v_flow": v_flow, "s_lag": s_lag, "minus_s": -v_state.to_expr()},
         rhs_terms={"demand": demand_p},
     )
 
-    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_t, dtype=np.int64),
-                                            "value": cost}))
+    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_t, dtype=np.int64), "value": cost}))
     p.set_objective(cost_p * v_flow, sense="min")
     return p
 
@@ -64,6 +66,7 @@ def _make_chain(n_rolls: int, n_t: int, seed: int = 0):
 
 # ----------------------------------------------------------------------------
 # Equivalence tests — 1e-9 obj match between cold and warm.
+
 
 @pytest.mark.parametrize("n_t,n_rolls", [(24, 8), (168, 4)])
 def test_warm_equivalence_rolling_horizon(n_t: int, n_rolls: int) -> None:
@@ -158,12 +161,7 @@ def test_warm_update_rhs_with_scalar_and_array() -> None:
     sol_a = wp.solve()
     assert sol_a.optimal
 
-    # And do the same via Param; same answer expected.
-    new_demand_p = fp.Param(
-        ("t",),
-        pl.DataFrame({"t": np.arange(12, dtype=np.int64),
-                      "value": new_demand}),
-    )
+    # And do the same via a cold rebuild; same answer expected.
     p2 = _build_synthetic_problem(12, costs[0], new_demand)
     wp2 = fp.WarmProblem(p2)
     sol_b = wp2.solve()
@@ -183,11 +181,10 @@ def test_warm_problem_does_not_affect_cold_problem() -> None:
 
     wp_other = fp.WarmProblem(_build_synthetic_problem(24, costs[1], demands[1]))
     wp_other.solve()
-    wp_other.update_rhs("balance",
-                        fp.Param(("t",),
-                                 pl.DataFrame({
-                                     "t": np.arange(24, dtype=np.int64),
-                                     "value": demands[0]})))
+    wp_other.update_rhs(
+        "balance",
+        fp.Param(("t",), pl.DataFrame({"t": np.arange(24, dtype=np.int64), "value": demands[0]})),
+    )
     wp_other.solve()
 
     # Re-solve the cold one — should get the same obj as before.

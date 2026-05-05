@@ -1,8 +1,9 @@
 """Pure-engine validation: 5-constraint synthetic LP, hand-verifiable."""
 
-from polar_high_opt import Problem
 from toy_data import make_toy_data
 from toy_model import build_dispatch
+
+from polar_high_opt import Problem
 
 
 def test_toy_dispatch_obj():

@@ -1,0 +1,45 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[docs]"
+
+      - name: Configure git for mike
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+      # On a tag push (v1.2.3): publish under that version and update "latest" alias.
+      - name: Deploy versioned docs (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mike deploy --push --update-aliases "${VERSION}" latest
+          mike set-default --push latest
+
+      # On a push to main: publish under the "dev" alias so users can preview.
+      - name: Deploy dev docs (on main)
+        if: github.ref == 'refs/heads/main'
+        run: mike deploy --push --update-aliases dev

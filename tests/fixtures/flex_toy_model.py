@@ -26,10 +26,10 @@ def build_flex_toy(p, d):
         "v_flow",
         ("p", "source", "sink", "t"),
         d.pss_t,
-        lower = 0.0,
+        lower=0.0,
     )
     # state slacks per nodeBalance node and timestep
-    vq_state_up   = p.add_var("vq_state_up",   ("n", "t"), d.nodeBalance_t, lower=0.0)
+    vq_state_up = p.add_var("vq_state_up", ("n", "t"), d.nodeBalance_t, lower=0.0)
     vq_state_down = p.add_var("vq_state_down", ("n", "t"), d.nodeBalance_t, lower=0.0)
 
     # ---------------------------------------------------------------------
@@ -37,10 +37,10 @@ def build_flex_toy(p, d):
     #     v_flow[p, source, sink, t] * unitsize[p]   <=   cap[p]
     p.add_cstr(
         "maxToSink",
-        over      = d.pss_t,
-        sense     = "<=",
-        lhs_terms = {"flow": v_flow * d.unitsize},
-        rhs_terms = {"capacity": d.cap},
+        over=d.pss_t,
+        sense="<=",
+        lhs_terms={"flow": v_flow * d.unitsize},
+        rhs_terms={"capacity": d.cap},
     )
 
     # ---------------------------------------------------------------------
@@ -48,12 +48,12 @@ def build_flex_toy(p, d):
     #     v_flow[WIND, WIND, elec, t] * unitsize[WIND]   <=   wind_avail[t]
     p.add_cstr(
         "profile_flow_upper_wind",
-        over      = d.wind_pss_t,
-        sense     = "<=",
-        lhs_terms = {
+        over=d.wind_pss_t,
+        sense="<=",
+        lhs_terms={
             "flow": Where(v_flow * d.unitsize, d.process_source_sink_noEff),
         },
-        rhs_terms = {"wind_avail": d.wind_avail},
+        rhs_terms={"wind_avail": d.wind_avail},
     )
 
     # ---------------------------------------------------------------------
@@ -70,15 +70,14 @@ def build_flex_toy(p, d):
     # appear as additional lhs_terms, with efficiency on the eff partition.
     p.add_cstr(
         "nodeBalance_eq",
-        over      = d.nodeBalance_t,
-        sense     = "==",
-        lhs_terms = {
-            "sink_flow":  Sum(Where(v_flow * d.unitsize, d.flow_to_n),
-                              over=("p", "source", "sink")),
-            "slack_up":    vq_state_up,
+        over=d.nodeBalance_t,
+        sense="==",
+        lhs_terms={
+            "sink_flow": Sum(Where(v_flow * d.unitsize, d.flow_to_n), over=("p", "source", "sink")),
+            "slack_up": vq_state_up,
             "slack_down": -vq_state_down,
         },
-        rhs_terms = {"demand": d.demand},
+        rhs_terms={"demand": d.demand},
     )
 
     # -- objective ---------------------------------------------------------
@@ -87,12 +86,10 @@ def build_flex_toy(p, d):
     # Cost = price[c, t] · draw · step_duration[t], summed.
     commodity_cost = Sum(
         Where(v_flow * d.unitsize * d.slope, d.flow_from_commodity_eff)
-        * d.gas_price * d.step_duration,
+        * d.gas_price
+        * d.step_duration,
     )
 
-    slack_cost = (
-        Sum(vq_state_up   * d.slack_pen)
-      + Sum(vq_state_down * d.slack_pen)
-    )
+    slack_cost = Sum(vq_state_up * d.slack_pen) + Sum(vq_state_down * d.slack_pen)
 
     p.set_objective(commodity_cost + slack_cost, sense="min")

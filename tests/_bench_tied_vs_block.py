@@ -40,15 +40,15 @@ import sys
 import time
 from dataclasses import dataclass, field
 
+import highspy
 import numpy as np
 import polars as pl
 
-import highspy
 import polar_high_opt as fp
-
 
 # ----------------------------------------------------------------------------
 # helpers
+
 
 def _peak_rss_mb() -> float:
     """Return peak RSS in MB. Linux ru_maxrss is in KB."""
@@ -88,10 +88,16 @@ def _make_data(n_fine: int, ratio: int, seed: int = 0):
 # ----------------------------------------------------------------------------
 # Formulation A — tied
 
-def build_tied(n_fine: int, ratio: int, cost: np.ndarray,
-                      demand: np.ndarray, block_of_t: np.ndarray,
-                      first_in_block: np.ndarray, tie_state: bool = False
-                      ) -> fp.Problem:
+
+def build_tied(
+    n_fine: int,
+    ratio: int,
+    cost: np.ndarray,
+    demand: np.ndarray,
+    block_of_t: np.ndarray,
+    first_in_block: np.ndarray,
+    tie_state: bool = False,
+) -> fp.Problem:
     """Formulation A — tied: x[t] (and optionally s[t]) tied across the block.
 
     Per the user spec, the conceptual model ties both ``v_flow`` and
@@ -118,11 +124,16 @@ def build_tied(n_fine: int, ratio: int, cost: np.ndarray,
     s = p.add_var("s", "t", t_idx, lower=0.0, upper=1.0e6)
 
     # demand balance: x[t] + s[t-1] - s[t] == demand[t]; for t=0, s[-1]=0
-    lag = pl.DataFrame({"t": np.arange(1, n_fine, dtype=np.int64),
-                        "t_prev": np.arange(0, n_fine - 1, dtype=np.int64)})
+    lag = pl.DataFrame(
+        {
+            "t": np.arange(1, n_fine, dtype=np.int64),
+            "t_prev": np.arange(0, n_fine - 1, dtype=np.int64),
+        }
+    )
     s_lag = fp.Lag(s, lag, time_dim="t", lag_col="t_prev")
-    demand_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64),
-                                              "value": demand}))
+    demand_p = fp.Param(
+        ("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64), "value": demand})
+    )
     p.add_cstr(
         "balance",
         over=t_idx,
@@ -139,35 +150,48 @@ def build_tied(n_fine: int, ratio: int, cost: np.ndarray,
         tie_idx = pl.DataFrame({"t": interior_t, "t_anchor": interior_first})
         from polar_high_opt.engine import Expr, _Term
 
-        x_row = (x.frame
-                 .join(tie_idx, on="t", how="inner")
-                 .with_columns(coef=pl.lit(1.0))
-                 .select("t", "t_anchor", "col_id", "coef"))
-        x_anchor = (x.frame.rename({"t": "t_anchor"})
-                    .join(tie_idx, on="t_anchor", how="inner")
-                    .with_columns(coef=pl.lit(-1.0))
-                    .select("t", "t_anchor", "col_id", "coef"))
-        tie_expr_x = Expr([_Term(x_row, ("t", "t_anchor")),
-                           _Term(x_anchor, ("t", "t_anchor"))])
-        p.add_cstr("tie_x", over=tie_idx, sense="==",
-                   lhs_terms={"diff": tie_expr_x}, rhs_terms={"zero": 0.0})
+        x_row = (
+            x.frame.join(tie_idx, on="t", how="inner")
+            .with_columns(coef=pl.lit(1.0))
+            .select("t", "t_anchor", "col_id", "coef")
+        )
+        x_anchor = (
+            x.frame.rename({"t": "t_anchor"})
+            .join(tie_idx, on="t_anchor", how="inner")
+            .with_columns(coef=pl.lit(-1.0))
+            .select("t", "t_anchor", "col_id", "coef")
+        )
+        tie_expr_x = Expr([_Term(x_row, ("t", "t_anchor")), _Term(x_anchor, ("t", "t_anchor"))])
+        p.add_cstr(
+            "tie_x",
+            over=tie_idx,
+            sense="==",
+            lhs_terms={"diff": tie_expr_x},
+            rhs_terms={"zero": 0.0},
+        )
 
         if tie_state:
-            s_row = (s.frame
-                     .join(tie_idx, on="t", how="inner")
-                     .with_columns(coef=pl.lit(1.0))
-                     .select("t", "t_anchor", "col_id", "coef"))
-            s_anchor = (s.frame.rename({"t": "t_anchor"})
-                        .join(tie_idx, on="t_anchor", how="inner")
-                        .with_columns(coef=pl.lit(-1.0))
-                        .select("t", "t_anchor", "col_id", "coef"))
-            tie_expr_s = Expr([_Term(s_row, ("t", "t_anchor")),
-                               _Term(s_anchor, ("t", "t_anchor"))])
-            p.add_cstr("tie_s", over=tie_idx, sense="==",
-                       lhs_terms={"diff": tie_expr_s}, rhs_terms={"zero": 0.0})
+            s_row = (
+                s.frame.join(tie_idx, on="t", how="inner")
+                .with_columns(coef=pl.lit(1.0))
+                .select("t", "t_anchor", "col_id", "coef")
+            )
+            s_anchor = (
+                s.frame.rename({"t": "t_anchor"})
+                .join(tie_idx, on="t_anchor", how="inner")
+                .with_columns(coef=pl.lit(-1.0))
+                .select("t", "t_anchor", "col_id", "coef")
+            )
+            tie_expr_s = Expr([_Term(s_row, ("t", "t_anchor")), _Term(s_anchor, ("t", "t_anchor"))])
+            p.add_cstr(
+                "tie_s",
+                over=tie_idx,
+                sense="==",
+                lhs_terms={"diff": tie_expr_s},
+                rhs_terms={"zero": 0.0},
+            )
 
-    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64),
-                                            "value": cost}))
+    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64), "value": cost}))
     p.set_objective(cost_p * x, sense="min")
     return p
 
@@ -175,8 +199,10 @@ def build_tied(n_fine: int, ratio: int, cost: np.ndarray,
 # ----------------------------------------------------------------------------
 # Formulation B — block
 
-def build_block(n_fine: int, ratio: int, cost: np.ndarray,
-                       demand: np.ndarray, block_of_t: np.ndarray) -> fp.Problem:
+
+def build_block(
+    n_fine: int, ratio: int, cost: np.ndarray, demand: np.ndarray, block_of_t: np.ndarray
+) -> fp.Problem:
     """Formulation B — block: one variable per coarse block.
 
     Balance summed across the block:
@@ -193,30 +219,38 @@ def build_block(n_fine: int, ratio: int, cost: np.ndarray,
     s = p.add_var("s_block", "b", b_idx, lower=0.0, upper=1.0e6)
 
     # demand balance summed over the block
-    demand_per_block = (pl.DataFrame({"b": block_of_t, "demand": demand})
-                        .group_by("b").agg(pl.col("demand").sum())
-                        .rename({"demand": "value"})
-                        .sort("b"))
+    demand_per_block = (
+        pl.DataFrame({"b": block_of_t, "demand": demand})
+        .group_by("b")
+        .agg(pl.col("demand").sum())
+        .rename({"demand": "value"})
+        .sort("b")
+    )
     rhs_p = fp.Param(("b",), demand_per_block)
 
-    lag = pl.DataFrame({"b": np.arange(1, n_blocks, dtype=np.int64),
-                        "b_prev": np.arange(0, n_blocks - 1, dtype=np.int64)})
+    lag = pl.DataFrame(
+        {
+            "b": np.arange(1, n_blocks, dtype=np.int64),
+            "b_prev": np.arange(0, n_blocks - 1, dtype=np.int64),
+        }
+    )
     s_lag = fp.Lag(s, lag, time_dim="b", lag_col="b_prev")
 
     p.add_cstr(
         "balance",
         over=b_idx,
         sense="==",
-        lhs_terms={"x": float(ratio) * x.to_expr(),
-                   "s_lag": s_lag,
-                   "minus_s": -s.to_expr()},
+        lhs_terms={"x": float(ratio) * x.to_expr(), "s_lag": s_lag, "minus_s": -s.to_expr()},
         rhs_terms={"demand": rhs_p},
     )
 
-    cost_per_block = (pl.DataFrame({"b": block_of_t, "c": cost})
-                      .group_by("b").agg(pl.col("c").sum())
-                      .rename({"c": "value"})
-                      .sort("b"))
+    cost_per_block = (
+        pl.DataFrame({"b": block_of_t, "c": cost})
+        .group_by("b")
+        .agg(pl.col("c").sum())
+        .rename({"c": "value"})
+        .sort("b")
+    )
     cost_p = fp.Param(("b",), cost_per_block)
     p.set_objective(cost_p * x, sense="min")
     return p
@@ -224,6 +258,7 @@ def build_block(n_fine: int, ratio: int, cost: np.ndarray,
 
 # ----------------------------------------------------------------------------
 # Solver runner: replicate Problem.solve to capture LP shape
+
 
 def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
     """Replicate Problem.solve internals so we can split build_time and solve_time
@@ -245,8 +280,7 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
         col_ub[ids] = float(v.upper)
 
     for t in problem._obj_terms:
-        for cid, c in zip(t.frame["col_id"].to_numpy(),
-                          t.frame["coef"].to_numpy()):
+        for cid, c in zip(t.frame["col_id"].to_numpy(), t.frame["coef"].to_numpy()):
             col_obj[int(cid)] += float(c)
 
     rows_lb: list[float] = []
@@ -278,25 +312,28 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
             on = list(rhs.dims)
             if on:
                 j = row_index.join(rhs.frame, on=on, how="left")
-                rhs_vec = (j.sort("_rid")["value"].fill_null(0.0)
-                           .to_numpy().astype(np.float64))
+                rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
             else:
                 rhs_vec[:] = float(rhs.frame["value"][0])
         elif isinstance(rhs, (fp.Var, fp.Expr)):
             rhs_expr = rhs.to_expr() if isinstance(rhs, fp.Var) else rhs
-            neg = [_Term(t.frame.with_columns(coef=-pl.col("coef")), t.dims)
-                   for t in rhs_expr.terms]
+            neg = [
+                _Term(t.frame.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
+            ]
             expr = Expr(expr.terms + neg)
         else:
             raise TypeError("bad rhs")
 
         for r in range(row_count):
             if sense == "<=":
-                rows_lb.append(-np.inf); rows_ub.append(rhs_vec[r])
+                rows_lb.append(-np.inf)
+                rows_ub.append(rhs_vec[r])
             elif sense == ">=":
-                rows_lb.append(rhs_vec[r]); rows_ub.append(np.inf)
+                rows_lb.append(rhs_vec[r])
+                rows_ub.append(np.inf)
             else:
-                rows_lb.append(rhs_vec[r]); rows_ub.append(rhs_vec[r])
+                rows_lb.append(rhs_vec[r])
+                rows_ub.append(rhs_vec[r])
 
         for term in expr.terms:
             f = term.frame
@@ -311,8 +348,7 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
             else:
                 cids = f["col_id"].to_numpy().astype(np.int64)
                 vals = f["coef"].to_numpy().astype(np.float64)
-                rs = np.repeat(np.arange(base_row, base_row + row_count,
-                                         dtype=np.int64), len(cids))
+                rs = np.repeat(np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids))
                 triple_rows.append(rs)
                 triple_cols.append(np.tile(cids, row_count))
                 triple_vals.append(np.tile(vals, row_count))
@@ -321,8 +357,9 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
         tr = np.concatenate(triple_rows)
         tc = np.concatenate(triple_cols)
         tv = np.concatenate(triple_vals)
-        dedup = (pl.DataFrame({"r": tr, "c": tc, "v": tv})
-                 .group_by(["r", "c"]).agg(pl.col("v").sum()))
+        dedup = (
+            pl.DataFrame({"r": tr, "c": tc, "v": tv}).group_by(["r", "c"]).agg(pl.col("v").sum())
+        )
         tr = dedup["r"].to_numpy().astype(np.int64)
         tc = dedup["c"].to_numpy().astype(np.int64)
         tv = dedup["v"].to_numpy().astype(np.float64)
@@ -336,11 +373,9 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
 
     inf = highspy.kHighsInf
     col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-    col_ub_h = np.where(col_ub ==  np.inf,  inf, col_ub).astype(np.float64)
-    row_lb_h = np.array([-inf if v == -np.inf else float(v) for v in rows_lb],
-                         dtype=np.float64)
-    row_ub_h = np.array([ inf if v ==  np.inf else float(v) for v in rows_ub],
-                         dtype=np.float64)
+    col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
+    row_lb_h = np.array([-inf if v == -np.inf else float(v) for v in rows_lb], dtype=np.float64)
+    row_ub_h = np.array([inf if v == np.inf else float(v) for v in rows_ub], dtype=np.float64)
 
     if tr.size:
         order = np.lexsort((tr, tc))
@@ -358,9 +393,9 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
     starts = np.cumsum(starts).astype(np.int32)
 
     lp = highspy.HighsLp()
-    lp.num_col_   = int(n_cols)
-    lp.num_row_   = int(n_rows)
-    lp.col_cost_  = col_obj.astype(np.float64)
+    lp.num_col_ = int(n_cols)
+    lp.num_row_ = int(n_rows)
+    lp.col_cost_ = col_obj.astype(np.float64)
     lp.col_lower_ = col_lb_h
     lp.col_upper_ = col_ub_h
     lp.row_lower_ = row_lb_h
@@ -425,6 +460,7 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
 # ----------------------------------------------------------------------------
 # Top-level run
 
+
 @dataclass
 class RunResult:
     ratio: int
@@ -442,14 +478,14 @@ class RunResult:
     status_optimal: bool = True
 
 
-def _bench_one(formulation: str, ratio: int, n_fine: int,
-               presolve: bool, repeats: int = 3) -> RunResult:
+def _bench_one(
+    formulation: str, ratio: int, n_fine: int, presolve: bool, repeats: int = 3
+) -> RunResult:
     cost, demand, n_blocks, block_of_t, first_in_block = _make_data(n_fine, ratio)
     # _make_data may truncate n_fine to a multiple of ratio
     n_fine_used = n_blocks * ratio
 
-    res = RunResult(ratio=ratio, formulation=formulation,
-                    presolve=presolve, n_fine=n_fine_used)
+    res = RunResult(ratio=ratio, formulation=formulation, presolve=presolve, n_fine=n_fine_used)
 
     for _ in range(repeats):
         gc.collect()
@@ -457,8 +493,7 @@ def _bench_one(formulation: str, ratio: int, n_fine: int,
 
         if formulation == "tied":
             t0 = time.perf_counter()
-            problem = build_tied(n_fine_used, ratio, cost, demand,
-                                        block_of_t, first_in_block)
+            problem = build_tied(n_fine_used, ratio, cost, demand, block_of_t, first_in_block)
             t_build_problem = time.perf_counter() - t0
         elif formulation == "block":
             t0 = time.perf_counter()
@@ -490,22 +525,29 @@ def _bench_one(formulation: str, ratio: int, n_fine: int,
     return res
 
 
-def build_baseline(n_fine: int, cost: np.ndarray,
-                          demand: np.ndarray) -> fp.Problem:
+def build_baseline(n_fine: int, cost: np.ndarray, demand: np.ndarray) -> fp.Problem:
     p = fp.Problem()
     t_idx = pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64)})
     x = p.add_var("x", "t", t_idx, lower=0.0, upper=float("inf"))
     s = p.add_var("s", "t", t_idx, lower=0.0, upper=1.0e6)
-    lag = pl.DataFrame({"t": np.arange(1, n_fine, dtype=np.int64),
-                        "t_prev": np.arange(0, n_fine - 1, dtype=np.int64)})
+    lag = pl.DataFrame(
+        {
+            "t": np.arange(1, n_fine, dtype=np.int64),
+            "t_prev": np.arange(0, n_fine - 1, dtype=np.int64),
+        }
+    )
     s_lag = fp.Lag(s, lag, time_dim="t", lag_col="t_prev")
-    demand_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64),
-                                              "value": demand}))
-    p.add_cstr("balance", over=t_idx, sense="==",
-               lhs_terms={"x": x, "s_lag": s_lag, "minus_s": -s.to_expr()},
-               rhs_terms={"demand": demand_p})
-    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64),
-                                            "value": cost}))
+    demand_p = fp.Param(
+        ("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64), "value": demand})
+    )
+    p.add_cstr(
+        "balance",
+        over=t_idx,
+        sense="==",
+        lhs_terms={"x": x, "s_lag": s_lag, "minus_s": -s.to_expr()},
+        rhs_terms={"demand": demand_p},
+    )
+    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64), "value": cost}))
     p.set_objective(cost_p * x, sense="min")
     return p
 
@@ -522,13 +564,17 @@ def main(n_fine: int = 8760, repeats: int = 3) -> list[RunResult]:
     ratios = [1, 24, 168, 712]
     results: list[RunResult] = []
 
-    print(f"# Benchmark (n_fine = {n_fine}, repeats = {repeats}, "
-          f"highspy = {highspy.Highs().version()})")
+    print(
+        f"# Benchmark (n_fine = {n_fine}, repeats = {repeats}, "
+        f"highspy = {highspy.Highs().version()})"
+    )
     print()
-    print(f"{'ratio':>5} {'form':>9} {'presolve':>9} {'cols':>8} {'rows':>8} "
-          f"{'nnz':>9} {'cols_pre':>9} "
-          f"{'build_med':>10} {'solve_med':>10} {'rss_max_MB':>10} "
-          f"{'obj':>14}")
+    print(
+        f"{'ratio':>5} {'form':>9} {'presolve':>9} {'cols':>8} {'rows':>8} "
+        f"{'nnz':>9} {'cols_pre':>9} "
+        f"{'build_med':>10} {'solve_med':>10} {'rss_max_MB':>10} "
+        f"{'obj':>14}"
+    )
 
     for ratio in ratios:
         for presolve in [True, False]:
@@ -543,12 +589,14 @@ def main(n_fine: int = 8760, repeats: int = 3) -> list[RunResult]:
                 bt = _summarise(r.build_times)
                 st = _summarise(r.solve_times)
                 rss = max(r.peak_rss_mb) if r.peak_rss_mb else 0.0
-                print(f"{ratio:>5d} {form:>9} {str(presolve):>9} "
-                      f"{r.n_cols:>8d} {r.n_rows:>8d} {r.n_nnz:>9d} "
-                      f"{r.n_cols_presolved:>9d} "
-                      f"{bt['median']:>10.4f} {st['median']:>10.4f} "
-                      f"{rss:>10.1f} "
-                      f"{r.obj:>14.4f}")
+                print(
+                    f"{ratio:>5d} {form:>9} {str(presolve):>9} "
+                    f"{r.n_cols:>8d} {r.n_rows:>8d} {r.n_nnz:>9d} "
+                    f"{r.n_cols_presolved:>9d} "
+                    f"{bt['median']:>10.4f} {st['median']:>10.4f} "
+                    f"{rss:>10.1f} "
+                    f"{r.obj:>14.4f}"
+                )
     return results
 
 

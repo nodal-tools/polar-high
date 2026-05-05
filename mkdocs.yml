@@ -1,8 +1,8 @@
 site_name: polar-high-opt
 site_description: Python library for building indexed linear and mixed-integer programs in polars.
-site_url: https://jkiviluo.github.io/polar-high-opt/
-repo_url: https://github.com/jkiviluo/polar-high-opt
-repo_name: jkiviluo/polar-high-opt
+site_url: https://nodal-tools.github.io/polar-high-opt/
+repo_url: https://github.com/nodal-tools/polar-high-opt
+repo_name: nodal-tools/polar-high-opt
 edit_uri: edit/main/docs/
 
 theme:

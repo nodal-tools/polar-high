@@ -23,20 +23,18 @@ Algorithm:
 Knows nothing about half-flows or regions — that lives in the
 flextool-side wrapper.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 import numpy as np
-import polars as pl
 
 from polar_high_opt.engine import Problem, WarmProblem
 
-
-__all__ = ["CouplingEntry", "CouplingSpec",
-           "LagrangianProblem", "LagrangianSolution"]
+__all__ = ["CouplingEntry", "CouplingSpec", "LagrangianProblem", "LagrangianSolution"]
 
 
 @dataclass(frozen=True)
@@ -45,6 +43,7 @@ class CouplingEntry:
     one tuple per coupling cell; entries in one CouplingSpec must
     share length (entry-i tuple-k pairs with entry-j tuple-k under
     the same λ_k)."""
+
     subproblem_idx: int
     var_name: str
     dim_tuples: list[tuple]
@@ -56,6 +55,7 @@ class CouplingSpec:
     """A linear coupling family across subproblems: per cell ``k``,
     ``Σ_e coef_e · x[entries[e].cols[k]]  =  rhs[k]``.  ``rhs`` is a
     scalar or an array sized to the cell count; default 0."""
+
     entries: list[CouplingEntry]
     rhs: float | np.ndarray = 0.0
     key: object | None = None
@@ -72,6 +72,7 @@ class LagrangianSolution:
     entry has ``iter == -1`` and carries report_kind / dual / primal
     summary fields.
     """
+
     converged: bool
     iterations: int
     total_objective: float
@@ -88,10 +89,10 @@ class LagrangianSolution:
 class _ResolvedEntry:
     subproblem_idx: int
     var_name: str
-    cols: np.ndarray         # int64
-    cols_i32: np.ndarray     # int32 view for HiGHS
+    cols: np.ndarray  # int64
+    cols_i32: np.ndarray  # int32 view for HiGHS
     coef: float
-    base_costs: np.ndarray   # float64, length n_cells
+    base_costs: np.ndarray  # float64, length n_cells
 
 
 @dataclass
@@ -110,15 +111,14 @@ class LagrangianProblem:
     ``LagrangianProblem(subproblems, couplings).solve(...)``.
     """
 
-    def __init__(self, subproblems: Sequence[Problem],
-                 couplings: Sequence[CouplingSpec]) -> None:
+    def __init__(self, subproblems: Sequence[Problem], couplings: Sequence[CouplingSpec]) -> None:
         if len(subproblems) < 1:
             raise ValueError("LagrangianProblem: need at least one subproblem")
         for i, p in enumerate(subproblems):
             if not isinstance(p, Problem):
                 raise TypeError(
-                    f"LagrangianProblem: subproblem {i} is "
-                    f"{type(p).__name__}, expected Problem")
+                    f"LagrangianProblem: subproblem {i} is {type(p).__name__}, expected Problem"
+                )
         self._subproblems: list[Problem] = list(subproblems)
         self._couplings: list[CouplingSpec] = list(couplings)
         self._warm: list[WarmProblem] = [WarmProblem(p) for p in self._subproblems]
@@ -136,10 +136,16 @@ class LagrangianProblem:
     def warm_problems(self) -> list[WarmProblem]:
         return list(self._warm)
 
-    def solve(self, *, max_iters: int = 100, tol: float = 1.0,
-              step: float = 1.0, initial_lambda: float = 0.0,
-              min_iters: int = 1, primal_tail: int | None = None,
-              ) -> LagrangianSolution:
+    def solve(
+        self,
+        *,
+        max_iters: int = 100,
+        tol: float = 1.0,
+        step: float = 1.0,
+        initial_lambda: float = 0.0,
+        min_iters: int = 1,
+        primal_tail: int | None = None,
+    ) -> LagrangianSolution:
         """Run the dual-subgradient loop.
 
         ``step / √k`` is the diminishing step on iter ``k``.
@@ -154,8 +160,8 @@ class LagrangianProblem:
             sol = wp.solve()
             if not sol.optimal:
                 raise RuntimeError(
-                    f"LagrangianProblem: initial solve for subproblem "
-                    f"{i} did not reach optimality")
+                    f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
+                )
             first_obj.append(sol.obj)
 
         self._resolved = self._resolve_couplings(initial_lambda)
@@ -168,15 +174,17 @@ class LagrangianProblem:
             for ent in rc.entries:
                 lp = self._warm[ent.subproblem_idx]._h.getLp()
                 col_cost = np.asarray(lp.col_cost_, dtype=np.float64)
-                ent.base_costs = col_cost[ent.cols].astype(np.float64,
-                                                            copy=True)
+                ent.base_costs = col_cost[ent.cols].astype(np.float64, copy=True)
         if not self._resolved:
             return LagrangianSolution(
-                converged=True, iterations=0,
+                converged=True,
+                iterations=0,
                 total_objective=sum(first_obj),
                 report_kind="best_dual",
                 subproblem_objectives=list(first_obj),
-                iteration_log=[], final_lambdas=[], primal_recovery=[],
+                iteration_log=[],
+                final_lambdas=[],
+                primal_recovery=[],
                 best_dual_total=sum(first_obj),
                 recovered_total=sum(first_obj),
             )
@@ -189,8 +197,7 @@ class LagrangianProblem:
         last_obj = list(first_obj)
         # Per-coupling per-entry tail accumulators.
         sum_entry_vals: list[list[np.ndarray]] = [
-            [np.zeros(rc.n_cells) for _ in rc.entries]
-            for rc in self._resolved
+            [np.zeros(rc.n_cells) for _ in rc.entries] for rc in self._resolved
         ]
         tail_count = 0
 
@@ -204,7 +211,9 @@ class LagrangianProblem:
                 for ent in rc.entries:
                     new_cost = ent.base_costs + ent.coef * rc.lam
                     self._warm[ent.subproblem_idx]._h.changeColsCost(
-                        int(ent.cols_i32.size), ent.cols_i32, new_cost,
+                        int(ent.cols_i32.size),
+                        ent.cols_i32,
+                        new_cost,
                     )
 
             # Solve every subproblem.
@@ -214,8 +223,8 @@ class LagrangianProblem:
                 sol = wp.solve()
                 if not sol.optimal:
                     raise RuntimeError(
-                        f"LagrangianProblem iter {it}: subproblem {i} "
-                        f"did not reach optimality")
+                        f"LagrangianProblem iter {it}: subproblem {i} did not reach optimality"
+                    )
                 iter_obj[i] = sol.obj
                 primal_by_sp[i] = sol.col_value
 
@@ -236,11 +245,14 @@ class LagrangianProblem:
             if in_tail:
                 tail_count += 1
 
-            iteration_log.append({
-                "iter": it, "alpha_k": alpha_k,
-                "max_abs_residual": max_abs_res,
-                "total_obj": sum(iter_obj),
-            })
+            iteration_log.append(
+                {
+                    "iter": it,
+                    "alpha_k": alpha_k,
+                    "max_abs_residual": max_abs_res,
+                    "total_obj": sum(iter_obj),
+                }
+            )
 
             last_obj = iter_obj
             if max_abs_res < tol and it >= min_iters:
@@ -253,9 +265,7 @@ class LagrangianProblem:
         # Primal recovery: tail-average then fix-and-resolve.
         recovery_obj = list(last_obj)
         primal_recovery: list[np.ndarray] = []
-        best_dual_total = max(
-            (log["total_obj"] for log in iteration_log),
-            default=sum(first_obj))
+        best_dual_total = max((log["total_obj"] for log in iteration_log), default=sum(first_obj))
 
         if tail_count > 0:
             avg_entry_vals: list[list[np.ndarray]] = [
@@ -273,12 +283,13 @@ class LagrangianProblem:
             # to ½(avg_pos + avg_neg).  Otherwise fix each entry to its
             # own tail mean.
             for ic, rc in enumerate(self._resolved):
-                if (len(rc.entries) == 2
+                if (
+                    len(rc.entries) == 2
                     and rc.entries[0].coef == 1.0
                     and rc.entries[1].coef == -1.0
-                    and np.allclose(rc.rhs, 0.0)):
-                    consensus = 0.5 * (avg_entry_vals[ic][0]
-                                       + avg_entry_vals[ic][1])
+                    and np.allclose(rc.rhs, 0.0)
+                ):
+                    consensus = 0.5 * (avg_entry_vals[ic][0] + avg_entry_vals[ic][1])
                     fix_vals = [consensus, consensus]
                 else:
                     fix_vals = avg_entry_vals[ic]
@@ -287,11 +298,10 @@ class LagrangianProblem:
                 for ie, ent in enumerate(rc.entries):
                     wp = self._warm[ent.subproblem_idx]
                     wp._h.changeColsCost(
-                        int(ent.cols_i32.size), ent.cols_i32,
-                        ent.base_costs.astype(np.float64))
+                        int(ent.cols_i32.size), ent.cols_i32, ent.base_costs.astype(np.float64)
+                    )
                     fv = fix_vals[ie].astype(np.float64)
-                    wp._h.changeColsBounds(
-                        int(ent.cols_i32.size), ent.cols_i32, fv, fv)
+                    wp._h.changeColsBounds(int(ent.cols_i32.size), ent.cols_i32, fv, fv)
 
             for i, wp in enumerate(self._warm):
                 sol = wp.solve()
@@ -304,11 +314,14 @@ class LagrangianProblem:
         # For minimisation: best_dual is the tight lower bound.
         reported_total = best_dual_total
         report_kind = "best_dual"
-        iteration_log.append({
-            "iter": -1, "report_kind": report_kind,
-            "best_dual_total": best_dual_total,
-            "recovered_total": recovered_total,
-        })
+        iteration_log.append(
+            {
+                "iter": -1,
+                "report_kind": report_kind,
+                "best_dual_total": best_dual_total,
+                "recovered_total": recovered_total,
+            }
+        )
 
         return LagrangianSolution(
             converged=converged,
@@ -328,8 +341,7 @@ class LagrangianProblem:
         out: list[_ResolvedCoupling] = []
         for ic, spec in enumerate(self._couplings):
             if not spec.entries:
-                raise ValueError(
-                    f"CouplingSpec[{ic}]: must have at least one entry")
+                raise ValueError(f"CouplingSpec[{ic}]: must have at least one entry")
             n_cells = len(spec.entries[0].dim_tuples)
             entries: list[_ResolvedEntry] = []
             for ie, ent in enumerate(spec.entries):
@@ -337,38 +349,47 @@ class LagrangianProblem:
                     raise ValueError(
                         f"CouplingSpec[{ic}].entries[{ie}]: "
                         f"subproblem_idx={ent.subproblem_idx} out of range "
-                        f"(n_subproblems={n_sp})")
+                        f"(n_subproblems={n_sp})"
+                    )
                 wp = self._warm[ent.subproblem_idx]
                 if ent.var_name not in wp._p._vars:
                     raise ValueError(
                         f"CouplingSpec[{ic}].entries[{ie}]: variable "
                         f"{ent.var_name!r} not declared in subproblem "
-                        f"{ent.subproblem_idx}")
+                        f"{ent.subproblem_idx}"
+                    )
                 if len(ent.dim_tuples) != n_cells:
                     raise ValueError(
                         f"CouplingSpec[{ic}]: entry {ie} has "
                         f"{len(ent.dim_tuples)} dim_tuples; entry 0 has "
-                        f"{n_cells}.  Cell counts must match.")
+                        f"{n_cells}.  Cell counts must match."
+                    )
                 cols = wp._resolve_dim_tuples(ent.var_name, ent.dim_tuples)
-                entries.append(_ResolvedEntry(
-                    subproblem_idx=ent.subproblem_idx,
-                    var_name=ent.var_name,
-                    cols=cols,
-                    cols_i32=cols.astype(np.int32, copy=False),
-                    coef=float(ent.coef),
-                    base_costs=np.zeros(n_cells, dtype=np.float64),
-                ))
+                entries.append(
+                    _ResolvedEntry(
+                        subproblem_idx=ent.subproblem_idx,
+                        var_name=ent.var_name,
+                        cols=cols,
+                        cols_i32=cols.astype(np.int32, copy=False),
+                        coef=float(ent.coef),
+                        base_costs=np.zeros(n_cells, dtype=np.float64),
+                    )
+                )
             if isinstance(spec.rhs, np.ndarray):
                 if spec.rhs.size != n_cells:
                     raise ValueError(
-                        f"CouplingSpec[{ic}]: rhs size {spec.rhs.size} != "
-                        f"cell count {n_cells}")
+                        f"CouplingSpec[{ic}]: rhs size {spec.rhs.size} != cell count {n_cells}"
+                    )
                 rhs_vec = spec.rhs.astype(np.float64, copy=True)
             else:
                 rhs_vec = np.full(n_cells, float(spec.rhs), dtype=np.float64)
-            out.append(_ResolvedCoupling(
-                spec=spec, n_cells=n_cells, rhs=rhs_vec,
-                entries=entries,
-                lam=np.full(n_cells, float(initial_lambda), dtype=np.float64),
-            ))
+            out.append(
+                _ResolvedCoupling(
+                    spec=spec,
+                    n_cells=n_cells,
+                    rhs=rhs_vec,
+                    entries=entries,
+                    lam=np.full(n_cells, float(initial_lambda), dtype=np.float64),
+                )
+            )
         return out

@@ -66,9 +66,11 @@ Build locally: `pip install -e ".[docs]" && mkdocs serve`.
 
 polar-high-opt is the build engine behind the
 [FlexTool](https://github.com/irena-flextool/flextool) energy-system
-modelling toolkit. FlexTool's test fleet — comparing the new
+modelling toolkit (not in master branch yet).
+FlexTool's test fleet — comparing the new
 implementation against the earlier GNU MathProg one across many
-scenarios — is the primary correctness validation for the kernel.
+scenarios — has been used as validation for the kernel in addition
+to kernel's own testing.
 
 ## License
 

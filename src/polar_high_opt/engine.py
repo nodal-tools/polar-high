@@ -23,14 +23,13 @@ to ``over=`` at ``add_cstr`` time.
 
 from __future__ import annotations
 
-from typing import Iterable
+import highspy
 import numpy as np
 import polars as pl
-import highspy
-
 
 # ---------------------------------------------------------------------------
 # Core types
+
 
 class Param:
     """A parameter table.  ``frame`` carries columns ``*dims, value``.
@@ -56,10 +55,13 @@ class Param:
 
     __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources")
 
-    def __init__(self, dims: tuple[str, ...],
-                 frame: "pl.DataFrame | pl.LazyFrame",
-                 name: str | None = None,
-                 _sources: "list[tuple[Param, int]] | None" = None):
+    def __init__(
+        self,
+        dims: tuple[str, ...],
+        frame: pl.DataFrame | pl.LazyFrame,
+        name: str | None = None,
+        _sources: list[tuple[Param, int]] | None = None,
+    ):
         # accept either eager or lazy; store as lazy
         if isinstance(frame, pl.LazyFrame):
             lf = frame
@@ -78,7 +80,7 @@ class Param:
         self.name = name
         self._sources = _sources
 
-    def _own_sources(self) -> "list[tuple[Param, int]] | None":
+    def _own_sources(self) -> list[tuple[Param, int]] | None:
         """Return the list of ``(Param, direction)`` sources that this
         Param contributes when multiplied into a Var/Expr.  An anonymous
         composite uses ``_sources``; a named atomic Param contributes
@@ -98,7 +100,7 @@ class Param:
         return self._frame_cache
 
     @classmethod
-    def scalar(cls, value: float) -> "Param":
+    def scalar(cls, value: float) -> Param:
         return cls((), pl.DataFrame({"value": [float(value)]}))
 
     def __repr__(self) -> str:
@@ -106,21 +108,29 @@ class Param:
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
-            return Param(self.dims,
-                         self.lazy.with_columns(value=pl.col("value") * float(other)),
-                         _sources=self._sources_for_propagation())
+            return Param(
+                self.dims,
+                self.lazy.with_columns(value=pl.col("value") * float(other)),
+                _sources=self._sources_for_propagation(),
+            )
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
-            j = (self.lazy.join(other.lazy, on=shared, how="inner", suffix="__r")
-                 if shared else self.lazy.join(other.lazy, how="cross", suffix="__r"))
-            merged = _merge_param_sources(self._sources_for_propagation(),
-                                          other._sources_for_propagation(),
-                                          flip_other=False)
-            return Param(new_dims,
-                         j.with_columns(value=pl.col("value") * pl.col("value__r"))
-                          .select(*new_dims, "value"),
-                         _sources=merged)
+            j = (
+                self.lazy.join(other.lazy, on=shared, how="inner", suffix="__r")
+                if shared
+                else self.lazy.join(other.lazy, how="cross", suffix="__r")
+            )
+            merged = _merge_param_sources(
+                self._sources_for_propagation(), other._sources_for_propagation(), flip_other=False
+            )
+            return Param(
+                new_dims,
+                j.with_columns(value=pl.col("value") * pl.col("value__r")).select(
+                    *new_dims, "value"
+                ),
+                _sources=merged,
+            )
         if isinstance(other, (Var, Expr)):
             return other * self
         return NotImplemented
@@ -129,26 +139,32 @@ class Param:
 
     def __truediv__(self, other):
         if isinstance(other, (int, float)):
-            return Param(self.dims,
-                         self.lazy.with_columns(value=pl.col("value") / float(other)),
-                         _sources=self._sources_for_propagation())
+            return Param(
+                self.dims,
+                self.lazy.with_columns(value=pl.col("value") / float(other)),
+                _sources=self._sources_for_propagation(),
+            )
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
-            j = (self.lazy.join(other.lazy, on=shared, how="inner", suffix="__r")
-                 if shared else self.lazy.join(other.lazy, how="cross", suffix="__r"))
-            merged = _merge_param_sources(self._sources_for_propagation(),
-                                          other._sources_for_propagation(),
-                                          flip_other=True)
-            return Param(new_dims,
-                         j.with_columns(value=pl.col("value") / pl.col("value__r"))
-                          .select(*new_dims, "value"),
-                         _sources=merged)
+            j = (
+                self.lazy.join(other.lazy, on=shared, how="inner", suffix="__r")
+                if shared
+                else self.lazy.join(other.lazy, how="cross", suffix="__r")
+            )
+            merged = _merge_param_sources(
+                self._sources_for_propagation(), other._sources_for_propagation(), flip_other=True
+            )
+            return Param(
+                new_dims,
+                j.with_columns(value=pl.col("value") / pl.col("value__r")).select(
+                    *new_dims, "value"
+                ),
+                _sources=merged,
+            )
         return NotImplemented
 
-    def _sources_for_propagation(
-        self
-    ) -> "list[tuple[Param, int]] | None":
+    def _sources_for_propagation(self) -> list[tuple[Param, int]] | None:
         """Like :meth:`_own_sources` but returns ``None`` for an anonymous
         Param with no sub-sources — saves an allocation in the common
         unnamed-Param case."""
@@ -158,7 +174,7 @@ class Param:
             return [(self, 1)]
         return None
 
-    def __neg__(self) -> "Param":
+    def __neg__(self) -> Param:
         return self * -1.0
 
     def __add__(self, other):
@@ -173,27 +189,32 @@ class Param:
             # keep inner-join semantics — multiplying by a sparse Param IS
             # a legitimate "apply where defined" filter.)
             if shared:
-                j = self.lazy.join(other.lazy, on=shared, how="full",
-                                   suffix="__r", coalesce=True)
+                j = self.lazy.join(other.lazy, on=shared, how="full", suffix="__r", coalesce=True)
             else:
                 j = self.lazy.join(other.lazy, how="cross", suffix="__r")
-            return Param(new_dims,
-                         j.with_columns(value=(pl.col("value").fill_null(0.0)
-                                               + pl.col("value__r").fill_null(0.0)))
-                          .select(*new_dims, "value"))
+            return Param(
+                new_dims,
+                j.with_columns(
+                    value=(pl.col("value").fill_null(0.0) + pl.col("value__r").fill_null(0.0))
+                ).select(*new_dims, "value"),
+            )
         return NotImplemented
 
     __radd__ = __add__
 
-    def __sub__(self, other): return self + (-other if isinstance(other, Param) else -float(other))
-    def __rsub__(self, other): return (-self) + other
+    def __sub__(self, other):
+        return self + (-other if isinstance(other, Param) else -float(other))
+
+    def __rsub__(self, other):
+        return (-self) + other
 
 
 def _merge_param_sources(
-    a: "list[tuple[Param, int]] | None",
-    b: "list[tuple[Param, int]] | None",
-    *, flip_other: bool,
-) -> "list[tuple[Param, int]] | None":
+    a: list[tuple[Param, int]] | None,
+    b: list[tuple[Param, int]] | None,
+    *,
+    flip_other: bool,
+) -> list[tuple[Param, int]] | None:
     """Combine two source lists for ``Param * Param`` (flip_other=False)
     or ``Param / Param`` (flip_other=True).  Returns None when both
     inputs are None (no tracking needed).
@@ -211,8 +232,6 @@ def _merge_param_sources(
     return out
 
 
-
-
 class Var:
     """A variable family.  ``frame`` carries columns ``*dims, col_id``.
 
@@ -224,9 +243,15 @@ class Var:
 
     __slots__ = ("name", "dims", "frame", "lower", "upper", "integer")
 
-    def __init__(self, name: str, dims: tuple[str, ...], frame: pl.DataFrame,
-                 lower: float = 0.0, upper: float = float("inf"),
-                 integer: bool = False):
+    def __init__(
+        self,
+        name: str,
+        dims: tuple[str, ...],
+        frame: pl.DataFrame,
+        lower: float = 0.0,
+        upper: float = float("inf"),
+        integer: bool = False,
+    ):
         self.name = name
         self.dims = tuple(dims)
         # Var.frame is intentionally eager — see class docstring.
@@ -237,22 +262,27 @@ class Var:
         self.upper = upper
         self.integer = integer
 
-    def to_expr(self) -> "Expr":
-        f = self.frame.lazy().with_columns(coef=pl.lit(1.0)) \
-                              .select(*self.dims, "col_id", "coef")
+    def to_expr(self) -> Expr:
+        f = self.frame.lazy().with_columns(coef=pl.lit(1.0)).select(*self.dims, "col_id", "coef")
         return Expr([_Term(f, self.dims)])
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
-            f = self.frame.lazy().with_columns(coef=pl.lit(float(other))) \
-                                  .select(*self.dims, "col_id", "coef")
+            f = (
+                self.frame.lazy()
+                .with_columns(coef=pl.lit(float(other)))
+                .select(*self.dims, "col_id", "coef")
+            )
             return Expr([_Term(f, self.dims)])
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
             lf = self.frame.lazy()
-            j = (lf.join(other.lazy, on=shared, how="inner")
-                 if shared else lf.join(other.lazy, how="cross"))
+            j = (
+                lf.join(other.lazy, on=shared, how="inner")
+                if shared
+                else lf.join(other.lazy, how="cross")
+            )
             j = j.rename({"value": "coef"}).select(*new_dims, "col_id", "coef")
             psrc = other._sources_for_propagation()
             return Expr([_Term(j, new_dims, param_sources=psrc)])
@@ -260,11 +290,20 @@ class Var:
 
     __rmul__ = __mul__
 
-    def __neg__(self):       return self.to_expr() * -1.0
-    def __add__(self, o):    return self.to_expr() + o
-    def __sub__(self, o):    return self.to_expr() - o
-    def __radd__(self, o):   return self.to_expr() + o
-    def __rsub__(self, o):   return _to_expr(o) - self.to_expr()
+    def __neg__(self):
+        return self.to_expr() * -1.0
+
+    def __add__(self, o):
+        return self.to_expr() + o
+
+    def __sub__(self, o):
+        return self.to_expr() - o
+
+    def __radd__(self, o):
+        return self.to_expr() + o
+
+    def __rsub__(self, o):
+        return _to_expr(o) - self.to_expr()
 
 
 class _Term:
@@ -290,11 +329,15 @@ class _Term:
     overhead.  The Param object is held by reference so :class:`WarmProblem`
     can read its current value frame at build time.
     """
+
     __slots__ = ("lazy", "dims", "param_sources")
 
-    def __init__(self, lazy: "pl.LazyFrame | pl.DataFrame",
-                 dims: tuple[str, ...],
-                 param_sources: "list[tuple[Param, int]] | None" = None):
+    def __init__(
+        self,
+        lazy: pl.LazyFrame | pl.DataFrame,
+        dims: tuple[str, ...],
+        param_sources: list[tuple[Param, int]] | None = None,
+    ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
         self.lazy = lazy
@@ -309,9 +352,11 @@ class _Term:
         return self.lazy.collect()
 
 
-def _to_expr(x) -> "Expr":
-    if isinstance(x, Expr): return x
-    if isinstance(x, Var):  return x.to_expr()
+def _to_expr(x) -> Expr:
+    if isinstance(x, Expr):
+        return x
+    if isinstance(x, Var):
+        return x.to_expr()
     raise TypeError(f"cannot convert {type(x).__name__} to an Expr")
 
 
@@ -331,32 +376,48 @@ class Expr:
         return Expr(self.terms + _to_expr(other).terms)
 
     def __sub__(self, other):
-        neg = [_Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims,
-                     param_sources=t.param_sources)
-               for t in _to_expr(other).terms]
+        neg = [
+            _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims, param_sources=t.param_sources)
+            for t in _to_expr(other).terms
+        ]
         return Expr(self.terms + neg)
 
-    def __radd__(self, other): return _to_expr(other) + self
-    def __rsub__(self, other): return _to_expr(other) - self
-    def __neg__(self):         return self * -1.0
+    def __radd__(self, other):
+        return _to_expr(other) + self
+
+    def __rsub__(self, other):
+        return _to_expr(other) - self
+
+    def __neg__(self):
+        return self * -1.0
 
     def __mul__(self, scalar):
         if isinstance(scalar, (int, float)):
-            return Expr([_Term(t.lazy.with_columns(coef=pl.col("coef") * float(scalar)),
-                               t.dims, param_sources=t.param_sources)
-                         for t in self.terms])
+            return Expr(
+                [
+                    _Term(
+                        t.lazy.with_columns(coef=pl.col("coef") * float(scalar)),
+                        t.dims,
+                        param_sources=t.param_sources,
+                    )
+                    for t in self.terms
+                ]
+            )
         if isinstance(scalar, Param):
             psrc_other = scalar._sources_for_propagation()
             new = []
             for t in self.terms:
                 shared = [d for d in t.dims if d in scalar.dims]
                 new_dims = tuple(dict.fromkeys(t.dims + scalar.dims))
-                j = (t.lazy.join(scalar.lazy, on=shared, how="inner")
-                     if shared else t.lazy.join(scalar.lazy, how="cross"))
-                j = (j.with_columns(coef=pl.col("coef") * pl.col("value"))
-                      .select(*new_dims, "col_id", "coef"))
-                merged = _merge_param_sources(t.param_sources, psrc_other,
-                                              flip_other=False)
+                j = (
+                    t.lazy.join(scalar.lazy, on=shared, how="inner")
+                    if shared
+                    else t.lazy.join(scalar.lazy, how="cross")
+                )
+                j = j.with_columns(coef=pl.col("coef") * pl.col("value")).select(
+                    *new_dims, "col_id", "coef"
+                )
+                merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
                 new.append(_Term(j, new_dims, param_sources=merged))
             return Expr(new)
         return NotImplemented
@@ -372,12 +433,15 @@ class Expr:
             for t in self.terms:
                 shared = [d for d in t.dims if d in other.dims]
                 new_dims = tuple(dict.fromkeys(t.dims + other.dims))
-                j = (t.lazy.join(other.lazy, on=shared, how="inner")
-                     if shared else t.lazy.join(other.lazy, how="cross"))
-                j = (j.with_columns(coef=pl.col("coef") / pl.col("value"))
-                      .select(*new_dims, "col_id", "coef"))
-                merged = _merge_param_sources(t.param_sources, psrc_other,
-                                              flip_other=True)
+                j = (
+                    t.lazy.join(other.lazy, on=shared, how="inner")
+                    if shared
+                    else t.lazy.join(other.lazy, how="cross")
+                )
+                j = j.with_columns(coef=pl.col("coef") / pl.col("value")).select(
+                    *new_dims, "col_id", "coef"
+                )
+                merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
                 new.append(_Term(j, new_dims, param_sources=merged))
             return Expr(new)
         return NotImplemented
@@ -385,8 +449,11 @@ class Expr:
 
 class _CstrProto:
     __slots__ = ("expr", "sense", "rhs")
+
     def __init__(self, expr: Expr, sense: str, rhs):
-        self.expr = expr; self.sense = sense; self.rhs = rhs
+        self.expr = expr
+        self.sense = sense
+        self.rhs = rhs
 
 
 class CstrRecord:
@@ -409,25 +476,28 @@ class CstrRecord:
         return f"CstrRecord(name={self.name!r}, rows={n})"
 
 
-def _split_terms(terms: dict, side: str) -> tuple["Expr | None", "Param | float"]:
+def _split_terms(terms: dict, side: str) -> tuple[Expr | None, Param | float]:
     """Sort {label: term} into (variable Expr, constant Param-or-float).
     Variable terms are summed into a single Expr; constant terms are
     summed into a single Param (or scalar if no Params)."""
     var_acc: Expr | None = None
-    const_acc: "Param | float" = 0.0
+    const_acc: Param | float = 0.0
     for label, t in terms.items():
         if isinstance(t, (Var, Expr)):
             e = t.to_expr() if isinstance(t, Var) else t
             var_acc = e if var_acc is None else var_acc + e
         elif isinstance(t, Param):
-            const_acc = t if isinstance(const_acc, (int, float)) and const_acc == 0 \
-                          else const_acc + t
+            const_acc = (
+                t if isinstance(const_acc, (int, float)) and const_acc == 0 else const_acc + t
+            )
         elif isinstance(t, (int, float)):
-            const_acc = const_acc + float(t) if isinstance(const_acc, (int, float)) \
-                                              else const_acc + float(t)
+            const_acc = (
+                const_acc + float(t)
+                if isinstance(const_acc, (int, float))
+                else const_acc + float(t)
+            )
         else:
-            raise TypeError(f"{side}_terms[{label!r}]: unsupported term type "
-                            f"{type(t).__name__}")
+            raise TypeError(f"{side}_terms[{label!r}]: unsupported term type {type(t).__name__}")
     return var_acc, const_acc
 
 
@@ -445,6 +515,7 @@ def _sub_const(a, b):
 # ---------------------------------------------------------------------------
 # Sum / Where
 
+
 def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
     """Return an Expr that, for each (carry_dims, ``time_dim``) in
     ``lag_frame``, references ``var`` at (carry_dims, ``lag_col``).
@@ -459,7 +530,8 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
     the columns shared between ``var`` and ``lag_frame`` other than the
     time dim itself (typically ``d``).
     """
-    if isinstance(var, Var): var = var.to_expr()
+    if isinstance(var, Var):
+        var = var.to_expr()
     # accept either eager or lazy lag_frame; need column names up-front
     if isinstance(lag_frame, pl.LazyFrame):
         lag_lf = lag_frame
@@ -475,34 +547,35 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
         if time_dim not in t.dims:
             new_terms.append(t)
             continue
-        carry = [c for c in lag_cols
-                 if c in t.dims and c != time_dim and c != lag_col]
+        carry = [c for c in lag_cols if c in t.dims and c != time_dim and c != lag_col]
         lagged = t.lazy.rename({time_dim: "_lag_src"})
-        j = lag_lf.join(lagged,
-                        left_on  = carry + [lag_col],
-                        right_on = carry + ["_lag_src"],
-                        how="inner")
-        new_terms.append(_Term(
-            j.select(*[d for d in t.dims if d != time_dim], time_dim, "col_id", "coef"),
-            t.dims,
-            param_sources=t.param_sources,
-        ))
+        j = lag_lf.join(
+            lagged, left_on=carry + [lag_col], right_on=carry + ["_lag_src"], how="inner"
+        )
+        new_terms.append(
+            _Term(
+                j.select(*[d for d in t.dims if d != time_dim], time_dim, "col_id", "coef"),
+                t.dims,
+                param_sources=t.param_sources,
+            )
+        )
     return Expr(new_terms)
 
 
 def Where(expr, frame: pl.DataFrame) -> Expr:
     """Inner-join an Expr against ``frame``.  Two effects in one op:
 
-      * Filter — rows of the term whose shared-column values don't
-        appear in ``frame`` are dropped (e.g. ``Where(v_flow, wind_only)``
-        keeps only the wind rows).
-      * Map — any columns of ``frame`` that the term doesn't already
-        carry become *new open dims* of the resulting term (e.g.
-        ``Where(v_flow, flow_to_n)`` where ``flow_to_n`` has columns
-        ``(p, source, sink, n)`` adds ``n`` so the term can be bound
-        to a constraint indexed by ``(n, t)``).
+    * Filter — rows of the term whose shared-column values don't
+      appear in ``frame`` are dropped (e.g. ``Where(v_flow, wind_only)``
+      keeps only the wind rows).
+    * Map — any columns of ``frame`` that the term doesn't already
+      carry become *new open dims* of the resulting term (e.g.
+      ``Where(v_flow, flow_to_n)`` where ``flow_to_n`` has columns
+      ``(p, source, sink, n)`` adds ``n`` so the term can be bound
+      to a constraint indexed by ``(n, t)``).
     """
-    if isinstance(expr, Var): expr = expr.to_expr()
+    if isinstance(expr, Var):
+        expr = expr.to_expr()
     if isinstance(frame, pl.LazyFrame):
         frame_lf = frame
         frame_cols = frame_lf.collect_schema().names()
@@ -523,8 +596,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
     return Expr(new)
 
 
-def Sum(expr, over: tuple[str, ...] | str | None = None,
-        where: pl.DataFrame | None = None) -> Expr:
+def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | None = None) -> Expr:
     """Aggregate an Expr.  ``over`` lists the dims to sum out; the
     remaining dims become the term's open dims.  ``where`` is an index
     frame that pre-filters the term frames (inner join on shared
@@ -533,13 +605,15 @@ def Sum(expr, over: tuple[str, ...] | str | None = None,
     ``Sum(expr)`` with ``over=None`` collapses every open dim — useful
     for a scalar (objective term, single-row constraint).
     """
-    if isinstance(expr, Var): expr = expr.to_expr()
+    if isinstance(expr, Var):
+        expr = expr.to_expr()
     if over is None:
         # collapse every open dim that appears in any term
         all_dims = []
         for t in expr.terms:
             for d in t.dims:
-                if d not in all_dims: all_dims.append(d)
+                if d not in all_dims:
+                    all_dims.append(d)
         over = tuple(all_dims)
     elif isinstance(over, str):
         over = (over,)
@@ -562,8 +636,7 @@ def Sum(expr, over: tuple[str, ...] | str | None = None,
         if where_lf is not None:
             shared = [c for c in where_cols if c in t.dims]
             if shared:
-                f = f.join(where_lf.select(shared).unique(),
-                           on=shared, how="inner")
+                f = f.join(where_lf.select(shared).unique(), on=shared, how="inner")
         keep = tuple(d for d in t.dims if d not in over)
         # If the Sum collapses any of the source-Param's dim columns,
         # multiple cells (with different param values) get merged into
@@ -574,12 +647,14 @@ def Sum(expr, over: tuple[str, ...] | str | None = None,
         psrc = t.param_sources
         if psrc is not None and over:
             over_set = set(over)
-            survivors = [(p, s) for (p, s) in psrc
-                         if not any(d in over_set for d in p.dims)]
+            survivors = [(p, s) for (p, s) in psrc if not any(d in over_set for d in p.dims)]
             psrc = survivors if survivors else None
         if keep:
-            f = f.group_by(list(keep) + ["col_id"]).agg(pl.col("coef").sum()) \
-                 .select(*keep, "col_id", "coef")
+            f = (
+                f.group_by(list(keep) + ["col_id"])
+                .agg(pl.col("coef").sum())
+                .select(*keep, "col_id", "coef")
+            )
         else:
             f = f.group_by("col_id").agg(pl.col("coef").sum())
         new_terms.append(_Term(f, keep, param_sources=psrc))
@@ -588,6 +663,7 @@ def Sum(expr, over: tuple[str, ...] | str | None = None,
 
 # ---------------------------------------------------------------------------
 # Problem container
+
 
 class Problem:
     """LP container.  Generic — no flextool-specific knowledge."""
@@ -615,11 +691,17 @@ class Problem:
 
     # -- variables -------------------------------------------------------
 
-    def add_var(self, name: str, dims: tuple[str, ...] | str,
-                index: pl.DataFrame, lower: float = 0.0,
-                upper: float = float("inf"),
-                integer: bool = False) -> Var:
-        if isinstance(dims, str): dims = (dims,)
+    def add_var(
+        self,
+        name: str,
+        dims: tuple[str, ...] | str,
+        index: pl.DataFrame,
+        lower: float = 0.0,
+        upper: float = float("inf"),
+        integer: bool = False,
+    ) -> Var:
+        if isinstance(dims, str):
+            dims = (dims,)
         dims = tuple(dims)
         for d in dims:
             if d not in index.columns:
@@ -637,12 +719,15 @@ class Problem:
 
     # -- constraints -----------------------------------------------------
 
-    def add_cstr(self, name: str, *,
-                 over: pl.DataFrame | None = None,
-                 sense: str,
-                 lhs_terms: dict[str, "Var | Expr | Param | int | float"],
-                 rhs_terms: dict[str, "Var | Expr | Param | int | float"] | None = None
-                 ) -> None:
+    def add_cstr(
+        self,
+        name: str,
+        *,
+        over: pl.DataFrame | None = None,
+        sense: str,
+        lhs_terms: dict[str, Var | Expr | Param | int | float],
+        rhs_terms: dict[str, Var | Expr | Param | int | float] | None = None,
+    ) -> None:
         """Add a constraint of the form  ``Σ lhs_terms  sense  Σ rhs_terms``.
 
         Each term entry is either:
@@ -654,7 +739,8 @@ class Problem:
         the row to highspy at solve time.  Labels (the dict keys) are
         used in row names and diagnostics.
         """
-        if rhs_terms is None: rhs_terms = {}
+        if rhs_terms is None:
+            rhs_terms = {}
         if not isinstance(lhs_terms, dict) or not isinstance(rhs_terms, dict):
             raise TypeError("lhs_terms and rhs_terms must be dicts {label: term}")
         if sense not in ("<=", ">=", "=="):
@@ -683,7 +769,7 @@ class Problem:
         order.  Useful for emission audits and debugging."""
         return [n for n, _, _ in self._cstrs]
 
-    def cstrs_named(self, name: str) -> list["CstrRecord"]:
+    def cstrs_named(self, name: str) -> list[CstrRecord]:
         """Return constraint metadata records matching ``name``.
 
         An exact-name match returns the single record; otherwise a prefix
@@ -703,9 +789,11 @@ class Problem:
             if n == name:
                 return [CstrRecord(name=n, over=over, proto=proto)]
         prefix = name + "_"
-        return [CstrRecord(name=n, over=over, proto=proto)
-                for n, proto, over in self._cstrs
-                if n.startswith(prefix)]
+        return [
+            CstrRecord(name=n, over=over, proto=proto)
+            for n, proto, over in self._cstrs
+            if n.startswith(prefix)
+        ]
 
     def cstr_row_count(self, name: str) -> int:
         """Total LP-row count across all constraint families matching
@@ -720,9 +808,10 @@ class Problem:
 
     # -- objective -------------------------------------------------------
 
-    def set_objective(self, expr: "Expr | Var", sense: str = "min") -> None:
-        if isinstance(expr, Var): expr = expr.to_expr()
-        scalar = Sum(expr, over=None)   # collapse every dim
+    def set_objective(self, expr: Expr | Var, sense: str = "min") -> None:
+        if isinstance(expr, Var):
+            expr = expr.to_expr()
+        scalar = Sum(expr, over=None)  # collapse every dim
         for t in scalar.terms:
             if t.dims:
                 raise RuntimeError(f"objective term still has open dims {t.dims}")
@@ -741,12 +830,12 @@ class Problem:
 
     # -- solve -----------------------------------------------------------
 
-    def solve(self, *, options: dict | None = None) -> "Solution":
+    def solve(self, *, options: dict | None = None) -> Solution:
         n_cols = self._next_col
         col_lb = np.zeros(n_cols, dtype=np.float64)
         col_ub = np.full(n_cols, np.inf, dtype=np.float64)
         col_obj = np.zeros(n_cols, dtype=np.float64)
-        col_int = np.zeros(n_cols, dtype=np.int8)   # 1 = integer column
+        col_int = np.zeros(n_cols, dtype=np.int8)  # 1 = integer column
         col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
         var_of_col: dict[int, str] = {}
 
@@ -760,14 +849,17 @@ class Problem:
                 # Build the formatted "name[tag]" strings inside polars in
                 # one expression, then a single .to_list() — avoids the
                 # per-row Python f-string formatting loop.
-                tagged = (v.frame.select(pl.format(
+                tagged = (
+                    v.frame.select(
+                        pl.format(
                             "{}[{}]",
                             pl.lit(v.name),
                             pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in v.dims],
-                                separator=",")
-                            ).alias("__name"))
-                          )["__name"].to_list()
+                                [pl.col(d).cast(pl.String) for d in v.dims], separator=","
+                            ),
+                        ).alias("__name")
+                    )
+                )["__name"].to_list()
                 # ids is a 1-D int64 numpy array — Python int conversion is
                 # cheap; loop body has zero arithmetic now.
                 ids_list = ids.tolist()
@@ -789,9 +881,7 @@ class Problem:
         # collects, which would mis-pair col_id with coef.
         for t in self._obj_terms:
             tf = t.frame
-            np.add.at(col_obj,
-                      tf["col_id"].to_numpy(),
-                      tf["coef"].to_numpy())
+            np.add.at(col_obj, tf["col_id"].to_numpy(), tf["coef"].to_numpy())
 
         # constraints — build COO triples
         # rows_lb / rows_ub accumulate per family as small numpy arrays;
@@ -830,8 +920,7 @@ class Problem:
             else:
                 row_count = over.height
                 axis_cols = list(over.columns)
-                row_index = over.with_columns(
-                    _rid=pl.int_range(0, over.height, dtype=pl.Int64))
+                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
 
             base_row = next_row
             next_row += row_count
@@ -843,23 +932,23 @@ class Problem:
             elif isinstance(rhs, Param):
                 missing = [d for d in rhs.dims if d not in axis_cols]
                 if missing:
-                    raise ValueError(f"constraint {name!r}: rhs Param has dim "
-                                     f"{missing} not in over={axis_cols}")
+                    raise ValueError(
+                        f"constraint {name!r}: rhs Param has dim {missing} not in over={axis_cols}"
+                    )
                 on = list(rhs.dims)
                 if on:
                     j = row_index.join(rhs.frame, on=on, how="left")
-                    rhs_vec = (j.sort("_rid")["value"]
-                                .fill_null(0.0).to_numpy().astype(np.float64))
+                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
             elif isinstance(rhs, (Var, Expr)):
                 rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [_Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
-                       for t in rhs_expr.terms]
+                neg = [
+                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
+                ]
                 expr = Expr(expr.terms + neg)
             else:
-                raise TypeError(f"constraint {name!r}: unsupported rhs type "
-                                f"{type(rhs).__name__}")
+                raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
 
             # row bounds from sense — vectorize per family, no per-row loop
             if sense == "<=":
@@ -879,14 +968,19 @@ class Problem:
             if over is None:
                 row_names.append(name)
             else:
-                row_names.extend((over.select(pl.format(
-                            "{}[{}]",
-                            pl.lit(name),
-                            pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in axis_cols],
-                                separator=",")
-                            ).alias("__rn"))
-                          )["__rn"].to_list())
+                row_names.extend(
+                    (
+                        over.select(
+                            pl.format(
+                                "{}[{}]",
+                                pl.lit(name),
+                                pl.concat_str(
+                                    [pl.col(d).cast(pl.String) for d in axis_cols], separator=","
+                                ),
+                            ).alias("__rn")
+                        )
+                    )["__rn"].to_list()
+                )
 
             # Bind each LHS term to the row index — but defer collect.
             row_index_lf = row_index.lazy()
@@ -897,14 +991,17 @@ class Problem:
                         raise ValueError(
                             f"constraint {name!r}: term has open dims {term.dims}, "
                             f"but constraint axes are {axis_cols}; aggregate "
-                            f"{missing} via Sum() before adding.")
+                            f"{missing} via Sum() before adding."
+                        )
                     on = [d for d in term.dims if d in axis_cols]
-                    plan = (row_index_lf.join(term.lazy, on=on, how="inner")
-                                        .select("_rid", "col_id", "coef"))
+                    plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                        "_rid", "col_id", "coef"
+                    )
                     pending.append(("dim", base_row, plan))
                 else:
-                    pending.append(("scalar", base_row, row_count,
-                                    term.lazy.select("col_id", "coef")))
+                    pending.append(
+                        ("scalar", base_row, row_count, term.lazy.select("col_id", "coef"))
+                    )
 
         # Pass 2: collect every staged LazyFrame in one shot.  polars'
         # ``collect_all`` runs the plans in parallel (one thread per
@@ -926,8 +1023,9 @@ class Problem:
                     _, base_row, row_count, _ = p
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     vals = j["coef"].to_numpy().astype(np.float64)
-                    rs = np.repeat(np.arange(base_row, base_row + row_count,
-                                             dtype=np.int64), len(cids))
+                    rs = np.repeat(
+                        np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
+                    )
                     triple_rows.append(rs)
                     triple_cols.append(np.tile(cids, row_count))
                     triple_vals.append(np.tile(vals, row_count))
@@ -937,8 +1035,11 @@ class Problem:
             tc = np.concatenate(triple_cols)
             tv = np.concatenate(triple_vals)
             # Sum coefs for duplicate (row, col) pairs.
-            dedup = (pl.DataFrame({"r": tr, "c": tc, "v": tv})
-                       .group_by(["r", "c"]).agg(pl.col("v").sum()))
+            dedup = (
+                pl.DataFrame({"r": tr, "c": tc, "v": tv})
+                .group_by(["r", "c"])
+                .agg(pl.col("v").sum())
+            )
             tr = dedup["r"].to_numpy().astype(np.int64)
             tc = dedup["c"].to_numpy().astype(np.int64)
             tv = dedup["v"].to_numpy().astype(np.float64)
@@ -953,7 +1054,7 @@ class Problem:
         # --- batched build via HighsLp + passModel (≫10× faster than the
         # per-row addRow loop on flextool-size problems).
         col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-        col_ub_h = np.where(col_ub ==  np.inf,  inf, col_ub).astype(np.float64)
+        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
         if rows_lb_chunks:
             rows_lb_arr = np.concatenate(rows_lb_chunks)
             rows_ub_arr = np.concatenate(rows_ub_chunks)
@@ -961,11 +1062,11 @@ class Problem:
             rows_lb_arr = np.zeros(0, dtype=np.float64)
             rows_ub_arr = np.zeros(0, dtype=np.float64)
         row_lb_h = np.where(rows_lb_arr == -np.inf, -inf, rows_lb_arr).astype(np.float64)
-        row_ub_h = np.where(rows_ub_arr ==  np.inf,  inf, rows_ub_arr).astype(np.float64)
+        row_ub_h = np.where(rows_ub_arr == np.inf, inf, rows_ub_arr).astype(np.float64)
 
         # build column-major (CSC) sparse matrix from the dedup'd triples
         if tr.size:
-            order = np.lexsort((tr, tc))     # primary: col, secondary: row
+            order = np.lexsort((tr, tc))  # primary: col, secondary: row
             sorted_r = tr[order].astype(np.int32)
             sorted_c = tc[order].astype(np.int32)
             sorted_v = tv[order].astype(np.float64)
@@ -980,9 +1081,9 @@ class Problem:
         starts = np.cumsum(starts).astype(np.int32)
 
         lp = highspy.HighsLp()
-        lp.num_col_   = int(n_cols)
-        lp.num_row_   = int(n_rows)
-        lp.col_cost_  = col_obj.astype(np.float64)
+        lp.num_col_ = int(n_cols)
+        lp.num_row_ = int(n_rows)
+        lp.col_cost_ = col_obj.astype(np.float64)
         lp.col_lower_ = col_lb_h
         lp.col_upper_ = col_ub_h
         lp.row_lower_ = row_lb_h
@@ -993,13 +1094,14 @@ class Problem:
         lp.a_matrix_.start_ = starts
         lp.a_matrix_.index_ = sorted_r
         lp.a_matrix_.value_ = sorted_v
-        lp.sense_ = (highspy.ObjSense.kMaximize if self._obj_sense == "max"
-                     else highspy.ObjSense.kMinimize)
+        lp.sense_ = (
+            highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
+        )
         if self._obj_offset:
             lp.offset_ = float(self._obj_offset)
         if col_int.any():
             kCont = highspy.HighsVarType.kContinuous
-            kInt  = highspy.HighsVarType.kInteger
+            kInt = highspy.HighsVarType.kInteger
             # vectorized lookup via numpy, then a single .tolist()
             # (passing through a Python list is what highspy expects)
             integ_arr = np.where(col_int, kInt, kCont)
@@ -1014,6 +1116,7 @@ class Problem:
         opts = options if options is not None else self._solver_options
         if opts:
             import warnings
+
             ok_status = getattr(highspy.HighsStatus, "kOk", None)
             for key, val in opts.items():
                 try:
@@ -1029,8 +1132,7 @@ class Problem:
                 # we don't want to crash — just log and continue.
                 if ok_status is not None and status != ok_status:
                     warnings.warn(
-                        f"HiGHS rejected option {key}={val!r} "
-                        f"(status={status!r})",
+                        f"HiGHS rejected option {key}={val!r} (status={status!r})",
                         stacklevel=2,
                     )
         h.passModel(lp)
@@ -1049,31 +1151,39 @@ class Problem:
         row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
         col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
         return Solution(
-            optimal = status_ok,
-            obj = h.getObjectiveValue(),
-            col_value = col_value,
-            row_dual = row_dual,
-            col_dual = col_dual,
-            col_names = col_names,
-            row_names = row_names,
-            vars = dict(self._vars),
-            highs = h,
+            optimal=status_ok,
+            obj=h.getObjectiveValue(),
+            col_value=col_value,
+            row_dual=row_dual,
+            col_dual=col_dual,
+            col_names=col_names,
+            row_names=row_names,
+            vars=dict(self._vars),
+            highs=h,
         )
 
 
 # ---------------------------------------------------------------------------
 # Solution
 
+
 class Solution:
     """Read-only view of the solved LP.  Look up variable values by
     name; values come back as a polars frame ``(*dims, value)``."""
 
-    def __init__(self, *, optimal: bool, obj: float,
-                 col_value: np.ndarray, row_dual: np.ndarray,
-                 col_names: list[str], row_names: list[str],
-                 vars: dict[str, Var],
-                 col_dual: np.ndarray | None = None,
-                 highs: "highspy.Highs | None" = None):
+    def __init__(
+        self,
+        *,
+        optimal: bool,
+        obj: float,
+        col_value: np.ndarray,
+        row_dual: np.ndarray,
+        col_names: list[str],
+        row_names: list[str],
+        vars: dict[str, Var],
+        col_dual: np.ndarray | None = None,
+        highs: highspy.Highs | None = None,
+    ):
         self.optimal = optimal
         self.obj = obj
         self.col_value = col_value
@@ -1081,8 +1191,7 @@ class Solution:
         # Reduced-cost duals (per-column).  ``None`` keeps backwards
         # compatibility for callers that build :class:`Solution` directly
         # without a live HiGHS instance; the live solve paths populate it.
-        self.col_dual = (np.zeros(len(col_value), dtype=np.float64)
-                         if col_dual is None else col_dual)
+        self.col_dual = np.zeros(len(col_value), dtype=np.float64) if col_dual is None else col_dual
         self.col_names = col_names
         self.row_names = row_names
         self._vars = vars
@@ -1100,9 +1209,9 @@ class Solution:
         vals = self.col_value[ids]
         return v.frame.select(*v.dims).with_columns(value=pl.Series(vals))
 
-    def value_wide(self, var_name: str,
-                   time_dims: tuple[str, ...] = ("d", "t"),
-                   solve_name: str | None = None) -> pl.DataFrame:
+    def value_wide(
+        self, var_name: str, time_dims: tuple[str, ...] = ("d", "t"), solve_name: str | None = None
+    ) -> pl.DataFrame:
         """Wide-form, flextool-compatible: time dims become rows, the
         remaining dims are encoded as a tuple-stringified column header.
 
@@ -1141,7 +1250,8 @@ class Solution:
         wide = long.pivot(values="value", on="_key", index=list(time_dims))
         if solve_name is not None:
             wide = wide.with_columns(solve=pl.lit(solve_name)).select(
-                "solve", *time_dims,
+                "solve",
+                *time_dims,
                 *[c for c in wide.columns if c not in time_dims],
             )
         return wide
@@ -1153,8 +1263,7 @@ class Solution:
         # Walk row_names: each entry is "name[<key>]" or just "name" for
         # scalar.  Match leading prefix.
         prefix = f"{name}["
-        idx = [i for i, rn in enumerate(self.row_names)
-               if rn == name or rn.startswith(prefix)]
+        idx = [i for i, rn in enumerate(self.row_names) if rn == name or rn.startswith(prefix)]
         if not idx:
             raise KeyError(f"constraint {name!r} not found in solution")
         duals = self.row_dual[idx]
@@ -1163,7 +1272,7 @@ class Solution:
         # parse "name[key1,key2,…]" tags back into dim columns
         # (we don't carry over the original dim names here — caller passes
         # them in if needed; otherwise emit a single ``key`` string column)
-        keys = [self.row_names[i][len(prefix):-1] for i in idx]
+        keys = [self.row_names[i][len(prefix) : -1] for i in idx]
         return pl.DataFrame({"key": keys, "dual": duals})
 
 
@@ -1205,6 +1314,7 @@ class Solution:
 #     at a time).  Adding / removing rows or cols is out of scope here —
 #     a future extension can add them on top of the same plumbing.
 
+
 class WarmProblem:
     """Warm-update wrapper around a :class:`Problem`.
 
@@ -1227,12 +1337,12 @@ class WarmProblem:
     benefits from HiGHS's hot-start (basis is preserved across calls).
     """
 
-    def __init__(self, problem: "Problem"):
+    def __init__(self, problem: Problem):
         if not isinstance(problem, Problem):
             raise TypeError("WarmProblem requires a polar_high_opt.Problem instance")
         self._p = problem
         # Lazy state — populated on first solve()
-        self._h: "highspy.Highs | None" = None
+        self._h: highspy.Highs | None = None
         self._n_cols: int = 0
         self._n_rows: int = 0
         self._col_names: list[str] | None = None
@@ -1272,7 +1382,7 @@ class WarmProblem:
 
     # -- public update API -----------------------------------------------
 
-    def update_rhs(self, cstr_name: str, new_param: "Param | float | int") -> None:
+    def update_rhs(self, cstr_name: str, new_param: Param | float | int) -> None:
         """Replace the RHS of constraint family ``cstr_name`` with values
         drawn from ``new_param``.
 
@@ -1285,19 +1395,19 @@ class WarmProblem:
         self._require_built()
         meta = self._cstr_meta.get(cstr_name)
         if meta is None:
-            raise KeyError(f"WarmProblem: no constraint family named "
-                           f"{cstr_name!r}; known: "
-                           f"{sorted(self._cstr_meta)}")
+            raise KeyError(
+                f"WarmProblem: no constraint family named "
+                f"{cstr_name!r}; known: "
+                f"{sorted(self._cstr_meta)}"
+            )
         base_row: int = meta["base_row"]
         row_count: int = meta["row_count"]
         sense: str = meta["sense"]
-        over: pl.DataFrame | None = meta["over"]
 
         # Cache the row_idx int32 array — same every call.
         row_idx = meta.get("_row_idx_i32")
         if row_idx is None:
-            row_idx = np.arange(base_row, base_row + row_count,
-                                dtype=np.int32)
+            row_idx = np.arange(base_row, base_row + row_count, dtype=np.int32)
             meta["_row_idx_i32"] = row_idx
 
         # Resolve new RHS vector (length == row_count, aligned to over).
@@ -1322,8 +1432,7 @@ class WarmProblem:
             ub = lb
         self._h.changeRowsBounds(int(row_count), row_idx, lb, ub)
 
-    def update_obj_coef(self, var_name: str,
-                        new_param: "Param | float | int") -> None:
+    def update_obj_coef(self, var_name: str, new_param: Param | float | int) -> None:
         """Replace the objective coefficient on every column of ``var_name``.
 
         Assumes the objective contribution from ``var_name`` is exactly
@@ -1340,8 +1449,9 @@ class WarmProblem:
         self._require_built()
         v = self._p._vars.get(var_name)
         if v is None:
-            raise KeyError(f"WarmProblem: no variable named {var_name!r}; "
-                           f"known: {sorted(self._p._vars)}")
+            raise KeyError(
+                f"WarmProblem: no variable named {var_name!r}; known: {sorted(self._p._vars)}"
+            )
 
         col_frame = v.frame  # has cols *v.dims, col_id
 
@@ -1359,12 +1469,11 @@ class WarmProblem:
             if missing:
                 raise ValueError(
                     f"update_obj_coef({var_name!r}): new_param has dims "
-                    f"{missing} not in var dims {v.dims}")
+                    f"{missing} not in var dims {v.dims}"
+                )
             on = list(new_param.dims)
             if not on:
-                cost = np.full(cids.size,
-                               float(new_param.frame["value"][0]),
-                               dtype=np.float64)
+                cost = np.full(cids.size, float(new_param.frame["value"][0]), dtype=np.float64)
             else:
                 # Hot path: detect when the Param frame's dim columns are
                 # row-identical to the var frame's dim columns (in the
@@ -1373,9 +1482,11 @@ class WarmProblem:
                 cache_key = ("_obj_inplace", var_name, new_param.dims)
                 inplace = self._obj_coef_cache.get(cache_key)
                 if inplace is None:
-                    if (pf.height == col_frame.height
-                            and len(on) == len(v.dims)
-                            and set(on) == set(v.dims)):
+                    if (
+                        pf.height == col_frame.height
+                        and len(on) == len(v.dims)
+                        and set(on) == set(v.dims)
+                    ):
                         a = pf.select(*v.dims).to_numpy()
                         b = col_frame.select(*v.dims).to_numpy()
                         inplace = bool(a.shape == b.shape and (a == b).all())
@@ -1383,22 +1494,22 @@ class WarmProblem:
                         inplace = False
                     self._obj_coef_cache[cache_key] = inplace
                 if inplace:
-                    cost = pf["value"].to_numpy().astype(np.float64,
-                                                         copy=False)
+                    cost = pf["value"].to_numpy().astype(np.float64, copy=False)
                 else:
-                    j = col_frame.join(pf, on=on, how="left") \
-                                  .with_columns(value=pl.col("value")
-                                                       .fill_null(0.0))
-                    cost = j["value"].to_numpy().astype(np.float64,
-                                                        copy=False)
+                    j = col_frame.join(pf, on=on, how="left").with_columns(
+                        value=pl.col("value").fill_null(0.0)
+                    )
+                    cost = j["value"].to_numpy().astype(np.float64, copy=False)
         else:
-            raise TypeError(f"update_obj_coef: new_param must be Param or "
-                            f"scalar, got {type(new_param).__name__}")
+            raise TypeError(
+                f"update_obj_coef: new_param must be Param or "
+                f"scalar, got {type(new_param).__name__}"
+            )
         self._h.changeColsCost(int(cids.size), cids, cost)
 
-    def update_obj_coef_array(self, var_name: str,
-                              dim_tuples: list[tuple],
-                              values: np.ndarray) -> None:
+    def update_obj_coef_array(
+        self, var_name: str, dim_tuples: list[tuple], values: np.ndarray
+    ) -> None:
         """Array-form of :meth:`update_obj_coef`.
 
         ``dim_tuples`` is a list of dim-value tuples (one per cell) for
@@ -1414,19 +1525,20 @@ class WarmProblem:
         self._require_built()
         v = self._p._vars.get(var_name)
         if v is None:
-            raise KeyError(f"WarmProblem: no variable named {var_name!r}; "
-                           f"known: {sorted(self._p._vars)}")
+            raise KeyError(
+                f"WarmProblem: no variable named {var_name!r}; known: {sorted(self._p._vars)}"
+            )
         cols = self._resolve_dim_tuples(var_name, dim_tuples)
         vals = np.asarray(values, dtype=np.float64)
         if vals.size != cols.size:
             raise ValueError(
                 f"update_obj_coef_array({var_name!r}): values length "
-                f"{vals.size} != dim_tuples length {cols.size}")
+                f"{vals.size} != dim_tuples length {cols.size}"
+            )
         cols_i32 = cols.astype(np.int32, copy=False)
         self._h.changeColsCost(int(cols_i32.size), cols_i32, vals)
 
-    def fix_cols(self, var_name: str, dim_tuples: list[tuple],
-                 values: np.ndarray) -> None:
+    def fix_cols(self, var_name: str, dim_tuples: list[tuple], values: np.ndarray) -> None:
         """Fix the listed columns of ``var_name`` to the given values.
 
         For each ``(dim_tuple, value)`` pair, sets both the column's
@@ -1438,19 +1550,20 @@ class WarmProblem:
         self._require_built()
         v = self._p._vars.get(var_name)
         if v is None:
-            raise KeyError(f"WarmProblem: no variable named {var_name!r}; "
-                           f"known: {sorted(self._p._vars)}")
+            raise KeyError(
+                f"WarmProblem: no variable named {var_name!r}; known: {sorted(self._p._vars)}"
+            )
         cols = self._resolve_dim_tuples(var_name, dim_tuples)
         vals = np.asarray(values, dtype=np.float64)
         if vals.size != cols.size:
             raise ValueError(
                 f"fix_cols({var_name!r}): values length {vals.size} != "
-                f"dim_tuples length {cols.size}")
+                f"dim_tuples length {cols.size}"
+            )
         cols_i32 = cols.astype(np.int32, copy=False)
         self._h.changeColsBounds(int(cols_i32.size), cols_i32, vals, vals)
 
-    def _resolve_dim_tuples(self, var_name: str,
-                            dim_tuples: list[tuple]) -> np.ndarray:
+    def _resolve_dim_tuples(self, var_name: str, dim_tuples: list[tuple]) -> np.ndarray:
         """Translate a list of dim-tuples into an int64 array of col_ids
         in the same order.  Shared by ``update_obj_coef_array`` and
         ``fix_cols``.
@@ -1463,26 +1576,27 @@ class WarmProblem:
         for k, dt in enumerate(dim_tuples):
             if not isinstance(dt, tuple):
                 raise TypeError(
-                    f"{var_name!r}: dim_tuples[{k}] must be a tuple, "
-                    f"got {type(dt).__name__}")
+                    f"{var_name!r}: dim_tuples[{k}] must be a tuple, got {type(dt).__name__}"
+                )
             if len(dt) != n_dims:
                 raise ValueError(
                     f"{var_name!r}: dim_tuples[{k}] has {len(dt)} "
-                    f"elements but variable has dims {v.dims}")
+                    f"elements but variable has dims {v.dims}"
+                )
         cols_data = {d: [] for d in v.dims}
         for dt in dim_tuples:
             for d, val in zip(v.dims, dt):
                 cols_data[d].append(val)
         lookup = pl.DataFrame(cols_data).with_row_index("__rid")
-        joined = (lookup.join(v.frame, on=list(v.dims), how="left")
-                        .sort("__rid"))
+        joined = lookup.join(v.frame, on=list(v.dims), how="left").sort("__rid")
         if joined["col_id"].null_count() > 0:
-            missing_idx = joined.with_row_index("__r2") \
-                                .filter(pl.col("col_id").is_null()) \
-                                .head(1)["__r2"][0]
+            missing_idx = (
+                joined.with_row_index("__r2").filter(pl.col("col_id").is_null()).head(1)["__r2"][0]
+            )
             raise KeyError(
                 f"{var_name!r}: dim_tuple {dim_tuples[missing_idx]!r} "
-                f"does not resolve to a column (var dims={v.dims})")
+                f"does not resolve to a column (var dims={v.dims})"
+            )
         return joined["col_id"].to_numpy().astype(np.int64)
 
     def update_coef(self, row: int, col: int, value: float) -> None:
@@ -1509,15 +1623,16 @@ class WarmProblem:
         if self._h is not None:
             raise RuntimeError(
                 "declare_mutable must be called before solve(); the LP "
-                "has already been built and tracking is fixed.")
+                "has already been built and tracking is fixed."
+            )
         for n in param_names:
             if not isinstance(n, str):
-                raise TypeError(f"declare_mutable: param names must be "
-                                f"strings, got {type(n).__name__}")
+                raise TypeError(
+                    f"declare_mutable: param names must be strings, got {type(n).__name__}"
+                )
             self._mutable_params.add(n)
 
-    def update_param(self, param_name: str,
-                     new_param: "Param | float | int") -> None:
+    def update_param(self, param_name: str, new_param: Param | float | int) -> None:
         """Replace the values of a tracked Param.  Every LP cell whose
         coefficient was originally a function of ``param_name`` is
         re-computed from the new Param's values and pushed via
@@ -1535,7 +1650,8 @@ class WarmProblem:
             raise ValueError(
                 f"update_param({param_name!r}): not declared mutable; "
                 f"call declare_mutable({param_name!r}) before the first "
-                f"solve(). Declared: {sorted(self._mutable_params)}")
+                f"solve(). Declared: {sorted(self._mutable_params)}"
+            )
         cells = self._param_cells.get(param_name)
         if cells is None or cells["rows"].size == 0:
             # Param was tracked but never reached an LP cell (e.g. its
@@ -1555,28 +1671,27 @@ class WarmProblem:
                 raise ValueError(
                     f"update_param({param_name!r}): new_param dims "
                     f"{new_param.dims} differ from the originally tracked "
-                    f"signature {sig}")
+                    f"signature {sig}"
+                )
             if not sig:
-                new_vals = np.full(n,
-                                   float(new_param.frame["value"][0]),
-                                   dtype=np.float64)
+                new_vals = np.full(n, float(new_param.frame["value"][0]), dtype=np.float64)
             else:
                 # Position-aligned lookup via a left-join on the cached
                 # per-cell dim_keys frame.  We add a stable row index
                 # so we can re-sort the join output back into cell
                 # order.
                 dim_keys: pl.DataFrame = cells["dim_keys"]
-                lookup = (dim_keys
-                          .with_row_index("__rid")
-                          .join(new_param.frame, on=list(sig), how="left")
-                          .sort("__rid"))
-                new_vals = (lookup["value"].fill_null(0.0)
-                                            .to_numpy()
-                                            .astype(np.float64, copy=False))
+                lookup = (
+                    dim_keys.with_row_index("__rid")
+                    .join(new_param.frame, on=list(sig), how="left")
+                    .sort("__rid")
+                )
+                new_vals = lookup["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
         else:
             raise TypeError(
                 f"update_param({param_name!r}): new_param must be Param "
-                f"or scalar, got {type(new_param).__name__}")
+                f"or scalar, got {type(new_param).__name__}"
+            )
 
         # Apply direction-aware update.  For numerator entries
         # (direction == +1) the new coefficient is factor × new_value.
@@ -1585,18 +1700,16 @@ class WarmProblem:
         # old_coef / old_value (numerator) or old_coef × old_value
         # (denominator), so this product / quotient recovers the
         # correct cell value with no further bookkeeping.
-        directions = cells["direction"]   # int8 ndarray, +1 or -1
+        directions = cells["direction"]  # int8 ndarray, +1 or -1
         factor = cells["factor"]
         # Numerator path (most common).
         new_coefs = factor * new_vals
         if (directions != 1).any():
             denom_mask = directions == -1
             # avoid division by zero — treat as 0 update
-            safe_vals = np.where(denom_mask & (new_vals == 0.0),
-                                 1.0, new_vals)
+            safe_vals = np.where(denom_mask & (new_vals == 0.0), 1.0, new_vals)
             denom_coefs = factor / safe_vals
-            denom_coefs = np.where(denom_mask & (new_vals == 0.0),
-                                   0.0, denom_coefs)
+            denom_coefs = np.where(denom_mask & (new_vals == 0.0), 0.0, denom_coefs)
             new_coefs = np.where(denom_mask, denom_coefs, new_coefs)
 
         h = self._h
@@ -1608,8 +1721,7 @@ class WarmProblem:
 
     # -- semantic-key lookups --------------------------------------------
 
-    def col_id_of_var(self, var_name: str,
-                      dims: tuple | dict | None = None) -> int | np.ndarray:
+    def col_id_of_var(self, var_name: str, dims: tuple | dict | None = None) -> int | np.ndarray:
         """Return the col_id(s) for a variable.
 
         ``dims=None`` returns every col_id in the variable's family
@@ -1625,31 +1737,28 @@ class WarmProblem:
             return f["col_id"].to_numpy()
         if isinstance(dims, tuple):
             if len(dims) != len(v.dims):
-                raise ValueError(f"col_id_of_var({var_name!r}): expected "
-                                 f"{len(v.dims)} dim values for {v.dims}, "
-                                 f"got {len(dims)}")
+                raise ValueError(
+                    f"col_id_of_var({var_name!r}): expected "
+                    f"{len(v.dims)} dim values for {v.dims}, "
+                    f"got {len(dims)}"
+                )
             mask = pl.lit(True)
             for d, val in zip(v.dims, dims):
                 mask = mask & (pl.col(d) == val)
             sel = f.filter(mask)
             if sel.height != 1:
-                raise KeyError(f"col_id_of_var({var_name!r}, {dims!r}): "
-                               f"matched {sel.height} rows")
+                raise KeyError(f"col_id_of_var({var_name!r}, {dims!r}): matched {sel.height} rows")
             return int(sel["col_id"][0])
         if isinstance(dims, dict):
             mask = pl.lit(True)
             for d, val in dims.items():
                 if d not in v.dims:
-                    raise ValueError(
-                        f"col_id_of_var({var_name!r}): {d!r} not in dims "
-                        f"{v.dims}")
+                    raise ValueError(f"col_id_of_var({var_name!r}): {d!r} not in dims {v.dims}")
                 mask = mask & (pl.col(d) == val)
             return f.filter(mask)["col_id"].to_numpy()
-        raise TypeError(f"dims must be None, tuple or dict, got "
-                        f"{type(dims).__name__}")
+        raise TypeError(f"dims must be None, tuple or dict, got {type(dims).__name__}")
 
-    def row_id_of_cstr(self, cstr_name: str,
-                       axis: tuple | dict | None = None) -> int | np.ndarray:
+    def row_id_of_cstr(self, cstr_name: str, axis: tuple | dict | None = None) -> int | np.ndarray:
         """Return the row_id(s) for a constraint family.  Mirrors
         :meth:`col_id_of_var`."""
         self._require_built()
@@ -1663,36 +1772,35 @@ class WarmProblem:
         if isinstance(axis, tuple):
             cols = list(over.columns)
             if len(axis) != len(cols):
-                raise ValueError(f"row_id_of_cstr({cstr_name!r}): expected "
-                                 f"{len(cols)} axis values, got {len(axis)}")
+                raise ValueError(
+                    f"row_id_of_cstr({cstr_name!r}): expected "
+                    f"{len(cols)} axis values, got {len(axis)}"
+                )
             mask = pl.lit(True)
             for d, val in zip(cols, axis):
                 mask = mask & (pl.col(d) == val)
-            with_rid = over.with_columns(_rid=pl.int_range(0, over.height,
-                                                          dtype=pl.Int64))
+            with_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
             sel = with_rid.filter(mask)
             if sel.height != 1:
-                raise KeyError(f"row_id_of_cstr({cstr_name!r}, {axis!r}): "
-                               f"matched {sel.height} rows")
+                raise KeyError(
+                    f"row_id_of_cstr({cstr_name!r}, {axis!r}): matched {sel.height} rows"
+                )
             return int(base + sel["_rid"][0])
         if isinstance(axis, dict):
             mask = pl.lit(True)
             for d, val in axis.items():
                 if d not in over.columns:
                     raise ValueError(
-                        f"row_id_of_cstr({cstr_name!r}): {d!r} not in over "
-                        f"{over.columns}")
+                        f"row_id_of_cstr({cstr_name!r}): {d!r} not in over {over.columns}"
+                    )
                 mask = mask & (pl.col(d) == val)
-            with_rid = over.with_columns(_rid=pl.int_range(0, over.height,
-                                                          dtype=pl.Int64))
-            return (base + with_rid.filter(mask)["_rid"]
-                                    .to_numpy().astype(np.int64))
-        raise TypeError(f"axis must be None, tuple or dict, got "
-                        f"{type(axis).__name__}")
+            with_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
+            return base + with_rid.filter(mask)["_rid"].to_numpy().astype(np.int64)
+        raise TypeError(f"axis must be None, tuple or dict, got {type(axis).__name__}")
 
     # -- solve -----------------------------------------------------------
 
-    def solve(self, *, options: dict | None = None) -> "Solution":
+    def solve(self, *, options: dict | None = None) -> Solution:
         """Solve the LP.  First call builds the LP from scratch (same
         pipeline as :meth:`Problem.solve`); subsequent calls just run
         HiGHS again on the (possibly updated) live model.
@@ -1709,10 +1817,12 @@ class WarmProblem:
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
         col_value = np.asarray(sol.col_value, dtype=np.float64)
-        row_dual = (np.asarray(sol.row_dual, dtype=np.float64)
-                    if sol.row_dual else np.zeros(self._n_rows))
-        col_dual = (np.asarray(sol.col_dual, dtype=np.float64)
-                    if sol.col_dual else np.zeros(self._n_cols))
+        row_dual = (
+            np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(self._n_rows)
+        )
+        col_dual = (
+            np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(self._n_cols)
+        )
         return Solution(
             optimal=status_ok,
             obj=h.getObjectiveValue(),
@@ -1729,8 +1839,7 @@ class WarmProblem:
 
     def _require_built(self) -> None:
         if self._h is None:
-            raise RuntimeError(
-                "WarmProblem: must call solve() once before update_*().")
+            raise RuntimeError("WarmProblem: must call solve() once before update_*().")
 
     @staticmethod
     def _resolve_rhs_vec(new_param, meta: dict, cstr_name: str) -> np.ndarray:
@@ -1749,31 +1858,33 @@ class WarmProblem:
             return np.full(row_count, float(new_param), dtype=np.float64)
         if isinstance(new_param, np.ndarray):
             if new_param.size != row_count:
-                raise ValueError(f"update_rhs({cstr_name!r}): array length "
-                                 f"{new_param.size} != row count {row_count}")
+                raise ValueError(
+                    f"update_rhs({cstr_name!r}): array length "
+                    f"{new_param.size} != row count {row_count}"
+                )
             return new_param.astype(np.float64, copy=False)
         if isinstance(new_param, Param):
             if over is None:
-                return np.full(row_count,
-                               float(new_param.frame["value"][0]),
-                               dtype=np.float64)
+                return np.full(row_count, float(new_param.frame["value"][0]), dtype=np.float64)
             missing = [d for d in new_param.dims if d not in over.columns]
             if missing:
-                raise ValueError(f"update_rhs({cstr_name!r}): new_param has "
-                                 f"dims {missing} not in over "
-                                 f"{over.columns}")
+                raise ValueError(
+                    f"update_rhs({cstr_name!r}): new_param has "
+                    f"dims {missing} not in over "
+                    f"{over.columns}"
+                )
             if not new_param.dims:
-                return np.full(row_count,
-                               float(new_param.frame["value"][0]),
-                               dtype=np.float64)
+                return np.full(row_count, float(new_param.frame["value"][0]), dtype=np.float64)
             # Hot path: most rolling-horizon callers pass a Param whose
             # frame is already in ``over``-row order with the same dim
             # values.  Detect that and skip the join entirely.
             on = list(new_param.dims)
             param_frame = new_param.frame
-            if (param_frame.height == row_count
-                    and len(on) == len(over.columns)
-                    and set(on) == set(over.columns)):
+            if (
+                param_frame.height == row_count
+                and len(on) == len(over.columns)
+                and set(on) == set(over.columns)
+            ):
                 # Cheap structural check: are the dim columns row-equal?
                 # We hash the comparison once per (cstr, param_dims) and
                 # cache the result.
@@ -1788,15 +1899,14 @@ class WarmProblem:
                     inplace = bool(pf.shape == of.shape and (pf == of).all())
                     meta[cache_key] = inplace
                 if inplace:
-                    return param_frame["value"].to_numpy().astype(
-                        np.float64, copy=False)
+                    return param_frame["value"].to_numpy().astype(np.float64, copy=False)
             # Fallback — join on dims; left-join preserves over-frame
             # order so the resulting "value" column is row-aligned.
             j = over.join(param_frame, on=on, how="left")
-            return (j["value"].fill_null(0.0)
-                              .to_numpy().astype(np.float64, copy=False))
-        raise TypeError(f"update_rhs({cstr_name!r}): unsupported new_param "
-                        f"type {type(new_param).__name__}")
+            return j["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
+        raise TypeError(
+            f"update_rhs({cstr_name!r}): unsupported new_param type {type(new_param).__name__}"
+        )
 
     def _initial_build(self, *, options: dict | None) -> None:
         """Run the same pipeline as :meth:`Problem.solve` up to
@@ -1824,14 +1934,17 @@ class WarmProblem:
                 col_int[ids] = 1
             self._var_cols[v.name] = ids.astype(np.int64)
             if v.dims:
-                tagged = (v.frame.select(pl.format(
+                tagged = (
+                    v.frame.select(
+                        pl.format(
                             "{}[{}]",
                             pl.lit(v.name),
                             pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in v.dims],
-                                separator=",")
-                            ).alias("__name"))
-                          )["__name"].to_list()
+                                [pl.col(d).cast(pl.String) for d in v.dims], separator=","
+                            ),
+                        ).alias("__name")
+                    )
+                )["__name"].to_list()
                 ids_list = ids.tolist()
                 for cid, nm in zip(ids_list, tagged):
                     col_names[cid] = nm
@@ -1840,9 +1953,7 @@ class WarmProblem:
 
         for t in p._obj_terms:
             tf = t.frame
-            np.add.at(col_obj,
-                      tf["col_id"].to_numpy(),
-                      tf["coef"].to_numpy())
+            np.add.at(col_obj, tf["col_id"].to_numpy(), tf["coef"].to_numpy())
 
         rows_lb_chunks: list[np.ndarray] = []
         rows_ub_chunks: list[np.ndarray] = []
@@ -1863,8 +1974,7 @@ class WarmProblem:
             else:
                 row_count = over.height
                 axis_cols = list(over.columns)
-                row_index = over.with_columns(
-                    _rid=pl.int_range(0, over.height, dtype=pl.Int64))
+                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
 
             base_row = next_row
             next_row += row_count
@@ -1876,7 +1986,7 @@ class WarmProblem:
                 "base_row": int(base_row),
                 "row_count": int(row_count),
                 "sense": sense,
-                "over": over,           # may be None for scalar cstr
+                "over": over,  # may be None for scalar cstr
                 "axis_cols": tuple(axis_cols),
             }
 
@@ -1886,23 +1996,23 @@ class WarmProblem:
             elif isinstance(rhs, Param):
                 missing = [d for d in rhs.dims if d not in axis_cols]
                 if missing:
-                    raise ValueError(f"constraint {name!r}: rhs Param has dim "
-                                     f"{missing} not in over={axis_cols}")
+                    raise ValueError(
+                        f"constraint {name!r}: rhs Param has dim {missing} not in over={axis_cols}"
+                    )
                 on = list(rhs.dims)
                 if on:
                     j = row_index.join(rhs.frame, on=on, how="left")
-                    rhs_vec = (j.sort("_rid")["value"]
-                                .fill_null(0.0).to_numpy().astype(np.float64))
+                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
             elif isinstance(rhs, (Var, Expr)):
                 rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [_Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
-                       for t in rhs_expr.terms]
+                neg = [
+                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
+                ]
                 expr = Expr(expr.terms + neg)
             else:
-                raise TypeError(f"constraint {name!r}: unsupported rhs type "
-                                f"{type(rhs).__name__}")
+                raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
 
             if sense == "<=":
                 rows_lb_chunks.append(np.full(row_count, -np.inf, dtype=np.float64))
@@ -1914,20 +2024,24 @@ class WarmProblem:
                 rows_lb_chunks.append(rhs_vec)
                 rows_ub_chunks.append(rhs_vec)
             else:
-                raise ValueError(f"sense must be '<=', '>=' or '=='; "
-                                 f"got {sense!r}")
+                raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
 
             if over is None:
                 row_names.append(name)
             else:
-                row_names.extend((over.select(pl.format(
-                            "{}[{}]",
-                            pl.lit(name),
-                            pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in axis_cols],
-                                separator=",")
-                            ).alias("__rn"))
-                          )["__rn"].to_list())
+                row_names.extend(
+                    (
+                        over.select(
+                            pl.format(
+                                "{}[{}]",
+                                pl.lit(name),
+                                pl.concat_str(
+                                    [pl.col(d).cast(pl.String) for d in axis_cols], separator=","
+                                ),
+                            ).alias("__rn")
+                        )
+                    )["__rn"].to_list()
+                )
 
             row_index_lf = row_index.lazy()
             for term in expr.terms:
@@ -1938,7 +2052,7 @@ class WarmProblem:
                 # ``Problem.solve``.
                 tracked_sources: list[tuple[Param, int]] = []
                 if term.param_sources and self._mutable_params:
-                    for (pobj, pdir) in term.param_sources:
+                    for pobj, pdir in term.param_sources:
                         if pobj.name in self._mutable_params:
                             tracked_sources.append((pobj, pdir))
 
@@ -1949,21 +2063,22 @@ class WarmProblem:
                             f"constraint {name!r}: term has open dims "
                             f"{term.dims}, but constraint axes are "
                             f"{axis_cols}; aggregate {missing} via Sum() "
-                            f"before adding.")
+                            f"before adding."
+                        )
                     on = [d for d in term.dims if d in axis_cols]
                     if tracked_sources:
                         # Keep the term's open dims so we can recover
                         # source-Param dim tuples per cell.
-                        plan = (row_index_lf
-                                .join(term.lazy, on=on, how="inner")
-                                .select("_rid", "col_id", "coef",
-                                        *term.dims))
-                        pending.append(("dim_track", base_row, plan,
-                                        tracked_sources, tuple(term.dims)))
+                        plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                            "_rid", "col_id", "coef", *term.dims
+                        )
+                        pending.append(
+                            ("dim_track", base_row, plan, tracked_sources, tuple(term.dims))
+                        )
                     else:
-                        plan = (row_index_lf
-                                .join(term.lazy, on=on, how="inner")
-                                .select("_rid", "col_id", "coef"))
+                        plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                            "_rid", "col_id", "coef"
+                        )
                         pending.append(("dim", base_row, plan))
                 else:
                     if tracked_sources:
@@ -1974,12 +2089,11 @@ class WarmProblem:
                         # only works for scalar Params; record without
                         # dim_keys.
                         plan = term.lazy.select("col_id", "coef")
-                        pending.append(("scalar_track", base_row,
-                                        row_count, plan, tracked_sources))
+                        pending.append(("scalar_track", base_row, row_count, plan, tracked_sources))
                     else:
-                        pending.append(("scalar", base_row, row_count,
-                                        term.lazy.select("col_id",
-                                                          "coef")))
+                        pending.append(
+                            ("scalar", base_row, row_count, term.lazy.select("col_id", "coef"))
+                        )
 
         # Per-tracked-Param accumulators.  Each entry is a list of
         # contributions (dicts with rows/cols/dim_keys/factor/direction)
@@ -1991,11 +2105,16 @@ class WarmProblem:
             # site above.  Use a small switch.
             def _plan(pe):
                 k = pe[0]
-                if k == "dim":          return pe[2]
-                if k == "dim_track":    return pe[2]
-                if k == "scalar":       return pe[3]
-                if k == "scalar_track": return pe[3]
+                if k == "dim":
+                    return pe[2]
+                if k == "dim_track":
+                    return pe[2]
+                if k == "scalar":
+                    return pe[3]
+                if k == "scalar_track":
+                    return pe[3]
                 raise AssertionError(f"unknown pending kind {k!r}")
+
             plans = [_plan(pe) for pe in pending]
             collected = pl.collect_all(plans)
             for pe, j in zip(pending, collected):
@@ -2019,7 +2138,7 @@ class WarmProblem:
                     triple_cols.append(cids.copy())
                     triple_vals.append(coefs.copy())
                     # Per source Param: extract dim_keys, factor, direction.
-                    for (pobj, pdir) in tracked_sources:
+                    for pobj, pdir in tracked_sources:
                         pname = pobj.name
                         pdims = pobj.dims
                         # Subset of pdims that survives in the term
@@ -2032,31 +2151,32 @@ class WarmProblem:
                             continue
                         if pdims:
                             keys_df = j.select(*pdims)
-                            joined = (keys_df
-                                      .with_row_index("__ridx")
-                                      .join(pobj.frame, on=list(pdims),
-                                            how="left")
-                                      .sort("__ridx"))
-                            old_vals = (joined["value"].fill_null(0.0)
-                                                        .to_numpy()
-                                                        .astype(np.float64,
-                                                                copy=False))
+                            joined = (
+                                keys_df.with_row_index("__ridx")
+                                .join(pobj.frame, on=list(pdims), how="left")
+                                .sort("__ridx")
+                            )
+                            old_vals = (
+                                joined["value"]
+                                .fill_null(0.0)
+                                .to_numpy()
+                                .astype(np.float64, copy=False)
+                            )
                             if pdir == 1:
-                                safe = np.where(old_vals == 0.0, 1.0,
-                                                old_vals)
-                                factor = np.where(old_vals == 0.0, 0.0,
-                                                  coefs / safe)
+                                safe = np.where(old_vals == 0.0, 1.0, old_vals)
+                                factor = np.where(old_vals == 0.0, 0.0, coefs / safe)
                             else:
                                 factor = coefs * old_vals
-                            track_acc.setdefault(pname, []).append(dict(
-                                rows=abs_rows.copy(),
-                                cols=cids.copy(),
-                                dim_keys=keys_df,
-                                factor=factor,
-                                direction=np.full(coefs.size, pdir,
-                                                  dtype=np.int8),
-                                dim_signature=tuple(pdims),
-                            ))
+                            track_acc.setdefault(pname, []).append(
+                                dict(
+                                    rows=abs_rows.copy(),
+                                    cols=cids.copy(),
+                                    dim_keys=keys_df,
+                                    factor=factor,
+                                    direction=np.full(coefs.size, pdir, dtype=np.int8),
+                                    dim_signature=tuple(pdims),
+                                )
+                            )
                         else:
                             old_v = float(pobj.frame["value"][0])
                             if pdir == 1:
@@ -2066,21 +2186,23 @@ class WarmProblem:
                                     factor = coefs / old_v
                             else:
                                 factor = coefs * old_v
-                            track_acc.setdefault(pname, []).append(dict(
-                                rows=abs_rows.copy(),
-                                cols=cids.copy(),
-                                dim_keys=None,
-                                factor=factor,
-                                direction=np.full(coefs.size, pdir,
-                                                  dtype=np.int8),
-                                dim_signature=(),
-                            ))
+                            track_acc.setdefault(pname, []).append(
+                                dict(
+                                    rows=abs_rows.copy(),
+                                    cols=cids.copy(),
+                                    dim_keys=None,
+                                    factor=factor,
+                                    direction=np.full(coefs.size, pdir, dtype=np.int8),
+                                    dim_signature=(),
+                                )
+                            )
                 elif kind == "scalar":
                     _, base_row, row_count, _ = pe
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     vals = j["coef"].to_numpy().astype(np.float64)
-                    rs = np.repeat(np.arange(base_row, base_row + row_count,
-                                             dtype=np.int64), len(cids))
+                    rs = np.repeat(
+                        np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
+                    )
                     triple_rows.append(rs)
                     triple_cols.append(np.tile(cids, row_count))
                     triple_vals.append(np.tile(vals, row_count))
@@ -2088,8 +2210,9 @@ class WarmProblem:
                     _, base_row, row_count, _, _tracked = pe
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     vals = j["coef"].to_numpy().astype(np.float64)
-                    rs = np.repeat(np.arange(base_row, base_row + row_count,
-                                             dtype=np.int64), len(cids))
+                    rs = np.repeat(
+                        np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
+                    )
                     triple_rows.append(rs)
                     triple_cols.append(np.tile(cids, row_count))
                     triple_vals.append(np.tile(vals, row_count))
@@ -2119,8 +2242,11 @@ class WarmProblem:
             else:
                 dim_keys = None
             self._param_cells[pname] = dict(
-                rows=rows, cols=cols, factor=factor,
-                direction=direction, dim_signature=sig,
+                rows=rows,
+                cols=cols,
+                factor=factor,
+                direction=direction,
+                dim_signature=sig,
                 dim_keys=dim_keys,
             )
 
@@ -2128,8 +2254,11 @@ class WarmProblem:
             tr = np.concatenate(triple_rows)
             tc = np.concatenate(triple_cols)
             tv = np.concatenate(triple_vals)
-            dedup = (pl.DataFrame({"r": tr, "c": tc, "v": tv})
-                       .group_by(["r", "c"]).agg(pl.col("v").sum()))
+            dedup = (
+                pl.DataFrame({"r": tr, "c": tc, "v": tv})
+                .group_by(["r", "c"])
+                .agg(pl.col("v").sum())
+            )
             tr = dedup["r"].to_numpy().astype(np.int64)
             tc = dedup["c"].to_numpy().astype(np.int64)
             tv = dedup["v"].to_numpy().astype(np.float64)
@@ -2142,7 +2271,7 @@ class WarmProblem:
         inf = highspy.kHighsInf
 
         col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-        col_ub_h = np.where(col_ub ==  np.inf,  inf, col_ub).astype(np.float64)
+        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
         if rows_lb_chunks:
             rows_lb_arr = np.concatenate(rows_lb_chunks)
             rows_ub_arr = np.concatenate(rows_ub_chunks)
@@ -2150,7 +2279,7 @@ class WarmProblem:
             rows_lb_arr = np.zeros(0, dtype=np.float64)
             rows_ub_arr = np.zeros(0, dtype=np.float64)
         row_lb_h = np.where(rows_lb_arr == -np.inf, -inf, rows_lb_arr).astype(np.float64)
-        row_ub_h = np.where(rows_ub_arr ==  np.inf,  inf, rows_ub_arr).astype(np.float64)
+        row_ub_h = np.where(rows_ub_arr == np.inf, inf, rows_ub_arr).astype(np.float64)
 
         if tr.size:
             order = np.lexsort((tr, tc))
@@ -2168,9 +2297,9 @@ class WarmProblem:
         starts = np.cumsum(starts).astype(np.int32)
 
         lp = highspy.HighsLp()
-        lp.num_col_   = int(n_cols)
-        lp.num_row_   = int(n_rows)
-        lp.col_cost_  = col_obj.astype(np.float64)
+        lp.num_col_ = int(n_cols)
+        lp.num_row_ = int(n_rows)
+        lp.col_cost_ = col_obj.astype(np.float64)
         lp.col_lower_ = col_lb_h
         lp.col_upper_ = col_ub_h
         lp.row_lower_ = row_lb_h
@@ -2181,13 +2310,14 @@ class WarmProblem:
         lp.a_matrix_.start_ = starts
         lp.a_matrix_.index_ = sorted_r
         lp.a_matrix_.value_ = sorted_v
-        lp.sense_ = (highspy.ObjSense.kMaximize if p._obj_sense == "max"
-                     else highspy.ObjSense.kMinimize)
+        lp.sense_ = (
+            highspy.ObjSense.kMaximize if p._obj_sense == "max" else highspy.ObjSense.kMinimize
+        )
         if p._obj_offset:
             lp.offset_ = float(p._obj_offset)
         if col_int.any():
             kCont = highspy.HighsVarType.kContinuous
-            kInt  = highspy.HighsVarType.kInteger
+            kInt = highspy.HighsVarType.kInteger
             integ_arr = np.where(col_int, kInt, kCont)
             lp.integrality_ = integ_arr.tolist()
 
@@ -2196,20 +2326,18 @@ class WarmProblem:
         opts = options if options is not None else p._solver_options
         if opts:
             import warnings
+
             ok_status = getattr(highspy.HighsStatus, "kOk", None)
             for key, val in opts.items():
                 try:
                     status = h.setOptionValue(key, val)
                 except Exception as exc:
-                    warnings.warn(
-                        f"HiGHS rejected option {key}={val!r}: {exc}",
-                        stacklevel=2)
+                    warnings.warn(f"HiGHS rejected option {key}={val!r}: {exc}", stacklevel=2)
                     continue
                 if ok_status is not None and status != ok_status:
                     warnings.warn(
-                        f"HiGHS rejected option {key}={val!r} "
-                        f"(status={status!r})",
-                        stacklevel=2)
+                        f"HiGHS rejected option {key}={val!r} (status={status!r})", stacklevel=2
+                    )
         h.passModel(lp)
         for i, n in enumerate(col_names):
             if n is not None:

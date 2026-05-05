@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [Unreleased]
+
+### Added
+
+- GitHub Actions: tests on push/PR (Python 3.11–3.13), docs deploy
+  on main + tag (mike), PyPI release on tag (trusted publishing).
+- Ruff lint + format configured in `pyproject.toml`; `[lint]`
+  optional-dependency added.
+
+### Changed
+
+- Repo / docs URLs moved from `jkiviluo/polar-high-opt` to
+  `nodal-tools/polar-high-opt`; documentation site now at
+  `nodal-tools.github.io/polar-high-opt`.
+- One-time `ruff format` reflow across the source tree.
+
+### Removed
+
+- Two dangling unused locals (`engine.py` and `test_warm_problem.py`).
+
 ## [1.0.0] — 2026-05-05
 
 First public release.
