@@ -4,10 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polar-high-opt"
-version = "0.1.0"
-description = "Polars-backed LP eDSL.  Generic engine — knows nothing of flextool."
+version = "1.0.0"
+description = "Python library for building indexed linear and mixed-integer programs in polars; assembles into HiGHS, exportable as MPS."
+readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
+authors = [
+    {name = "Juha Kiviluoma", email = "juha.kiviluoma@nodal-tools.fi"},
+]
+maintainers = [
+    {name = "Juha Kiviluoma", email = "juha.kiviluoma@nodal-tools.fi"},
+]
+keywords = ["optimization", "linear-programming", "lp", "mip", "highs", "polars", "edsl"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
 dependencies = [
     "highspy",
     "polars",
@@ -16,6 +34,18 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "mike",
+    "mkdocs-include-markdown-plugin",
+]
+
+[project.urls]
+Homepage = "https://github.com/jkiviluo/polar-high-opt"
+Documentation = "https://jkiviluo.github.io/polar-high-opt/"
+Issues = "https://github.com/jkiviluo/polar-high-opt/issues"
+Changelog = "https://github.com/jkiviluo/polar-high-opt/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

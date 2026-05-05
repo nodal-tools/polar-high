@@ -1,4 +1,4 @@
-"""polar-high-opt — polars-backed LP eDSL for flextool-style models."""
+"""polar-high-opt — Python library for building indexed linear and mixed-integer programs in polars."""
 
 from polar_high_opt.engine import (
     Var,

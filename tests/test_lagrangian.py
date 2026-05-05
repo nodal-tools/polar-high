@@ -1,4 +1,4 @@
-"""Domain-free tests for the generic flexpy Lagrangian primitive.
+"""Domain-free tests for the generic Lagrangian primitive.
 
 These exercise :class:`polar_high_opt.LagrangianProblem` and the new
 :class:`WarmProblem` array-form methods (``update_obj_coef_array``,

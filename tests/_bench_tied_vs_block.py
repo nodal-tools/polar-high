@@ -61,7 +61,7 @@ def _make_data(n_fine: int, ratio: int, seed: int = 0):
     Cost is fully random per hour.  Demand is also random per hour.
     The two formulations are NOT mathematically identical when only
     ``x[t]`` is tied across a block (which is what we benchmark — see
-    ``build_tied_flexpy``):
+    ``build_tied``):
 
       * Tied keeps ``s[t]`` per fine hour, so it can absorb intra-block
         demand swings.
@@ -86,9 +86,9 @@ def _make_data(n_fine: int, ratio: int, seed: int = 0):
 
 
 # ----------------------------------------------------------------------------
-# Formulation A — tied (flexpy)
+# Formulation A — tied
 
-def build_tied_flexpy(n_fine: int, ratio: int, cost: np.ndarray,
+def build_tied(n_fine: int, ratio: int, cost: np.ndarray,
                       demand: np.ndarray, block_of_t: np.ndarray,
                       first_in_block: np.ndarray, tie_state: bool = False
                       ) -> fp.Problem:
@@ -173,9 +173,9 @@ def build_tied_flexpy(n_fine: int, ratio: int, cost: np.ndarray,
 
 
 # ----------------------------------------------------------------------------
-# Formulation B — block (flexpy)
+# Formulation B — block
 
-def build_block_flexpy(n_fine: int, ratio: int, cost: np.ndarray,
+def build_block(n_fine: int, ratio: int, cost: np.ndarray,
                        demand: np.ndarray, block_of_t: np.ndarray) -> fp.Problem:
     """Formulation B — block: one variable per coarse block.
 
@@ -223,7 +223,7 @@ def build_block_flexpy(n_fine: int, ratio: int, cost: np.ndarray,
 
 
 # ----------------------------------------------------------------------------
-# Solver runner using flexpy + override solve to capture LP shape
+# Solver runner: replicate Problem.solve to capture LP shape
 
 def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
     """Replicate Problem.solve internals so we can split build_time and solve_time
@@ -457,18 +457,18 @@ def _bench_one(formulation: str, ratio: int, n_fine: int,
 
         if formulation == "tied":
             t0 = time.perf_counter()
-            problem = build_tied_flexpy(n_fine_used, ratio, cost, demand,
+            problem = build_tied(n_fine_used, ratio, cost, demand,
                                         block_of_t, first_in_block)
             t_build_problem = time.perf_counter() - t0
         elif formulation == "block":
             t0 = time.perf_counter()
-            problem = build_block_flexpy(n_fine_used, ratio, cost, demand, block_of_t)
+            problem = build_block(n_fine_used, ratio, cost, demand, block_of_t)
             t_build_problem = time.perf_counter() - t0
         elif formulation == "baseline":
             t0 = time.perf_counter()
             # baseline: no tying, no blocks — one var per fine timestep,
             # demand balance only, no extra constraints. (1:1 reference.)
-            problem = build_baseline_flexpy(n_fine_used, cost, demand)
+            problem = build_baseline(n_fine_used, cost, demand)
             t_build_problem = time.perf_counter() - t0
         else:
             raise ValueError(formulation)
@@ -490,7 +490,7 @@ def _bench_one(formulation: str, ratio: int, n_fine: int,
     return res
 
 
-def build_baseline_flexpy(n_fine: int, cost: np.ndarray,
+def build_baseline(n_fine: int, cost: np.ndarray,
                           demand: np.ndarray) -> fp.Problem:
     p = fp.Problem()
     t_idx = pl.DataFrame({"t": np.arange(n_fine, dtype=np.int64)})

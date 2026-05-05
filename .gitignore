@@ -4,12 +4,11 @@ __pycache__/
 build/
 dist/
 
-# Local-only spike-era working files (not for the public repo)
-audit/
-progress.md
-handoff.md
-questions_for_user.md
-sets.md
+# Local-only working files (not part of the public repo)
+_archive/
+
+# Docs build artefacts
+site/
 
 # venv / IDE / tool config
 .venv/

@@ -1,0 +1,106 @@
+site_name: polar-high-opt
+site_description: Python library for building indexed linear and mixed-integer programs in polars.
+site_url: https://jkiviluo.github.io/polar-high-opt/
+repo_url: https://github.com/jkiviluo/polar-high-opt
+repo_name: jkiviluo/polar-high-opt
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  version:
+    provider: mike
+    default: latest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+plugins:
+  - search
+  - include-markdown
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            line_length: 80
+            members_order: source
+            merge_init_into_class: true
+            docstring_section_style: spacy
+          paths: [src]
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quickstart: quickstart.md
+  - Concepts:
+      - concepts/index.md
+      - Vars and Params: concepts/vars-and-params.md
+      - Expressions: concepts/expressions.md
+      - Problem and Solve: concepts/problem-and-solve.md
+      - Duals and Bases: concepts/duals-and-bases.md
+  - Guide:
+      - Warm-starting: guide/warm-starting.md
+      - Lagrangian: guide/lagrangian.md
+      - Performance: guide/performance.md
+      - Debugging: guide/debugging.md
+  - Reference:
+      - API: reference/api.md
+  - Compare:
+      - Alternatives: compare/alternatives.md
+  - Changelog: changelog.md
+  - About:
+      - About: about/about.md
+      - License: about/license.md
