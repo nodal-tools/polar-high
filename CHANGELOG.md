@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [1.1.1] — 2026-05-05
+
+### Fixed
+
+- `pyproject.toml`: add Python 3.13 classifier. CI's test matrix
+  already covers 3.13; the classifier was missing so the
+  pyversions badge was reading "3.11 | 3.12" only.
+- `release.yml`: `skip-existing: true` on the PyPI publish step.
+  Re-tagging the same version now no-ops on PyPI's duplicate-file
+  rejection instead of showing the run as failed.
+
 ## [1.1.0] — 2026-05-05
 
 ### Changed
