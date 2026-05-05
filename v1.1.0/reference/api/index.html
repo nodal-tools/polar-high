@@ -1,0 +1,5823 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Python library for building indexed linear and mixed-integer programs in polars.">
+      
+      
+      
+        <link rel="canonical" href="https://nodal-tools.github.io/polar-high/v1.1.0/reference/api/">
+      
+      
+        <link rel="prev" href="../../guide/debugging/">
+      
+      
+        <link rel="next" href="../../compare/alternatives/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>API - polar-high</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#api-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="polar-high" class="md-header__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            polar-high
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              API
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="polar-high" class="md-nav__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    polar-high
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/vars-and-params/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vars and Params
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/expressions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Expressions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/problem-and-solve/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Problem and Solve
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/duals-and-bases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duals and Bases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/warm-starting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warm-starting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/lagrangian/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lagrangian
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#top-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Top-level
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Top-level">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        polar_high
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Problem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.set_solver_options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_solver_options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.add_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.cstr_names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.cstrs_named" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstrs_named
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.cstr_row_count" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_row_count
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.add_obj_constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_obj_constant
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="solve">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.solve--parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parameters
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Param
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Param">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Param.frame" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        frame
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Expr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WarmProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="WarmProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_rhs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_rhs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_obj_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_obj_coef_array" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef_array
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.fix_cols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fix_cols
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.declare_mutable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        declare_mutable
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_param
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.col_id_of_var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        col_id_of_var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.row_id_of_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_id_of_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Solution
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Solution">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution.value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution.value_wide" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value_wide
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution.constraint_dual" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        constraint_dual
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.CstrRecord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CstrRecord
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.CouplingEntry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingEntry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.CouplingSpec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingSpec
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.LagrangianProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LagrangianProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.LagrangianProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.LagrangianSolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianSolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Sum" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sum
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Where" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Lag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lag
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Modules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        engine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="engine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Param
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Param">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Param.frame" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        frame
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Expr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.CstrRecord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CstrRecord
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Problem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.set_solver_options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_solver_options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.add_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.cstr_names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.cstrs_named" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstrs_named
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.cstr_row_count" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_row_count
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.add_obj_constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_obj_constant
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="solve">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.solve--parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parameters
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Solution
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Solution">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution.value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution.value_wide" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value_wide
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution.constraint_dual" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        constraint_dual
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WarmProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="WarmProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_rhs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_rhs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_obj_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_obj_coef_array" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef_array
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.fix_cols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fix_cols
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.declare_mutable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        declare_mutable
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_param
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.col_id_of_var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        col_id_of_var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.row_id_of_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_id_of_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Lag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Where" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Sum" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sum
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        lagrangian
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="lagrangian">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.CouplingEntry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingEntry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.CouplingSpec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingSpec
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.LagrangianSolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianSolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.LagrangianProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LagrangianProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.LagrangianProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compare
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Compare
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../compare/alternatives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Alternatives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../compare/benchmark/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/about/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#top-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Top-level
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Top-level">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        polar_high
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Problem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.set_solver_options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_solver_options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.add_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.cstr_names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.cstrs_named" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstrs_named
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.cstr_row_count" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_row_count
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.add_obj_constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_obj_constant
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="solve">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Problem.solve--parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parameters
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Param
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Param">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Param.frame" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        frame
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Expr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WarmProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="WarmProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_rhs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_rhs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_obj_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_obj_coef_array" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef_array
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.fix_cols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fix_cols
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.declare_mutable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        declare_mutable
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.update_param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_param
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.col_id_of_var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        col_id_of_var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.row_id_of_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_id_of_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.WarmProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Solution
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Solution">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution.value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution.value_wide" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value_wide
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Solution.constraint_dual" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        constraint_dual
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.CstrRecord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CstrRecord
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.CouplingEntry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingEntry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.CouplingSpec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingSpec
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.LagrangianProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LagrangianProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.LagrangianProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.LagrangianSolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianSolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Sum" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sum
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Where" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.Lag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lag
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Modules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        engine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="engine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Param
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Param">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Param.frame" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        frame
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Expr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.CstrRecord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CstrRecord
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Problem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.set_solver_options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_solver_options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.add_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.cstr_names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.cstrs_named" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstrs_named
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.cstr_row_count" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cstr_row_count
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.add_obj_constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_obj_constant
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="solve">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Problem.solve--parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parameters
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Solution
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Solution">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution.value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution.value_wide" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value_wide
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Solution.constraint_dual" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        constraint_dual
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WarmProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="WarmProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_rhs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_rhs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_obj_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_obj_coef_array" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_obj_coef_array
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.fix_cols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fix_cols
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_coef" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_coef
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.declare_mutable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        declare_mutable
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.update_param" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        update_param
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.col_id_of_var" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        col_id_of_var
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.row_id_of_cstr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_id_of_cstr
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.WarmProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Lag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Where" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.engine.Sum" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sum
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        lagrangian
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="lagrangian">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.CouplingEntry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingEntry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.CouplingSpec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CouplingSpec
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.LagrangianSolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianSolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.LagrangianProblem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LagrangianProblem
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LagrangianProblem">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#polar_high.lagrangian.LagrangianProblem.solve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        solve
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="api-reference">API reference<a class="headerlink" href="#api-reference" title="Permanent link">&para;</a></h1>
+<p>The full public surface, autogenerated from docstrings.</p>
+<h2 id="top-level">Top-level<a class="headerlink" href="#top-level" title="Permanent link">&para;</a></h2>
+
+
+<div class="doc doc-object doc-module">
+
+
+
+<a id="polar_high"></a>
+    <div class="doc doc-contents first">
+
+        <p>polar-high — Python library for building indexed linear and mixed-integer programs in polars.</p>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.Problem" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Problem</span>
+
+
+<a href="#polar_high.Problem" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Problem</span><span class="p">()</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>LP container.  Generic — no flextool-specific knowledge.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.set_solver_options" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">set_solver_options</span>
+
+
+<a href="#polar_high.Problem.set_solver_options" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">set_solver_options</span><span class="p">(</span><span class="n">options</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Store HiGHS options to be applied in <code>solve()</code>.  Pass <code>None</code>
+to clear.  Keys are HiGHS canonical option names (<code>presolve</code>,
+<code>solver</code>, <code>parallel</code>, <code>time_limit</code> etc); values must be
+already coerced to the type HiGHS expects (str/int/float/bool).
+Unknown keys are tolerated (a warning is emitted at solve time).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.add_cstr" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">add_cstr</span>
+
+
+<a href="#polar_high.Problem.add_cstr" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">add_cstr</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">over</span><span class="p">:</span> <span class="n">DataFrame</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">sense</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">lhs_terms</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Var</span> <span class="o">|</span> <span class="n">Expr</span> <span class="o">|</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span><span class="p">],</span> <span class="n">rhs_terms</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Var</span> <span class="o">|</span> <span class="n">Expr</span> <span class="o">|</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Add a constraint of the form  <code>Σ lhs_terms  sense  Σ rhs_terms</code>.</p>
+
+
+<details class="each-term-entry-is-either" open>
+  <summary>Each term entry is either</summary>
+  <ul>
+<li>a <code>Var</code> or <code>Expr</code>   — variable contribution, or</li>
+<li>a <code>Param</code>, <code>int</code> or <code>float</code> — constant contribution.</li>
+</ul>
+</details>        <p>The engine sorts variables and constants out per side, builds
+<code>(lhs_var − rhs_var) sense (rhs_const − lhs_const)</code>, and adds
+the row to highspy at solve time.  Labels (the dict keys) are
+used in row names and diagnostics.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.cstr_names" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">cstr_names</span>
+
+
+<a href="#polar_high.Problem.cstr_names" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">cstr_names</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>All constraint family names currently registered, in declaration
+order.  Useful for emission audits and debugging.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.cstrs_named" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">cstrs_named</span>
+
+
+<a href="#polar_high.Problem.cstrs_named" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">cstrs_named</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">CstrRecord</span><span class="p">]</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return constraint metadata records matching <code>name</code>.</p>
+<p>An exact-name match returns the single record; otherwise a prefix
+match returns every record whose name starts with <code>name + "_"</code>
+(so passing <code>"minimum_uptime"</code> returns both
+<code>minimum_uptime_linear</code> and <code>minimum_uptime_integer</code>).</p>
+<p>Each :class:<code>CstrRecord</code> carries:
+  * <code>name</code>: full registered name of the constraint family;
+  * <code>over</code>: the polars DataFrame of axis tuples (<code>len(over)</code>
+    is the row count);
+  * <code>proto</code>: the underlying <code>_CstrProto</code> (<code>expr</code>, <code>sense</code>,
+    <code>rhs</code>) for advanced introspection.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.cstr_row_count" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">cstr_row_count</span>
+
+
+<a href="#polar_high.Problem.cstr_row_count" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">cstr_row_count</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Total LP-row count across all constraint families matching
+<code>name</code> (exact or prefix; see :meth:<code>cstrs_named</code>).  Returns 0
+when no families match — letting callers distinguish "absent"
+from "empty" without exception handling.  A scalar constraint
+(<code>over=None</code>) counts as one row.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.add_obj_constant" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">add_obj_constant</span>
+
+
+<a href="#polar_high.Problem.add_obj_constant" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">add_obj_constant</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Accumulate a constant into the objective offset.  HiGHS adds
+this to the reported <code>getObjectiveValue()</code> after solve, so it
+shows up in <code>Solution.obj</code> even though no decision variable
+carries it.  Used for pure-Param objective terms like the §8.1
+existing-entity fixed cost.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Problem.solve" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">solve</span>
+
+
+<a href="#polar_high.Problem.solve" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">solve</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">options</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">keep_solver</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="n">streaming</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Solution</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Solve the LP and return a :class:<code>Solution</code>.</p>
+<h6 id="polar_high.Problem.solve--parameters">Parameters<a class="headerlink" href="#polar_high.Problem.solve--parameters" title="Permanent link">&para;</a></h6>
+<p>options
+    Per-call HiGHS options dict (overrides <code>set_solver_options</code>).
+keep_solver
+    When <code>True</code>, the live HiGHS instance is kept on the returned
+    :class:<code>Solution</code> so callers can inspect it post-solve (e.g.
+    <code>sol.highs.writeModel("model.mps")</code>).  Default <code>False</code> —
+    the C-side LP storage is released as soon as primal/dual/
+    objective have been extracted.
+streaming
+    When <code>True</code> (default), columns are added once via <code>addCols</code>
+    and each constraint family is emitted to HiGHS via <code>addRows</code>
+    immediately after its COO triples are built; the family's local
+    arrays then go out of scope before the next family is processed.
+    This caps peak memory at one family's COO + the running HiGHS
+    LP.  When <code>False</code>, the entire model is assembled into a single
+    :class:<code>highspy.HighsLp</code> and loaded via <code>passModel</code> —
+    numerically identical results either way; <code>False</code> is mostly
+    useful for benchmarking the legacy path.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.Var" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Var</span>
+
+
+<a href="#polar_high.Var" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Var</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span> <span class="n">lower</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">upper</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="s1">&#39;inf&#39;</span><span class="p">),</span> <span class="n">integer</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A variable family.  <code>frame</code> carries columns <code>*dims, col_id</code>.</p>
+<p><code>Var.frame</code> stays an eager polars DataFrame — it's small (one row
+per LP column), produced once in :meth:<code>Problem.add_var</code>, and
+consumed by both flextool integration (<code>v.frame["col_id"].unique()</code>)
+and <code>Problem.solve</code> (col_id → bound/name lookups).  Algebra ops on
+Var lazify on the fly so the resulting <code>_Term</code> is lazy.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.Param" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Param</span>
+
+
+<a href="#polar_high.Param" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Param</span><span class="p">(</span><span class="n">dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span> <span class="o">|</span> <span class="n">LazyFrame</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">_sources</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Param</span><span class="p">,</span> <span class="nb">int</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A parameter table.  <code>frame</code> carries columns <code>*dims, value</code>.</p>
+<p>Stored internally as a <code>polars.LazyFrame</code> so that chained algebra
+ops (<code>Param * Param</code>, <code>Param + Param</code> etc.) defer materialization
+until a consumer reads <code>.frame</code> or the engine collects in
+<code>Problem.solve</code>.  The <code>.frame</code> property caches the eager
+DataFrame on first read — flextool reads <code>.frame.rename(...)</code>
+repeatedly off the same Param so we want that to be cheap.</p>
+<p><code>name</code> (optional) is a logical Param identifier (e.g. "p_inflow").
+It is opt-in metadata used by :class:<code>WarmProblem</code>'s Param-tracked
+auto-update (<code>declare_mutable</code> / <code>update_param</code>).  When unset,
+Params are anonymous and carry no tracking overhead.</p>
+<p><code>_sources</code> records constituent named Params for composite results
+of <code>Param * Param</code> / <code>Param / Param</code>.  Each entry is
+<code>(param_name, dims_tuple, direction)</code> where direction is +1 if the
+Param contributes to the numerator and -1 if to the denominator.
+Anonymous-only chains have <code>_sources is None</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h4 id="polar_high.Param.frame" class="doc doc-heading">
+            <span class="doc doc-object-name doc-attribute-name">frame</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#polar_high.Param.frame" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Eager DataFrame view; collects on first read, then caches.</p>
+
+    </div>
+
+</div>
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.Expr" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Expr</span>
+
+
+<a href="#polar_high.Expr" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Expr</span><span class="p">(</span><span class="n">terms</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Term</span><span class="p">])</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A sum of terms (decision-variable contributions).</p>
+<p>The terms can have different open-dim sets — they're concatenated,
+not broadcast.  Broadcasting happens once, at constraint emission,
+via a join to the constraint's <code>over=</code> row index.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.WarmProblem" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">WarmProblem</span>
+
+
+<a href="#polar_high.WarmProblem" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">WarmProblem</span><span class="p">(</span><span class="n">problem</span><span class="p">:</span> <span class="n">Problem</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Warm-update wrapper around a :class:<code>Problem</code>.</p>
+<p>Build a :class:<code>Problem</code> as usual (<code>add_var</code>, <code>add_cstr</code>,
+<code>set_objective</code>).  Wrap with :class:<code>WarmProblem</code>, then alternate
+<code>update_*</code> calls and <code>solve()</code> calls — the LP is built ONCE and
+only the changed coefficients / RHS values are pushed to HiGHS
+between solves.</p>
+<p>Typical rolling-horizon usage::</p>
+<div class="language-text highlight"><pre><span></span><code>wp = WarmProblem(p)
+sol_0 = wp.solve()
+for r in range(1, n_rolls):
+    wp.update_rhs(&quot;balance&quot;, demand_param_for_roll[r])
+    wp.update_obj_coef(&quot;v_flow&quot;, cost_param_for_roll[r])
+    sol_r = wp.solve()
+</code></pre></div>
+<p>The <code>update_*</code> calls are O(rows_or_cols_in_family); the <code>solve()</code>
+benefits from HiGHS's hot-start (basis is preserved across calls).</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.update_rhs" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_rhs</span>
+
+
+<a href="#polar_high.WarmProblem.update_rhs" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_rhs</span><span class="p">(</span><span class="n">cstr_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">new_param</span><span class="p">:</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Replace the RHS of constraint family <code>cstr_name</code> with values
+drawn from <code>new_param</code>.</p>
+<p><code>new_param</code> may be a :class:<code>Param</code> whose dims match a subset
+of the constraint's <code>over=</code> axis (broadcasting to the rest), a
+scalar (broadcast to all rows), or a numpy array (positional —
+length must equal the family's row count, in the order of the
+original <code>over</code> frame).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.update_obj_coef" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_obj_coef</span>
+
+
+<a href="#polar_high.WarmProblem.update_obj_coef" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_obj_coef</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">new_param</span><span class="p">:</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Replace the objective coefficient on every column of <code>var_name</code>.</p>
+<p>Assumes the objective contribution from <code>var_name</code> is exactly
+<code>coef[*dims] * var[*dims]</code> for some <code>coef</code> Param; this method
+OVERWRITES that coefficient via <code>h.changeColsCost</code>.  If the
+objective also has contributions from this variable through more
+complex algebra (e.g. <code>var * unitsize * slope</code>), the update is
+still valid as long as <code>new_param</code> carries the full product —
+the caller is responsible for collapsing multi-Param products
+ahead of the call.</p>
+<p>This DOES NOT touch the cost coefficients of other variables.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.update_obj_coef_array" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_obj_coef_array</span>
+
+
+<a href="#polar_high.WarmProblem.update_obj_coef_array" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_obj_coef_array</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dim_tuples</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">values</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Array-form of :meth:<code>update_obj_coef</code>.</p>
+<p><code>dim_tuples</code> is a list of dim-value tuples (one per cell) for
+variable <code>var_name</code>; each tuple must have one entry per dim
+in the var's declared signature.  <code>values</code> is a same-length
+numpy array of new objective coefficients.</p>
+<p>The columns are resolved positionally: <code>values[k]</code> becomes the
+new objective coefficient on the column whose dim-tuple is
+<code>dim_tuples[k]</code>.  Vectorised — a single <code>changeColsCost</code>
+call regardless of cell count.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.fix_cols" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">fix_cols</span>
+
+
+<a href="#polar_high.WarmProblem.fix_cols" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">fix_cols</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dim_tuples</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">values</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Fix the listed columns of <code>var_name</code> to the given values.</p>
+<p>For each <code>(dim_tuple, value)</code> pair, sets both the column's
+lower and upper bound to <code>value</code> (so the LP has no choice
+but to set the column at that level).  Used by the Lagrangian
+primal-recovery step ("fix-and-resolve").  Vectorised — single
+<code>changeColsBounds</code> call.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.update_coef" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_coef</span>
+
+
+<a href="#polar_high.WarmProblem.update_coef" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_coef</span><span class="p">(</span><span class="n">row</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">col</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Update a single (row, col) coefficient in the constraint
+matrix.  Use :meth:<code>row_id_of_cstr</code> / :meth:<code>col_id_of_var</code> to
+resolve indices semantically.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.declare_mutable" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">declare_mutable</span>
+
+
+<a href="#polar_high.WarmProblem.declare_mutable" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">declare_mutable</span><span class="p">(</span><span class="o">*</span><span class="n">param_names</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Declare a set of :class:<code>Param</code> names whose values should be
+tracked into LP cells, so :meth:<code>update_param</code> can later push
+new values into the live HiGHS instance via <code>changeCoeff</code>.</p>
+<p>MUST be called BEFORE the first :meth:<code>solve</code>.  Tracking is
+opt-in: Params not declared here pay no bookkeeping cost.</p>
+<p>Pass the same names that the Params carry on their <code>.name</code>
+field — typically the FlexData attribute name (<code>"p_inflow"</code>,
+<code>"p_penalty_up"</code> etc.).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.update_param" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_param</span>
+
+
+<a href="#polar_high.WarmProblem.update_param" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_param</span><span class="p">(</span><span class="n">param_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">new_param</span><span class="p">:</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Replace the values of a tracked Param.  Every LP cell whose
+coefficient was originally a function of <code>param_name</code> is
+re-computed from the new Param's values and pushed via
+<code>h.changeCoeff</code>.</p>
+<p><code>new_param</code> must be either a scalar (broadcast to all tracked
+cells) or a :class:<code>Param</code> whose dim signature matches the
+signature recorded for that Param at build time.</p>
+<p>Raises if <code>param_name</code> was not in :meth:<code>declare_mutable</code>'s
+list (silent corruption is worse than a hard error).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.col_id_of_var" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">col_id_of_var</span>
+
+
+<a href="#polar_high.WarmProblem.col_id_of_var" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">col_id_of_var</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dims</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">|</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return the col_id(s) for a variable.</p>
+<p><code>dims=None</code> returns every col_id in the variable's family
+(numpy array, ordered by the var's declaration order).
+<code>dims</code> as a tuple of dim values returns the single col_id for
+that one cell (a python int).  <code>dims</code> as a dict
+<code>{dim_name: value}</code> is a partial filter — returns a numpy
+array of the matching col_ids.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.row_id_of_cstr" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">row_id_of_cstr</span>
+
+
+<a href="#polar_high.WarmProblem.row_id_of_cstr" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">row_id_of_cstr</span><span class="p">(</span><span class="n">cstr_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">axis</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">|</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return the row_id(s) for a constraint family.  Mirrors
+:meth:<code>col_id_of_var</code>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.WarmProblem.solve" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">solve</span>
+
+
+<a href="#polar_high.WarmProblem.solve" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">solve</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">options</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Solution</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Solve the LP.  First call builds the LP from scratch (same
+pipeline as :meth:<code>Problem.solve</code>); subsequent calls just run
+HiGHS again on the (possibly updated) live model.</p>
+<p><code>options</code> is honoured on the FIRST solve only — subsequent
+solves use the same HiGHS instance.  To change options on a
+rebuilt LP, drop the WarmProblem and create a new one.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.Solution" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Solution</span>
+
+
+<a href="#polar_high.Solution" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Solution</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">optimal</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span> <span class="n">obj</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">col_value</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">,</span> <span class="n">row_dual</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">,</span> <span class="n">col_names</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">row_names</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">vars</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Var</span><span class="p">],</span> <span class="n">col_dual</span><span class="p">:</span> <span class="n">ndarray</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">highs</span><span class="p">:</span> <span class="n">Highs</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Read-only view of the solved LP.  Look up variable values by
+name; values come back as a polars frame <code>(*dims, value)</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Solution.value" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">value</span>
+
+
+<a href="#polar_high.Solution.value" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">value</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Long-form per-variable solution: <code>(*dims, value)</code>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Solution.value_wide" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">value_wide</span>
+
+
+<a href="#polar_high.Solution.value_wide" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">value_wide</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">time_dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="s1">&#39;d&#39;</span><span class="p">,</span> <span class="s1">&#39;t&#39;</span><span class="p">),</span> <span class="n">solve_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Wide-form, flextool-compatible: time dims become rows, the
+remaining dims are encoded as a tuple-stringified column header.</p>
+<p>For a 2-d variable like <code>vq_state_up(n, d, t)</code>:
+  long  :  rows = (n, d, t, value)
+  wide  :  rows = (d, t)  +  one column per <code>n</code> (header = "west").</p>
+<p>For a 5-d variable like <code>v_flow(p, source, sink, d, t)</code>:
+  wide  :  rows = (d, t)  +  one column per (p, source, sink),
+           header = <code>"('coal_plant', 'coal_market', 'west')"</code>
+           to match flextool's MultiIndex parquet round-trip.</p>
+<p>If <code>solve_name</code> is given, prepend a constant <code>solve</code> column
+for fuller flextool-output compatibility.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.Solution.constraint_dual" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">constraint_dual</span>
+
+
+<a href="#polar_high.Solution.constraint_dual" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">constraint_dual</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Per-row dual values for a named constraint.  Returns a frame
+<code>(over_dims..., dual)</code> if the constraint had <code>over=</code> rows,
+else a single-row scalar frame <code>(dual,)</code>.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.CstrRecord" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">CstrRecord</span>
+
+
+<a href="#polar_high.CstrRecord" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">CstrRecord</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">over</span><span class="p">,</span> <span class="n">proto</span><span class="p">:</span> <span class="n">_CstrProto</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Read-only metadata for a registered constraint family.</p>
+<p>Returned by :meth:<code>Problem.cstrs_named</code> for emission-introspection
+tests.  <code>proto</code> carries the LHS <code>Expr</code>, <code>sense</code> and <code>rhs</code>
+structures; most callers only need <code>over</code> (whose <code>height</code> is the
+row count) and <code>name</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.CouplingEntry" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">CouplingEntry</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+<a href="#polar_high.CouplingEntry" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">CouplingEntry</span><span class="p">(</span><span class="n">subproblem_idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dim_tuples</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>One participant in a :class:<code>CouplingSpec</code>.  <code>dim_tuples</code> has
+one tuple per coupling cell; entries in one CouplingSpec must
+share length (entry-i tuple-k pairs with entry-j tuple-k under
+the same λ_k).</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.CouplingSpec" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">CouplingSpec</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+<a href="#polar_high.CouplingSpec" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">CouplingSpec</span><span class="p">(</span><span class="n">entries</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">CouplingEntry</span><span class="p">],</span> <span class="n">rhs</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">ndarray</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">object</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A linear coupling family across subproblems: per cell <code>k</code>,
+<code>Σ_e coef_e · x[entries[e].cols[k]]  =  rhs[k]</code>.  <code>rhs</code> is a
+scalar or an array sized to the cell count; default 0.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.LagrangianProblem" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">LagrangianProblem</span>
+
+
+<a href="#polar_high.LagrangianProblem" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">LagrangianProblem</span><span class="p">(</span><span class="n">subproblems</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Problem</span><span class="p">],</span> <span class="n">couplings</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">CouplingSpec</span><span class="p">])</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Lagrangian decomposition driver.  Build N :class:<code>Problem</code>s,
+list the cross-subproblem :class:<code>CouplingSpec</code>s, then call
+<code>LagrangianProblem(subproblems, couplings).solve(...)</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.LagrangianProblem.solve" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">solve</span>
+
+
+<a href="#polar_high.LagrangianProblem.solve" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">solve</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">max_iters</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">100</span><span class="p">,</span> <span class="n">tol</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span> <span class="n">step</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span> <span class="n">initial_lambda</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">min_iters</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span> <span class="n">primal_tail</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LagrangianSolution</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Run the dual-subgradient loop.</p>
+<p><code>step / √k</code> is the diminishing step on iter <code>k</code>.
+<code>initial_lambda</code> is a non-zero seed (breaks trivial 0-flow
+equilibria).  <code>min_iters</code> floors the iteration count so the
+early-termination test can't fire on iter 1.  <code>primal_tail</code>
+defaults to <code>max(20, max_iters//4)</code>.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="polar_high.LagrangianSolution" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">LagrangianSolution</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+<a href="#polar_high.LagrangianSolution" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">LagrangianSolution</span><span class="p">(</span><span class="n">converged</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span> <span class="n">iterations</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">total_objective</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">report_kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">subproblem_objectives</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span> <span class="n">iteration_log</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">],</span> <span class="n">final_lambdas</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ndarray</span><span class="p">],</span> <span class="n">primal_recovery</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(),</span> <span class="n">best_dual_total</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">recovered_total</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Result bundle from :meth:<code>LagrangianProblem.solve</code>.</p>
+<p><code>total_objective</code> is the chosen reported total; <code>report_kind</code>
+is <code>"best_dual"</code> (always for now — best LB across iters).
+<code>final_lambdas</code> and <code>primal_recovery</code> are ordered like
+<code>LagrangianProblem.couplings</code>.  The trailing iteration_log
+entry has <code>iter == -1</code> and carries report_kind / dual / primal
+summary fields.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="polar_high.Sum" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">Sum</span>
+
+
+<a href="#polar_high.Sum" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Sum</span><span class="p">(</span><span class="n">expr</span><span class="p">,</span> <span class="n">over</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">where</span><span class="p">:</span> <span class="n">DataFrame</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Expr</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Aggregate an Expr.  <code>over</code> lists the dims to sum out; the
+remaining dims become the term's open dims.  <code>where</code> is an index
+frame that pre-filters the term frames (inner join on shared
+columns) before the group-by-sum.</p>
+<p><code>Sum(expr)</code> with <code>over=None</code> collapses every open dim — useful
+for a scalar (objective term, single-row constraint).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="polar_high.Where" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">Where</span>
+
+
+<a href="#polar_high.Where" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Where</span><span class="p">(</span><span class="n">expr</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Expr</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Inner-join an Expr against <code>frame</code>.  Two effects in one op:</p>
+<ul>
+<li>Filter — rows of the term whose shared-column values don't
+  appear in <code>frame</code> are dropped (e.g. <code>Where(v_flow, wind_only)</code>
+  keeps only the wind rows).</li>
+<li>Map — any columns of <code>frame</code> that the term doesn't already
+  carry become <em>new open dims</em> of the resulting term (e.g.
+  <code>Where(v_flow, flow_to_n)</code> where <code>flow_to_n</code> has columns
+  <code>(p, source, sink, n)</code> adds <code>n</code> so the term can be bound
+  to a constraint indexed by <code>(n, t)</code>).</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="polar_high.Lag" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">Lag</span>
+
+
+<a href="#polar_high.Lag" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Lag</span><span class="p">(</span><span class="n">var</span><span class="p">,</span> <span class="n">lag_frame</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span> <span class="n">time_dim</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">lag_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Expr</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return an Expr that, for each (carry_dims, <code>time_dim</code>) in
+<code>lag_frame</code>, references <code>var</code> at (carry_dims, <code>lag_col</code>).</p>
+<p>Used for shifting variables in time, e.g. for storage state-change:</p>
+<div class="language-text highlight"><pre><span></span><code>v_state[n, d, t]  -  v_state[n, d, t_prev]
+</code></pre></div>
+<p>= v_state - Lag(v_state, dtttdt, "t", "t_prev_within_timeset")</p>
+<p><code>lag_frame</code> carries the (d, t, t_prev) lookup; <code>carry_dims</code> are
+the columns shared between <code>var</code> and <code>lag_frame</code> other than the
+time dim itself (typically <code>d</code>).</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div><h2 id="modules">Modules<a class="headerlink" href="#modules" title="Permanent link">&para;</a></h2>
+
+
+<div class="doc doc-object doc-module">
+
+
+
+<h3 id="polar_high.engine" class="doc doc-heading">
+            <span class="doc doc-object-name doc-module-name">polar_high.engine</span>
+
+
+<a href="#polar_high.engine" class="headerlink" title="Permanent link">&para;</a></h3>
+
+    <div class="doc doc-contents first">
+
+        <p>Generic polars-backed LP kernel.</p>
+<p>Three primitives — <code>Var</code>, <code>Param</code>, <code>Sum</code> — and one container
+(<code>Problem</code>).  Knows nothing about flextool, energy systems, or any
+specific model.  A constraint is built as either:</p>
+<ol>
+<li>
+<p>an <code>Expr</code> produced by overloaded operators (<code>v &lt;= cap</code>,
+     <code>Sum(...) &gt;= rhs</code>, <code>lhs.eq(rhs)</code>), passed positionally to
+     <code>Problem.add_cstr</code>; or</p>
+</li>
+<li>
+<p>a labelled <code>terms</code> dict, summed across all entries, with an
+     explicit <code>sense</code> and <code>rhs</code>.  Use this when a constraint is
+     naturally a sum of named contributions (storage transitions, sink
+     flow, source flow, slack — like flextool's nodeBalance_eq).</p>
+</li>
+</ol>
+<p>A variable is a polars frame <code>(*dims, col_id)</code> — one LP column per
+row.  A parameter is a polars frame <code>(*dims, value)</code>.  <code>Var * Param</code>
+joins on shared dims and emits an <code>Expr</code> term <code>(*union_dims, col_id,
+coef)</code>.  <code>Sum(expr, over=…)</code> group-by-sums one or more dims; the
+remaining dims become the constraint's row dims when the term is bound
+to <code>over=</code> at <code>add_cstr</code> time.</p>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.Param" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Param</span>
+
+
+<a href="#polar_high.engine.Param" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Param</span><span class="p">(</span><span class="n">dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span> <span class="o">|</span> <span class="n">LazyFrame</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">_sources</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Param</span><span class="p">,</span> <span class="nb">int</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A parameter table.  <code>frame</code> carries columns <code>*dims, value</code>.</p>
+<p>Stored internally as a <code>polars.LazyFrame</code> so that chained algebra
+ops (<code>Param * Param</code>, <code>Param + Param</code> etc.) defer materialization
+until a consumer reads <code>.frame</code> or the engine collects in
+<code>Problem.solve</code>.  The <code>.frame</code> property caches the eager
+DataFrame on first read — flextool reads <code>.frame.rename(...)</code>
+repeatedly off the same Param so we want that to be cheap.</p>
+<p><code>name</code> (optional) is a logical Param identifier (e.g. "p_inflow").
+It is opt-in metadata used by :class:<code>WarmProblem</code>'s Param-tracked
+auto-update (<code>declare_mutable</code> / <code>update_param</code>).  When unset,
+Params are anonymous and carry no tracking overhead.</p>
+<p><code>_sources</code> records constituent named Params for composite results
+of <code>Param * Param</code> / <code>Param / Param</code>.  Each entry is
+<code>(param_name, dims_tuple, direction)</code> where direction is +1 if the
+Param contributes to the numerator and -1 if to the denominator.
+Anonymous-only chains have <code>_sources is None</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h5 id="polar_high.engine.Param.frame" class="doc doc-heading">
+            <span class="doc doc-object-name doc-attribute-name">frame</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#polar_high.engine.Param.frame" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Eager DataFrame view; collects on first read, then caches.</p>
+
+    </div>
+
+</div>
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.Var" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Var</span>
+
+
+<a href="#polar_high.engine.Var" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Var</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span> <span class="n">lower</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">upper</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="s1">&#39;inf&#39;</span><span class="p">),</span> <span class="n">integer</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A variable family.  <code>frame</code> carries columns <code>*dims, col_id</code>.</p>
+<p><code>Var.frame</code> stays an eager polars DataFrame — it's small (one row
+per LP column), produced once in :meth:<code>Problem.add_var</code>, and
+consumed by both flextool integration (<code>v.frame["col_id"].unique()</code>)
+and <code>Problem.solve</code> (col_id → bound/name lookups).  Algebra ops on
+Var lazify on the fly so the resulting <code>_Term</code> is lazy.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.Expr" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Expr</span>
+
+
+<a href="#polar_high.engine.Expr" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Expr</span><span class="p">(</span><span class="n">terms</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Term</span><span class="p">])</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A sum of terms (decision-variable contributions).</p>
+<p>The terms can have different open-dim sets — they're concatenated,
+not broadcast.  Broadcasting happens once, at constraint emission,
+via a join to the constraint's <code>over=</code> row index.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.CstrRecord" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">CstrRecord</span>
+
+
+<a href="#polar_high.engine.CstrRecord" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">CstrRecord</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">over</span><span class="p">,</span> <span class="n">proto</span><span class="p">:</span> <span class="n">_CstrProto</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Read-only metadata for a registered constraint family.</p>
+<p>Returned by :meth:<code>Problem.cstrs_named</code> for emission-introspection
+tests.  <code>proto</code> carries the LHS <code>Expr</code>, <code>sense</code> and <code>rhs</code>
+structures; most callers only need <code>over</code> (whose <code>height</code> is the
+row count) and <code>name</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.Problem" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Problem</span>
+
+
+<a href="#polar_high.engine.Problem" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Problem</span><span class="p">()</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>LP container.  Generic — no flextool-specific knowledge.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.set_solver_options" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">set_solver_options</span>
+
+
+<a href="#polar_high.engine.Problem.set_solver_options" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">set_solver_options</span><span class="p">(</span><span class="n">options</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Store HiGHS options to be applied in <code>solve()</code>.  Pass <code>None</code>
+to clear.  Keys are HiGHS canonical option names (<code>presolve</code>,
+<code>solver</code>, <code>parallel</code>, <code>time_limit</code> etc); values must be
+already coerced to the type HiGHS expects (str/int/float/bool).
+Unknown keys are tolerated (a warning is emitted at solve time).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.add_cstr" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">add_cstr</span>
+
+
+<a href="#polar_high.engine.Problem.add_cstr" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">add_cstr</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">over</span><span class="p">:</span> <span class="n">DataFrame</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">sense</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">lhs_terms</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Var</span> <span class="o">|</span> <span class="n">Expr</span> <span class="o">|</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span><span class="p">],</span> <span class="n">rhs_terms</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Var</span> <span class="o">|</span> <span class="n">Expr</span> <span class="o">|</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Add a constraint of the form  <code>Σ lhs_terms  sense  Σ rhs_terms</code>.</p>
+
+
+<details class="each-term-entry-is-either" open>
+  <summary>Each term entry is either</summary>
+  <ul>
+<li>a <code>Var</code> or <code>Expr</code>   — variable contribution, or</li>
+<li>a <code>Param</code>, <code>int</code> or <code>float</code> — constant contribution.</li>
+</ul>
+</details>        <p>The engine sorts variables and constants out per side, builds
+<code>(lhs_var − rhs_var) sense (rhs_const − lhs_const)</code>, and adds
+the row to highspy at solve time.  Labels (the dict keys) are
+used in row names and diagnostics.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.cstr_names" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">cstr_names</span>
+
+
+<a href="#polar_high.engine.Problem.cstr_names" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">cstr_names</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>All constraint family names currently registered, in declaration
+order.  Useful for emission audits and debugging.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.cstrs_named" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">cstrs_named</span>
+
+
+<a href="#polar_high.engine.Problem.cstrs_named" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">cstrs_named</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">CstrRecord</span><span class="p">]</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return constraint metadata records matching <code>name</code>.</p>
+<p>An exact-name match returns the single record; otherwise a prefix
+match returns every record whose name starts with <code>name + "_"</code>
+(so passing <code>"minimum_uptime"</code> returns both
+<code>minimum_uptime_linear</code> and <code>minimum_uptime_integer</code>).</p>
+<p>Each :class:<code>CstrRecord</code> carries:
+  * <code>name</code>: full registered name of the constraint family;
+  * <code>over</code>: the polars DataFrame of axis tuples (<code>len(over)</code>
+    is the row count);
+  * <code>proto</code>: the underlying <code>_CstrProto</code> (<code>expr</code>, <code>sense</code>,
+    <code>rhs</code>) for advanced introspection.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.cstr_row_count" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">cstr_row_count</span>
+
+
+<a href="#polar_high.engine.Problem.cstr_row_count" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">cstr_row_count</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Total LP-row count across all constraint families matching
+<code>name</code> (exact or prefix; see :meth:<code>cstrs_named</code>).  Returns 0
+when no families match — letting callers distinguish "absent"
+from "empty" without exception handling.  A scalar constraint
+(<code>over=None</code>) counts as one row.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.add_obj_constant" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">add_obj_constant</span>
+
+
+<a href="#polar_high.engine.Problem.add_obj_constant" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">add_obj_constant</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Accumulate a constant into the objective offset.  HiGHS adds
+this to the reported <code>getObjectiveValue()</code> after solve, so it
+shows up in <code>Solution.obj</code> even though no decision variable
+carries it.  Used for pure-Param objective terms like the §8.1
+existing-entity fixed cost.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Problem.solve" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">solve</span>
+
+
+<a href="#polar_high.engine.Problem.solve" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">solve</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">options</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">keep_solver</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="n">streaming</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Solution</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Solve the LP and return a :class:<code>Solution</code>.</p>
+<h6 id="polar_high.engine.Problem.solve--parameters">Parameters<a class="headerlink" href="#polar_high.engine.Problem.solve--parameters" title="Permanent link">&para;</a></h6>
+<p>options
+    Per-call HiGHS options dict (overrides <code>set_solver_options</code>).
+keep_solver
+    When <code>True</code>, the live HiGHS instance is kept on the returned
+    :class:<code>Solution</code> so callers can inspect it post-solve (e.g.
+    <code>sol.highs.writeModel("model.mps")</code>).  Default <code>False</code> —
+    the C-side LP storage is released as soon as primal/dual/
+    objective have been extracted.
+streaming
+    When <code>True</code> (default), columns are added once via <code>addCols</code>
+    and each constraint family is emitted to HiGHS via <code>addRows</code>
+    immediately after its COO triples are built; the family's local
+    arrays then go out of scope before the next family is processed.
+    This caps peak memory at one family's COO + the running HiGHS
+    LP.  When <code>False</code>, the entire model is assembled into a single
+    :class:<code>highspy.HighsLp</code> and loaded via <code>passModel</code> —
+    numerically identical results either way; <code>False</code> is mostly
+    useful for benchmarking the legacy path.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.Solution" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">Solution</span>
+
+
+<a href="#polar_high.engine.Solution" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Solution</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">optimal</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span> <span class="n">obj</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">col_value</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">,</span> <span class="n">row_dual</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">,</span> <span class="n">col_names</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">row_names</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">vars</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Var</span><span class="p">],</span> <span class="n">col_dual</span><span class="p">:</span> <span class="n">ndarray</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">highs</span><span class="p">:</span> <span class="n">Highs</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Read-only view of the solved LP.  Look up variable values by
+name; values come back as a polars frame <code>(*dims, value)</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Solution.value" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">value</span>
+
+
+<a href="#polar_high.engine.Solution.value" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">value</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Long-form per-variable solution: <code>(*dims, value)</code>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Solution.value_wide" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">value_wide</span>
+
+
+<a href="#polar_high.engine.Solution.value_wide" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">value_wide</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">time_dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="s1">&#39;d&#39;</span><span class="p">,</span> <span class="s1">&#39;t&#39;</span><span class="p">),</span> <span class="n">solve_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Wide-form, flextool-compatible: time dims become rows, the
+remaining dims are encoded as a tuple-stringified column header.</p>
+<p>For a 2-d variable like <code>vq_state_up(n, d, t)</code>:
+  long  :  rows = (n, d, t, value)
+  wide  :  rows = (d, t)  +  one column per <code>n</code> (header = "west").</p>
+<p>For a 5-d variable like <code>v_flow(p, source, sink, d, t)</code>:
+  wide  :  rows = (d, t)  +  one column per (p, source, sink),
+           header = <code>"('coal_plant', 'coal_market', 'west')"</code>
+           to match flextool's MultiIndex parquet round-trip.</p>
+<p>If <code>solve_name</code> is given, prepend a constant <code>solve</code> column
+for fuller flextool-output compatibility.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.Solution.constraint_dual" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">constraint_dual</span>
+
+
+<a href="#polar_high.engine.Solution.constraint_dual" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">constraint_dual</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Per-row dual values for a named constraint.  Returns a frame
+<code>(over_dims..., dual)</code> if the constraint had <code>over=</code> rows,
+else a single-row scalar frame <code>(dual,)</code>.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.engine.WarmProblem" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">WarmProblem</span>
+
+
+<a href="#polar_high.engine.WarmProblem" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">WarmProblem</span><span class="p">(</span><span class="n">problem</span><span class="p">:</span> <span class="n">Problem</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Warm-update wrapper around a :class:<code>Problem</code>.</p>
+<p>Build a :class:<code>Problem</code> as usual (<code>add_var</code>, <code>add_cstr</code>,
+<code>set_objective</code>).  Wrap with :class:<code>WarmProblem</code>, then alternate
+<code>update_*</code> calls and <code>solve()</code> calls — the LP is built ONCE and
+only the changed coefficients / RHS values are pushed to HiGHS
+between solves.</p>
+<p>Typical rolling-horizon usage::</p>
+<div class="language-text highlight"><pre><span></span><code>wp = WarmProblem(p)
+sol_0 = wp.solve()
+for r in range(1, n_rolls):
+    wp.update_rhs(&quot;balance&quot;, demand_param_for_roll[r])
+    wp.update_obj_coef(&quot;v_flow&quot;, cost_param_for_roll[r])
+    sol_r = wp.solve()
+</code></pre></div>
+<p>The <code>update_*</code> calls are O(rows_or_cols_in_family); the <code>solve()</code>
+benefits from HiGHS's hot-start (basis is preserved across calls).</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.update_rhs" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_rhs</span>
+
+
+<a href="#polar_high.engine.WarmProblem.update_rhs" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_rhs</span><span class="p">(</span><span class="n">cstr_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">new_param</span><span class="p">:</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Replace the RHS of constraint family <code>cstr_name</code> with values
+drawn from <code>new_param</code>.</p>
+<p><code>new_param</code> may be a :class:<code>Param</code> whose dims match a subset
+of the constraint's <code>over=</code> axis (broadcasting to the rest), a
+scalar (broadcast to all rows), or a numpy array (positional —
+length must equal the family's row count, in the order of the
+original <code>over</code> frame).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.update_obj_coef" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_obj_coef</span>
+
+
+<a href="#polar_high.engine.WarmProblem.update_obj_coef" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_obj_coef</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">new_param</span><span class="p">:</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Replace the objective coefficient on every column of <code>var_name</code>.</p>
+<p>Assumes the objective contribution from <code>var_name</code> is exactly
+<code>coef[*dims] * var[*dims]</code> for some <code>coef</code> Param; this method
+OVERWRITES that coefficient via <code>h.changeColsCost</code>.  If the
+objective also has contributions from this variable through more
+complex algebra (e.g. <code>var * unitsize * slope</code>), the update is
+still valid as long as <code>new_param</code> carries the full product —
+the caller is responsible for collapsing multi-Param products
+ahead of the call.</p>
+<p>This DOES NOT touch the cost coefficients of other variables.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.update_obj_coef_array" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_obj_coef_array</span>
+
+
+<a href="#polar_high.engine.WarmProblem.update_obj_coef_array" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_obj_coef_array</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dim_tuples</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">values</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Array-form of :meth:<code>update_obj_coef</code>.</p>
+<p><code>dim_tuples</code> is a list of dim-value tuples (one per cell) for
+variable <code>var_name</code>; each tuple must have one entry per dim
+in the var's declared signature.  <code>values</code> is a same-length
+numpy array of new objective coefficients.</p>
+<p>The columns are resolved positionally: <code>values[k]</code> becomes the
+new objective coefficient on the column whose dim-tuple is
+<code>dim_tuples[k]</code>.  Vectorised — a single <code>changeColsCost</code>
+call regardless of cell count.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.fix_cols" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">fix_cols</span>
+
+
+<a href="#polar_high.engine.WarmProblem.fix_cols" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">fix_cols</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dim_tuples</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">values</span><span class="p">:</span> <span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Fix the listed columns of <code>var_name</code> to the given values.</p>
+<p>For each <code>(dim_tuple, value)</code> pair, sets both the column's
+lower and upper bound to <code>value</code> (so the LP has no choice
+but to set the column at that level).  Used by the Lagrangian
+primal-recovery step ("fix-and-resolve").  Vectorised — single
+<code>changeColsBounds</code> call.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.update_coef" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_coef</span>
+
+
+<a href="#polar_high.engine.WarmProblem.update_coef" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_coef</span><span class="p">(</span><span class="n">row</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">col</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Update a single (row, col) coefficient in the constraint
+matrix.  Use :meth:<code>row_id_of_cstr</code> / :meth:<code>col_id_of_var</code> to
+resolve indices semantically.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.declare_mutable" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">declare_mutable</span>
+
+
+<a href="#polar_high.engine.WarmProblem.declare_mutable" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">declare_mutable</span><span class="p">(</span><span class="o">*</span><span class="n">param_names</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Declare a set of :class:<code>Param</code> names whose values should be
+tracked into LP cells, so :meth:<code>update_param</code> can later push
+new values into the live HiGHS instance via <code>changeCoeff</code>.</p>
+<p>MUST be called BEFORE the first :meth:<code>solve</code>.  Tracking is
+opt-in: Params not declared here pay no bookkeeping cost.</p>
+<p>Pass the same names that the Params carry on their <code>.name</code>
+field — typically the FlexData attribute name (<code>"p_inflow"</code>,
+<code>"p_penalty_up"</code> etc.).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.update_param" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">update_param</span>
+
+
+<a href="#polar_high.engine.WarmProblem.update_param" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">update_param</span><span class="p">(</span><span class="n">param_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">new_param</span><span class="p">:</span> <span class="n">Param</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Replace the values of a tracked Param.  Every LP cell whose
+coefficient was originally a function of <code>param_name</code> is
+re-computed from the new Param's values and pushed via
+<code>h.changeCoeff</code>.</p>
+<p><code>new_param</code> must be either a scalar (broadcast to all tracked
+cells) or a :class:<code>Param</code> whose dim signature matches the
+signature recorded for that Param at build time.</p>
+<p>Raises if <code>param_name</code> was not in :meth:<code>declare_mutable</code>'s
+list (silent corruption is worse than a hard error).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.col_id_of_var" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">col_id_of_var</span>
+
+
+<a href="#polar_high.engine.WarmProblem.col_id_of_var" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">col_id_of_var</span><span class="p">(</span><span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dims</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">|</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return the col_id(s) for a variable.</p>
+<p><code>dims=None</code> returns every col_id in the variable's family
+(numpy array, ordered by the var's declaration order).
+<code>dims</code> as a tuple of dim values returns the single col_id for
+that one cell (a python int).  <code>dims</code> as a dict
+<code>{dim_name: value}</code> is a partial filter — returns a numpy
+array of the matching col_ids.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.row_id_of_cstr" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">row_id_of_cstr</span>
+
+
+<a href="#polar_high.engine.WarmProblem.row_id_of_cstr" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">row_id_of_cstr</span><span class="p">(</span><span class="n">cstr_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">axis</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">|</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return the row_id(s) for a constraint family.  Mirrors
+:meth:<code>col_id_of_var</code>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.engine.WarmProblem.solve" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">solve</span>
+
+
+<a href="#polar_high.engine.WarmProblem.solve" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">solve</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">options</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Solution</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Solve the LP.  First call builds the LP from scratch (same
+pipeline as :meth:<code>Problem.solve</code>); subsequent calls just run
+HiGHS again on the (possibly updated) live model.</p>
+<p><code>options</code> is honoured on the FIRST solve only — subsequent
+solves use the same HiGHS instance.  To change options on a
+rebuilt LP, drop the WarmProblem and create a new one.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.engine.Lag" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">Lag</span>
+
+
+<a href="#polar_high.engine.Lag" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Lag</span><span class="p">(</span><span class="n">var</span><span class="p">,</span> <span class="n">lag_frame</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span> <span class="n">time_dim</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">lag_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Expr</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return an Expr that, for each (carry_dims, <code>time_dim</code>) in
+<code>lag_frame</code>, references <code>var</code> at (carry_dims, <code>lag_col</code>).</p>
+<p>Used for shifting variables in time, e.g. for storage state-change:</p>
+<div class="language-text highlight"><pre><span></span><code>v_state[n, d, t]  -  v_state[n, d, t_prev]
+</code></pre></div>
+<p>= v_state - Lag(v_state, dtttdt, "t", "t_prev_within_timeset")</p>
+<p><code>lag_frame</code> carries the (d, t, t_prev) lookup; <code>carry_dims</code> are
+the columns shared between <code>var</code> and <code>lag_frame</code> other than the
+time dim itself (typically <code>d</code>).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.engine.Where" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">Where</span>
+
+
+<a href="#polar_high.engine.Where" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Where</span><span class="p">(</span><span class="n">expr</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Expr</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Inner-join an Expr against <code>frame</code>.  Two effects in one op:</p>
+<ul>
+<li>Filter — rows of the term whose shared-column values don't
+  appear in <code>frame</code> are dropped (e.g. <code>Where(v_flow, wind_only)</code>
+  keeps only the wind rows).</li>
+<li>Map — any columns of <code>frame</code> that the term doesn't already
+  carry become <em>new open dims</em> of the resulting term (e.g.
+  <code>Where(v_flow, flow_to_n)</code> where <code>flow_to_n</code> has columns
+  <code>(p, source, sink, n)</code> adds <code>n</code> so the term can be bound
+  to a constraint indexed by <code>(n, t)</code>).</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="polar_high.engine.Sum" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">Sum</span>
+
+
+<a href="#polar_high.engine.Sum" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">Sum</span><span class="p">(</span><span class="n">expr</span><span class="p">,</span> <span class="n">over</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">where</span><span class="p">:</span> <span class="n">DataFrame</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Expr</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Aggregate an Expr.  <code>over</code> lists the dims to sum out; the
+remaining dims become the term's open dims.  <code>where</code> is an index
+frame that pre-filters the term frames (inner join on shared
+columns) before the group-by-sum.</p>
+<p><code>Sum(expr)</code> with <code>over=None</code> collapses every open dim — useful
+for a scalar (objective term, single-row constraint).</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-module">
+
+
+
+<h3 id="polar_high.lagrangian" class="doc doc-heading">
+            <span class="doc doc-object-name doc-module-name">polar_high.lagrangian</span>
+
+
+<a href="#polar_high.lagrangian" class="headerlink" title="Permanent link">&para;</a></h3>
+
+    <div class="doc doc-contents first">
+
+        <p>Generic Lagrangian decomposition for coupled :class:<code>Problem</code>s.</p>
+<p>A domain-agnostic dual-subgradient driver for N independent LP
+subproblems linked by linear coupling constraints</p>
+<div class="language-text highlight"><pre><span></span><code>Σ_i  coef_i · col_i  =  rhs
+</code></pre></div>
+<p>Each :class:<code>CouplingSpec</code> carries a list of
+<code>(subproblem_idx, var_name, dim_tuple, coef)</code> entries plus an
+optional <code>rhs</code> (default 0).  The most common use is the 2-entry
+consensus coupling <code>x_A == x_B</code> with coefs +1 / -1, rhs 0.</p>
+
+
+<details class="algorithm" open>
+  <summary>Algorithm</summary>
+  <ol>
+<li>Bump each entry's column cost by <code>coef · λ</code> (relaxes the
+   coupling residual into the objective).</li>
+<li>Solve every subproblem (warm-started after iter 1).</li>
+<li>Compute residual <code>Σ coef_i · x_i − rhs</code> per cell.</li>
+<li>Subgradient step <code>λ ← λ + (step / √k) · residual</code>.</li>
+<li>Tail-window primal averaging → fix-and-resolve for a feasible
+   primal upper bound; report the <em>best dual</em> (max Σ obj across
+   iters) as the tight lower bound.</li>
+</ol>
+</details>        <p>Knows nothing about half-flows or regions — that lives in the
+flextool-side wrapper.</p>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.lagrangian.CouplingEntry" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">CouplingEntry</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+<a href="#polar_high.lagrangian.CouplingEntry" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">CouplingEntry</span><span class="p">(</span><span class="n">subproblem_idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">var_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dim_tuples</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>One participant in a :class:<code>CouplingSpec</code>.  <code>dim_tuples</code> has
+one tuple per coupling cell; entries in one CouplingSpec must
+share length (entry-i tuple-k pairs with entry-j tuple-k under
+the same λ_k).</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.lagrangian.CouplingSpec" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">CouplingSpec</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+<a href="#polar_high.lagrangian.CouplingSpec" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">CouplingSpec</span><span class="p">(</span><span class="n">entries</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">CouplingEntry</span><span class="p">],</span> <span class="n">rhs</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">ndarray</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">object</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>A linear coupling family across subproblems: per cell <code>k</code>,
+<code>Σ_e coef_e · x[entries[e].cols[k]]  =  rhs[k]</code>.  <code>rhs</code> is a
+scalar or an array sized to the cell count; default 0.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.lagrangian.LagrangianSolution" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">LagrangianSolution</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+<a href="#polar_high.lagrangian.LagrangianSolution" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">LagrangianSolution</span><span class="p">(</span><span class="n">converged</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span> <span class="n">iterations</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">total_objective</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">report_kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">subproblem_objectives</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span> <span class="n">iteration_log</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">],</span> <span class="n">final_lambdas</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ndarray</span><span class="p">],</span> <span class="n">primal_recovery</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(),</span> <span class="n">best_dual_total</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">recovered_total</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Result bundle from :meth:<code>LagrangianProblem.solve</code>.</p>
+<p><code>total_objective</code> is the chosen reported total; <code>report_kind</code>
+is <code>"best_dual"</code> (always for now — best LB across iters).
+<code>final_lambdas</code> and <code>primal_recovery</code> are ordered like
+<code>LagrangianProblem.couplings</code>.  The trailing iteration_log
+entry has <code>iter == -1</code> and carries report_kind / dual / primal
+summary fields.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="polar_high.lagrangian.LagrangianProblem" class="doc doc-heading">
+            <span class="doc doc-object-name doc-class-name">LagrangianProblem</span>
+
+
+<a href="#polar_high.lagrangian.LagrangianProblem" class="headerlink" title="Permanent link">&para;</a></h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">LagrangianProblem</span><span class="p">(</span><span class="n">subproblems</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Problem</span><span class="p">],</span> <span class="n">couplings</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">CouplingSpec</span><span class="p">])</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+
+
+        <p>Lagrangian decomposition driver.  Build N :class:<code>Problem</code>s,
+list the cross-subproblem :class:<code>CouplingSpec</code>s, then call
+<code>LagrangianProblem(subproblems, couplings).solve(...)</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="polar_high.lagrangian.LagrangianProblem.solve" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">solve</span>
+
+
+<a href="#polar_high.lagrangian.LagrangianProblem.solve" class="headerlink" title="Permanent link">&para;</a></h5>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">solve</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">max_iters</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">100</span><span class="p">,</span> <span class="n">tol</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span> <span class="n">step</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span> <span class="n">initial_lambda</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">min_iters</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span> <span class="n">primal_tail</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LagrangianSolution</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Run the dual-subgradient loop.</p>
+<p><code>step / √k</code> is the diminishing step on iter <code>k</code>.
+<code>initial_lambda</code> is a non-zero seed (breaks trivial 0-flow
+equilibria).  <code>min_iters</code> floors the iteration count so the
+early-termination test can't fire on iter 1.  <code>primal_tail</code>
+defaults to <code>max(20, max_iters//4)</code>.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.indexes", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
