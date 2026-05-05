@@ -40,3 +40,9 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # If the version is already on PyPI (e.g. a tag was moved
+          # and re-fired the workflow), skip rather than fail. PyPI
+          # rejects overwriting an existing wheel/sdist anyway, so a
+          # skip is the only sensible behaviour here.
+          skip-existing: true
