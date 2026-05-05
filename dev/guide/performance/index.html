@@ -1270,7 +1270,7 @@ beyond that, HiGHS run time dominates and build cost is noise.</p>
   that shares an index. Building the same <code>(n, d, t)</code> frame 30 times
   is cheap individually but adds up.</li>
 <li><strong>Densify Params at the boundary</strong>, not inside the kernel. Inner-
-  joins drop missing cells (see <a href="../../concepts/vars-and-params/#param--param">warning</a>),
+  joins drop missing cells (see <a href="../../concepts/vars-and-params/#param-param">warning</a>),
   so if you need zero-fill, do the <code>left_join</code>/<code>fill_null(0)</code> once
   before constructing the Param.</li>
 </ul>
