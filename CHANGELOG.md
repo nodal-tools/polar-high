@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [Unreleased]
+## [1.0.1] — 2026-05-05
 
 ### Added
 
@@ -15,13 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on main + tag (mike), PyPI release on tag (trusted publishing).
 - Ruff lint + format configured in `pyproject.toml`; `[lint]`
   optional-dependency added.
+- README badges: PyPI version, Python versions, license, tests CI,
+  docs CI, ruff.
 
 ### Changed
 
 - Repo / docs URLs moved from `jkiviluo/polar-high-opt` to
-  `nodal-tools/polar-high-opt`; documentation site now at
-  `nodal-tools.github.io/polar-high-opt`.
+  `nodal-tools/polar-high-opt`; documentation site is hosted at
+  `https://nodal-tools.fi/polar-high-opt/`.
 - One-time `ruff format` reflow across the source tree.
+
+### Fixed
+
+- Dead intra-doc anchor link in `guide/performance.md` (the
+  `vars-and-params.md` "Param × Param" heading slugifies to a single
+  hyphen, not two).
 
 ### Removed
 
