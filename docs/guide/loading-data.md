@@ -151,11 +151,10 @@ library got the data first.
 ## Memory: long format vs wide grids
 
 Every polar-high `Param` frame is `(*dims, value)` long format. For
-a regular grid with N nodes × T hours that means **N · T rows each
+a regular grid with N nodes × T hours that's **N · T rows each
 carrying both index columns plus the value**. xarray's dense layout
 would store the dim coordinates *once* and a bare `(N × T)` value
-array. So for a 1000-node × 8760-hour grid with `int64` indices,
-the long-format Param is roughly:
+array. For a 1000-node × 8760-hour grid with `int64` indices:
 
 | storage | columns | bytes |
 |---|---|---:|
@@ -165,40 +164,50 @@ the long-format Param is roughly:
 Three-ish times. polars does **not** auto-deduplicate the repeated
 index values; what you load is what's in memory.
 
-polar-high accepts this overhead because:
+This overhead applies to *most* parameters in real models. Even
+when entity-side topology is irregular (different processes connect
+to different nodes), the **time dim is regular and dense**, and it's
+usually the longest dim by a large margin. A typical hourly model
+runs on 8760 time steps; entities number in the hundreds or low
+thousands. So the regular-grid case isn't a corner case — it's the
+common case for time-coupled parameters.
 
-1. **Most real-world indexed LPs aren't regular grids.** Energy
-   systems, supply chains, transport networks have irregular
-   topologies (different nodes connect to different counterparties,
-   different processes use different commodities). Long format is
-   then *intrinsically* sparse — rows exist only where data
-   exists. There's nothing to deduplicate.
-2. **The benchmark page numbers it.** On the dense `N×N` test case,
-   xarray (linopy) wins peak memory; on the irregular network LP,
-   polar-high wins. Pick the layout that matches your model shape.
-3. **You can recover the constant factor for string dims.** Polars'
-   `Categorical` or `Enum` dtype stores each unique value once and
-   a small index per row. For grids with repeated string keys
-   (`node`, `unit`, `commodity`, ...) it's the easiest load-time
-   win:
+polar-high pays this overhead in exchange for two things, which you
+should weigh against your own constraints:
 
-   ```python
-   demand_df = pl.read_csv("demand.csv").with_columns(
-       node=pl.col("node").cast(pl.Categorical),
-   )
-   demand = Param(("node", "hour"), demand_df)
-   ```
+1. **Faster build** at the matrix-assembly stage. polars's joins
+   and group-bys outpace xarray's broadcast on the operations
+   polar-high hits during `Problem.solve()`. The benchmark page
+   shows the time numbers; for irregular topology the spread
+   widens further.
+2. **Simpler join semantics** for irregular relations
+   (edge → node, process → commodity, period → block). These
+   become explicit polars joins, which is cleaner than the
+   masking-and-reindexing required to express the same thing in
+   xarray. linopy can do it; the model code just gets harder.
 
-   polar-high doesn't care that `node` is categorical — joins and
-   group-bys behave identically — but the column footprint drops
-   from ~20 bytes per row (a typical string) to 4. For numeric dim
-   columns there's no equivalent shortcut; you pay 8 bytes per row.
+If your model is *dominated* by time-coupled parameters on a
+regular grid and memory is your tightest constraint, linopy/xarray
+will likely use less RAM than polar-high. The benchmark page
+confirms this on the dense `N × N` case — at full HiGHS solve,
+xarray's compactness wins. Pick the layout that matches what you
+care about most.
 
-If your model is dominated by a single regular grid and memory is
-a hard constraint, the trade-off may not favour polar-high. For
-mixed shapes (most real workloads), the long-format penalty on the
-regular pieces is dwarfed by the simpler join semantics on the
-irregular pieces.
+You can recover part of the constant factor with polars'
+`Categorical` or `Enum` dtype on string-valued dim columns. Each
+unique string is stored once and rows carry a 4-byte index instead
+of a variable-length string:
+
+```python
+demand_df = pl.read_csv("demand.csv").with_columns(
+    node=pl.col("node").cast(pl.Categorical),
+)
+demand = Param(("node", "hour"), demand_df)
+```
+
+polar-high doesn't care that `node` is categorical — joins and
+group-bys behave identically. For numeric dim columns there's no
+equivalent shortcut; you pay 8 bytes per row.
 
 ## Densification: when missing cells matter
 

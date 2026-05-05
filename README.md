@@ -7,7 +7,7 @@
 [![docs](https://img.shields.io/github/actions/workflow/status/nodal-tools/polar-high/docs.yml?branch=main&label=docs)](https://nodal-tools.fi/polar-high/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-A Python library for building and solving large indexed linear and
+A Python library for building and solving large linear and
 mixed-integer programs. Variables and parameters are
 [polars](https://pola.rs/) DataFrames, expressions are joined and
 grouped lazily, and the matrix is assembled directly through
