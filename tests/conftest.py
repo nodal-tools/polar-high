@@ -1,6 +1,6 @@
 """Pytest sys.path setup.
 
-The package (``polar_high_opt``) is installed via ``pip install -e .``;
+The package (``polar_high``) is installed via ``pip install -e .``;
 tests import it as a regular dependency.
 
 ``tests/fixtures/`` holds small toy models used by engine tests and is

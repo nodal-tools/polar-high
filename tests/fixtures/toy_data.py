@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from polar_high_opt import Param
+from polar_high import Param
 
 
 @dataclass

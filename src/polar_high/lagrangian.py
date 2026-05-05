@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from polar_high_opt.engine import Problem, WarmProblem
+from polar_high.engine import Problem, WarmProblem
 
 __all__ = ["CouplingEntry", "CouplingSpec", "LagrangianProblem", "LagrangianSolution"]
 

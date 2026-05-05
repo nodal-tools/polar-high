@@ -1,0 +1,46 @@
+"""polar-high — Python library for building indexed linear and mixed-integer programs in polars."""
+
+# Default polars to a single thread for the LP-build workload.
+# Rayon's coordination overhead consistently exceeds the parallel
+# speedup on typical indexed-LP build patterns (see the benchmark
+# page); single-thread is faster *and* leaner. Users who want more
+# threads can set POLARS_MAX_THREADS before importing polar_high.
+import os as _os
+
+_os.environ.setdefault("POLARS_MAX_THREADS", "1")
+
+from polar_high.engine import (
+    CstrRecord,
+    Expr,
+    Lag,
+    Param,
+    Problem,
+    Solution,
+    Sum,
+    Var,
+    WarmProblem,
+    Where,
+)
+from polar_high.lagrangian import (
+    CouplingEntry,
+    CouplingSpec,
+    LagrangianProblem,
+    LagrangianSolution,
+)
+
+__all__ = [
+    "Var",
+    "Param",
+    "Expr",
+    "Sum",
+    "Where",
+    "Lag",
+    "Problem",
+    "WarmProblem",
+    "Solution",
+    "CstrRecord",
+    "CouplingEntry",
+    "CouplingSpec",
+    "LagrangianProblem",
+    "LagrangianSolution",
+]

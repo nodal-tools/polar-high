@@ -5,7 +5,7 @@ import pytest
 from flex_toy_data import make_flex_toy_data
 from flex_toy_model import build_flex_toy
 
-from polar_high_opt import Problem
+from polar_high import Problem
 
 
 @pytest.mark.parametrize(

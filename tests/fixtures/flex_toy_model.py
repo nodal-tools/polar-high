@@ -14,7 +14,7 @@ period weights — every one of these is hardcoded to "trivial"
 (zero, one, or absent).  Stage 2+ adds them.
 """
 
-from polar_high_opt import Sum, Where
+from polar_high import Sum, Where
 
 
 def build_flex_toy(p, d):

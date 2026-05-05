@@ -830,7 +830,36 @@ class Problem:
 
     # -- solve -----------------------------------------------------------
 
-    def solve(self, *, options: dict | None = None) -> Solution:
+    def solve(
+        self,
+        *,
+        options: dict | None = None,
+        keep_solver: bool = False,
+        streaming: bool = True,
+    ) -> Solution:
+        """Solve the LP and return a :class:`Solution`.
+
+        Parameters
+        ----------
+        options
+            Per-call HiGHS options dict (overrides ``set_solver_options``).
+        keep_solver
+            When ``True``, the live HiGHS instance is kept on the returned
+            :class:`Solution` so callers can inspect it post-solve (e.g.
+            ``sol.highs.writeModel("model.mps")``).  Default ``False`` —
+            the C-side LP storage is released as soon as primal/dual/
+            objective have been extracted.
+        streaming
+            When ``True`` (default), columns are added once via ``addCols``
+            and each constraint family is emitted to HiGHS via ``addRows``
+            immediately after its COO triples are built; the family's local
+            arrays then go out of scope before the next family is processed.
+            This caps peak memory at one family's COO + the running HiGHS
+            LP.  When ``False``, the entire model is assembled into a single
+            :class:`highspy.HighsLp` and loaded via ``passModel`` —
+            numerically identical results either way; ``False`` is mostly
+            useful for benchmarking the legacy path.
+        """
         n_cols = self._next_col
         col_lb = np.zeros(n_cols, dtype=np.float64)
         col_ub = np.full(n_cols, np.inf, dtype=np.float64)
@@ -875,13 +904,27 @@ class Problem:
         # objective — scatter-add via np.add.at (one numpy op per term,
         # no per-nonzero Python iteration).  np.add.at handles the rare
         # case where a term frame contains duplicate col_ids correctly.
-        # NOTE: collect once per term, not twice — t.frame is a property
-        # that re-collects the LazyFrame on each access, and lazy
-        # (cross/inner) joins don't guarantee identical row order across
-        # collects, which would mis-pair col_id with coef.
+        # NOTE: materialize each term into a *local* DataFrame and let it
+        # drop at the end of the iteration — we deliberately do NOT
+        # populate any cache on _Term, so the eager frame is released
+        # once the COO contribution is built.  WarmProblem and any
+        # subsequent solve re-collect from the surviving lazy plan.
         for t in self._obj_terms:
-            tf = t.frame
-            np.add.at(col_obj, tf["col_id"].to_numpy(), tf["coef"].to_numpy())
+            f = t.lazy.collect()
+            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            del f
+
+        if streaming:
+            return self._solve_streaming(
+                n_cols=n_cols,
+                col_lb=col_lb,
+                col_ub=col_ub,
+                col_obj=col_obj,
+                col_int=col_int,
+                col_names=col_names,
+                options=options,
+                keep_solver=keep_solver,
+            )
 
         # constraints — build COO triples
         # rows_lb / rows_ub accumulate per family as small numpy arrays;
@@ -1065,20 +1108,27 @@ class Problem:
         row_ub_h = np.where(rows_ub_arr == np.inf, inf, rows_ub_arr).astype(np.float64)
 
         # build column-major (CSC) sparse matrix from the dedup'd triples
-        if tr.size:
+        # Pick HiGHS index dtype based on nnz: int32 when it fits
+        # (saves ~50% memory vs int64 on large LPs), else fall back to
+        # int64.  This affects ONLY the COO arrays passed to HiGHS via
+        # HighsLp (a_index_, a_start_); Var.frame["col_id"] keeps its
+        # int64 dtype for polars-join semantics.
+        nnz = int(tr.size)
+        idx_dtype = np.int32 if nnz < (1 << 31) else np.int64
+        if nnz:
             order = np.lexsort((tr, tc))  # primary: col, secondary: row
-            sorted_r = tr[order].astype(np.int32)
-            sorted_c = tc[order].astype(np.int32)
+            sorted_r = tr[order].astype(idx_dtype)
+            sorted_c = tc[order].astype(idx_dtype)
             sorted_v = tv[order].astype(np.float64)
         else:
-            sorted_r = np.zeros(0, dtype=np.int32)
-            sorted_c = np.zeros(0, dtype=np.int32)
+            sorted_r = np.zeros(0, dtype=idx_dtype)
+            sorted_c = np.zeros(0, dtype=idx_dtype)
             sorted_v = np.zeros(0, dtype=np.float64)
 
-        starts = np.zeros(n_cols + 1, dtype=np.int32)
+        starts = np.zeros(n_cols + 1, dtype=idx_dtype)
         if sorted_c.size:
             np.add.at(starts[1:], sorted_c, 1)
-        starts = np.cumsum(starts).astype(np.int32)
+        starts = np.cumsum(starts).astype(idx_dtype)
 
         lp = highspy.HighsLp()
         lp.num_col_ = int(n_cols)
@@ -1147,19 +1197,346 @@ class Problem:
         h.run()
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
+        obj_val = h.getObjectiveValue()
         col_value = np.asarray(sol.col_value, dtype=np.float64)
         row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
         col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
+        # ``keep_solver=False`` releases the live HiGHS instance after
+        # the primal/dual/objective have been extracted into numpy
+        # arrays.  Drop the local reference (and the LP handle) so the
+        # C-side LP storage can be freed; Solution.highs becomes None.
+        if keep_solver:
+            sol_highs: highspy.Highs | None = h
+        else:
+            sol_highs = None
+            del h, lp
         return Solution(
             optimal=status_ok,
-            obj=h.getObjectiveValue(),
+            obj=obj_val,
             col_value=col_value,
             row_dual=row_dual,
             col_dual=col_dual,
             col_names=col_names,
             row_names=row_names,
             vars=dict(self._vars),
-            highs=h,
+            highs=sol_highs,
+        )
+
+    # ------------------------------------------------------------------
+    # Streaming variant: opt-in alternative to the passModel fast path.
+    #
+    # Sets up columns once, then for each constraint family in
+    # ``self._cstrs`` builds that family's COO contribution, converts to
+    # row-CSR, and feeds it to HiGHS via ``addRows``.  The family's local
+    # arrays go out of scope at the end of each iteration so peak
+    # memory is bounded by one family's COO + the running HiGHS LP.
+    #
+    # Numerically identical to the passModel path: same primal, same
+    # duals (HiGHS row indexing continues monotonically across
+    # ``addRows`` calls so per-family ``base_row`` is preserved), same
+    # objective value.  The lazy plans on each ``_Term`` survive
+    # untouched so re-solves and ``WarmProblem`` stay valid.
+    def _solve_streaming(
+        self,
+        *,
+        n_cols: int,
+        col_lb: np.ndarray,
+        col_ub: np.ndarray,
+        col_obj: np.ndarray,
+        col_int: np.ndarray,
+        col_names: list[str],
+        options: dict | None,
+        keep_solver: bool,
+    ) -> Solution:
+        inf = highspy.kHighsInf
+
+        # Translate +/-inf in the column bounds to HiGHS's sentinel.
+        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
+        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
+        col_obj_h = col_obj.astype(np.float64, copy=False)
+
+        h = highspy.Highs()
+        h.silent()
+
+        # Apply solver options BEFORE any model state is established —
+        # mirrors the non-streaming path (``presolve`` and friends must
+        # be set before HiGHS sees the LP to take effect on run()).
+        opts = options if options is not None else self._solver_options
+        if opts:
+            import warnings
+
+            ok_status = getattr(highspy.HighsStatus, "kOk", None)
+            for key, val in opts.items():
+                try:
+                    status = h.setOptionValue(key, val)
+                except Exception as exc:
+                    warnings.warn(
+                        f"HiGHS rejected option {key}={val!r}: {exc}",
+                        stacklevel=2,
+                    )
+                    continue
+                if ok_status is not None and status != ok_status:
+                    warnings.warn(
+                        f"HiGHS rejected option {key}={val!r} (status={status!r})",
+                        stacklevel=2,
+                    )
+
+        # Objective sense + offset up front; column data comes next.
+        h.changeObjectiveSense(
+            highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
+        )
+        if self._obj_offset:
+            h.changeObjectiveOffset(float(self._obj_offset))
+
+        # Add all columns in one shot — no nonzeros yet (rows arrive
+        # afterwards via addRows).  highspy expects int32 for
+        # start/index even when num_new_nz == 0.
+        empty_i32 = np.zeros(0, dtype=np.int32)
+        empty_f64 = np.zeros(0, dtype=np.float64)
+        h.addCols(
+            int(n_cols),
+            col_obj_h,
+            col_lb_h,
+            col_ub_h,
+            0,
+            empty_i32,
+            empty_i32,
+            empty_f64,
+        )
+
+        # Integrality — same vectorized HighsVarType lookup as the
+        # passModel path; only set when at least one column is integer.
+        if col_int.any():
+            kCont = int(highspy.HighsVarType.kContinuous)
+            kInt = int(highspy.HighsVarType.kInteger)
+            integ_arr = np.where(col_int, kInt, kCont).astype(np.uint8)
+            all_idx = np.arange(n_cols, dtype=np.int32)
+            h.changeColsIntegrality(int(n_cols), all_idx, integ_arr)
+
+        # Column names — passColName is per-item but cheap.
+        for i, nm in enumerate(col_names):
+            if nm is not None:
+                h.passColName(i, nm)
+
+        # Walk the constraint families one at a time.  For each family
+        # we collect that family's term plans, build local COO arrays,
+        # convert to row-CSR, and call addRows.  All locals fall out of
+        # scope at iteration end.
+        row_names: list[str] = []
+        next_row = 0
+
+        for name, proto, over in self._cstrs:
+            expr, sense, rhs = proto.expr, proto.sense, proto.rhs
+
+            if over is None:
+                row_count = 1
+                row_index = pl.DataFrame({"_rid": [0]})
+                axis_cols: list[str] = []
+            else:
+                row_count = over.height
+                axis_cols = list(over.columns)
+                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
+
+            # base_row for this family is ``next_row``; HiGHS appends
+            # rows in monotonic order via addRows, so per-family row
+            # ranges are implicit — we just bump the counter.
+            next_row += row_count
+
+            # rhs vector — Expr/Var on rhs gets moved to lhs as -terms.
+            rhs_vec = np.zeros(row_count, dtype=np.float64)
+            if isinstance(rhs, (int, float)):
+                rhs_vec[:] = float(rhs)
+            elif isinstance(rhs, Param):
+                missing = [d for d in rhs.dims if d not in axis_cols]
+                if missing:
+                    raise ValueError(
+                        f"constraint {name!r}: rhs Param has dim {missing} not in over={axis_cols}"
+                    )
+                on = list(rhs.dims)
+                if on:
+                    j = row_index.join(rhs.frame, on=on, how="left")
+                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
+                else:
+                    rhs_vec[:] = float(rhs.frame["value"][0])
+            elif isinstance(rhs, (Var, Expr)):
+                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
+                neg = [
+                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
+                ]
+                expr = Expr(expr.terms + neg)
+            else:
+                raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
+
+            if sense == "<=":
+                row_lb = np.full(row_count, -inf, dtype=np.float64)
+                row_ub = np.where(rhs_vec == np.inf, inf, rhs_vec).astype(np.float64)
+            elif sense == ">=":
+                row_lb = np.where(rhs_vec == -np.inf, -inf, rhs_vec).astype(np.float64)
+                row_ub = np.full(row_count, inf, dtype=np.float64)
+            elif sense == "==":
+                rhs_h = np.where(rhs_vec == -np.inf, -inf, rhs_vec)
+                rhs_h = np.where(rhs_h == np.inf, inf, rhs_h).astype(np.float64)
+                row_lb = rhs_h
+                row_ub = rhs_h
+            else:
+                raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
+
+            # Row names — same polars-side formatting as the
+            # non-streaming path; stash for later passRowName loop.
+            if over is None:
+                row_names.append(name)
+            else:
+                row_names.extend(
+                    over.select(
+                        pl.format(
+                            "{}[{}]",
+                            pl.lit(name),
+                            pl.concat_str(
+                                [pl.col(d).cast(pl.String) for d in axis_cols], separator=","
+                            ),
+                        ).alias("__rn")
+                    )["__rn"].to_list()
+                )
+
+            # Build this family's COO contribution.  Each term yields
+            # either a "dim" plan (joined to row_index) or a "scalar"
+            # plan (tiled across row_count rows).  We collect_all per
+            # family so polars can still parallelize within a family,
+            # but the materialised frames go out of scope at the end of
+            # this iteration.
+            row_index_lf = row_index.lazy()
+            term_plans: list[tuple] = []
+            for term in expr.terms:
+                if term.dims:
+                    missing = [d for d in term.dims if d not in axis_cols]
+                    if missing:
+                        raise ValueError(
+                            f"constraint {name!r}: term has open dims {term.dims}, "
+                            f"but constraint axes are {axis_cols}; aggregate "
+                            f"{missing} via Sum() before adding."
+                        )
+                    on = [d for d in term.dims if d in axis_cols]
+                    plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                        "_rid", "col_id", "coef"
+                    )
+                    term_plans.append(("dim", plan))
+                else:
+                    term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
+
+            fam_rows: list[np.ndarray] = []
+            fam_cols: list[np.ndarray] = []
+            fam_vals: list[np.ndarray] = []
+            if term_plans:
+                collected = pl.collect_all([p for _, p in term_plans])
+                for (kind, _), j in zip(term_plans, collected):
+                    if kind == "dim":
+                        if j.height == 0:
+                            continue
+                        fam_rows.append(j["_rid"].to_numpy().astype(np.int64))
+                        fam_cols.append(j["col_id"].to_numpy().astype(np.int64))
+                        fam_vals.append(j["coef"].to_numpy().astype(np.float64))
+                    else:  # scalar — tile across the row_count rows
+                        cids = j["col_id"].to_numpy().astype(np.int64)
+                        vals = j["coef"].to_numpy().astype(np.float64)
+                        if cids.size == 0:
+                            continue
+                        fam_rows.append(np.repeat(np.arange(row_count, dtype=np.int64), cids.size))
+                        fam_cols.append(np.tile(cids, row_count))
+                        fam_vals.append(np.tile(vals, row_count))
+                del collected
+
+            if fam_rows:
+                fr = np.concatenate(fam_rows)
+                fc = np.concatenate(fam_cols)
+                fv = np.concatenate(fam_vals)
+                # Sum coefs for duplicate (row, col) pairs within the
+                # family — same dedup the passModel path does globally.
+                dedup = (
+                    pl.DataFrame({"r": fr, "c": fc, "v": fv})
+                    .group_by(["r", "c"])
+                    .agg(pl.col("v").sum())
+                )
+                fr = dedup["r"].to_numpy()
+                fc = dedup["c"].to_numpy()
+                fv = dedup["v"].to_numpy().astype(np.float64)
+                del dedup
+            else:
+                fr = np.zeros(0, dtype=np.int64)
+                fc = np.zeros(0, dtype=np.int64)
+                fv = np.zeros(0, dtype=np.float64)
+
+            # Convert COO → row-CSR.  HiGHS expects int32 for both
+            # ``start`` and ``index`` arrays in addRows; nnz per family
+            # is bounded by row_count * cols-per-row, so int32 is
+            # always sufficient (and matches the int32 fast path the
+            # non-streaming branch already uses globally for nnz <
+            # 2**31).
+            nnz = int(fr.size)
+            if nnz:
+                order = np.argsort(fr, kind="stable")
+                sorted_r = fr[order]
+                idx32 = fc[order].astype(np.int32)
+                val64 = fv[order]
+                starts = np.zeros(row_count + 1, dtype=np.int32)
+                # bincount of row indices → counts per row, then cumsum
+                counts = np.bincount(sorted_r.astype(np.int64), minlength=row_count)
+                starts[1:] = np.cumsum(counts).astype(np.int32)
+            else:
+                idx32 = np.zeros(0, dtype=np.int32)
+                val64 = np.zeros(0, dtype=np.float64)
+                starts = np.zeros(row_count + 1, dtype=np.int32)
+
+            # addRows expects ``start`` of length num_new_row (no
+            # trailing entry) — slice off the last cumulative count.
+            h.addRows(
+                int(row_count),
+                row_lb,
+                row_ub,
+                int(nnz),
+                starts[:row_count],
+                idx32,
+                val64,
+            )
+
+            # Track row range so dual lookup keeps working.  We don't
+            # populate Problem-level metadata (Problem doesn't carry
+            # _cstr_meta — that's a WarmProblem field), so this is
+            # purely a local consistency check; the lazy plans on
+            # _Term survive untouched.
+            del term_plans, fam_rows, fam_cols, fam_vals, fr, fc, fv, idx32, val64, starts
+
+        n_rows = next_row
+
+        # Row names — pass after all rows are added.  HiGHS row indices
+        # are monotonic across addRows calls, so the global ``i`` here
+        # matches the row index inside HiGHS.
+        for i, nm in enumerate(row_names):
+            h.passRowName(i, nm)
+
+        h.run()
+        sol = h.getSolution()
+        status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
+        obj_val = h.getObjectiveValue()
+        col_value = np.asarray(sol.col_value, dtype=np.float64)
+        row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
+        col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
+
+        if keep_solver:
+            sol_highs: highspy.Highs | None = h
+        else:
+            sol_highs = None
+            del h
+
+        return Solution(
+            optimal=status_ok,
+            obj=obj_val,
+            col_value=col_value,
+            row_dual=row_dual,
+            col_dual=col_dual,
+            col_names=col_names,
+            row_names=row_names,
+            vars=dict(self._vars),
+            highs=sol_highs,
         )
 
 
@@ -1339,7 +1716,7 @@ class WarmProblem:
 
     def __init__(self, problem: Problem):
         if not isinstance(problem, Problem):
-            raise TypeError("WarmProblem requires a polar_high_opt.Problem instance")
+            raise TypeError("WarmProblem requires a polar_high.Problem instance")
         self._p = problem
         # Lazy state — populated on first solve()
         self._h: highspy.Highs | None = None
@@ -1952,8 +2329,9 @@ class WarmProblem:
                 col_names[int(ids[0])] = v.name
 
         for t in p._obj_terms:
-            tf = t.frame
-            np.add.at(col_obj, tf["col_id"].to_numpy(), tf["coef"].to_numpy())
+            f = t.lazy.collect()
+            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            del f
 
         rows_lb_chunks: list[np.ndarray] = []
         rows_ub_chunks: list[np.ndarray] = []
@@ -2281,20 +2659,24 @@ class WarmProblem:
         row_lb_h = np.where(rows_lb_arr == -np.inf, -inf, rows_lb_arr).astype(np.float64)
         row_ub_h = np.where(rows_ub_arr == np.inf, inf, rows_ub_arr).astype(np.float64)
 
-        if tr.size:
+        # Pick HiGHS index dtype based on nnz (mirror Problem.solve):
+        # int32 when it fits, else int64.
+        nnz = int(tr.size)
+        idx_dtype = np.int32 if nnz < (1 << 31) else np.int64
+        if nnz:
             order = np.lexsort((tr, tc))
-            sorted_r = tr[order].astype(np.int32)
-            sorted_c = tc[order].astype(np.int32)
+            sorted_r = tr[order].astype(idx_dtype)
+            sorted_c = tc[order].astype(idx_dtype)
             sorted_v = tv[order].astype(np.float64)
         else:
-            sorted_r = np.zeros(0, dtype=np.int32)
-            sorted_c = np.zeros(0, dtype=np.int32)
+            sorted_r = np.zeros(0, dtype=idx_dtype)
+            sorted_c = np.zeros(0, dtype=idx_dtype)
             sorted_v = np.zeros(0, dtype=np.float64)
 
-        starts = np.zeros(n_cols + 1, dtype=np.int32)
+        starts = np.zeros(n_cols + 1, dtype=idx_dtype)
         if sorted_c.size:
             np.add.at(starts[1:], sorted_c, 1)
-        starts = np.cumsum(starts).astype(np.int32)
+        starts = np.cumsum(starts).astype(idx_dtype)
 
         lp = highspy.HighsLp()
         lp.num_col_ = int(n_cols)

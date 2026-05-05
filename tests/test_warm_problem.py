@@ -23,7 +23,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-import polar_high_opt as fp
+import polar_high as fp
 
 # ----------------------------------------------------------------------------
 # Helpers — same shape as tests/_bench_warm_vs_cold.py but inlined here so

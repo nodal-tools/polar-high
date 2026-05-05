@@ -16,7 +16,7 @@ A term is either a ``Var``/``Expr`` (variable contribution) or a
 sorts them out — labels are used in row names and diagnostics.
 """
 
-from polar_high_opt import Sum, Where
+from polar_high import Sum, Where
 
 
 def build_dispatch(p, d):

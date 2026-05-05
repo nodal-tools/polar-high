@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "polar-high-opt"
+name = "polar-high"
 version = "1.0.1"
 description = "Python library for building indexed linear and mixed-integer programs in polars; assembles into HiGHS, exportable as MPS."
 readme = "README.md"
@@ -43,10 +43,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nodal-tools/polar-high-opt"
-Documentation = "https://nodal-tools.github.io/polar-high-opt/"
-Issues = "https://github.com/nodal-tools/polar-high-opt/issues"
-Changelog = "https://github.com/nodal-tools/polar-high-opt/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/nodal-tools/polar-high"
+Documentation = "https://nodal-tools.github.io/polar-high/"
+Issues = "https://github.com/nodal-tools/polar-high/issues"
+Changelog = "https://github.com/nodal-tools/polar-high/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

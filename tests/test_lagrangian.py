@@ -1,6 +1,6 @@
 """Domain-free tests for the generic Lagrangian primitive.
 
-These exercise :class:`polar_high_opt.LagrangianProblem` and the new
+These exercise :class:`polar_high.LagrangianProblem` and the new
 :class:`WarmProblem` array-form methods (``update_obj_coef_array``,
 ``fix_cols``) on synthetic LPs only — no flextool dependency.
 
@@ -21,8 +21,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-import polar_high_opt as fp
-from polar_high_opt import CouplingEntry, CouplingSpec, LagrangianProblem, Problem, WarmProblem
+import polar_high as fp
+from polar_high import CouplingEntry, CouplingSpec, LagrangianProblem, Problem, WarmProblem
 
 # ---------------------------------------------------------------------------
 # Helper: build a tiny 1-cell maximisation LP   max c · x   s.t. x ≤ ub

@@ -44,7 +44,7 @@ import highspy
 import numpy as np
 import polars as pl
 
-import polar_high_opt as fp
+import polar_high as fp
 
 # ----------------------------------------------------------------------------
 # helpers
@@ -148,7 +148,7 @@ def build_tied(
     interior_first = first_in_block[interior_mask].astype(np.int64)
     if len(interior_t):
         tie_idx = pl.DataFrame({"t": interior_t, "t_anchor": interior_first})
-        from polar_high_opt.engine import Expr, _Term
+        from polar_high.engine import Expr, _Term
 
         x_row = (
             x.frame.join(tie_idx, on="t", how="inner")
@@ -289,7 +289,7 @@ def _emit_lp_and_solve(problem: fp.Problem, presolve: bool):
     triple_cols: list[np.ndarray] = []
     triple_vals: list[np.ndarray] = []
     next_row = 0
-    from polar_high_opt.engine import Expr, _Term
+    from polar_high.engine import Expr, _Term
 
     for name, proto, over in problem._cstrs:
         expr, sense, rhs = proto.expr, proto.sense, proto.rhs

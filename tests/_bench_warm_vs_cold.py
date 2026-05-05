@@ -34,7 +34,7 @@ import highspy
 import numpy as np
 import polars as pl
 
-import polar_high_opt as fp
+import polar_high as fp
 
 # ----------------------------------------------------------------------------
 # Synthetic rolling-horizon chain
