@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [1.1.2] — 2026-05-05
+
+### Added
+
+- `docs/guide/loading-data.md`: new guide page on going from CSV /
+  parquet / database tables to `Param` and `Var`, including the
+  long-format vs. wide-format trade-off and how column names become
+  dimension names.
+
+### Changed
+
+- `docs.yml`: drop the `dev` alias deploy on `main` pushes; only
+  tagged releases publish a versioned doc site.
+
 ## [1.1.1] — 2026-05-05
 
 ### Fixed
