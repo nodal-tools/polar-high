@@ -43,6 +43,7 @@ def test_polar_net_optimal(obj_polar: float) -> None:
 
 
 def test_linopy_net_matches_polar(obj_polar: float) -> None:
+    pytest.importorskip("linopy")
     from models.linopy_net import build, solve
 
     m = build(N)
@@ -52,6 +53,7 @@ def test_linopy_net_matches_polar(obj_polar: float) -> None:
 
 
 def test_pyomo_net_matches_polar(obj_polar: float) -> None:
+    pytest.importorskip("pyomo")
     from models.pyomo_net import build, solve
 
     m = build(N)
