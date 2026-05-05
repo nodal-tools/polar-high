@@ -6,6 +6,10 @@ dist/
 
 # Local-only working files (not part of the public repo)
 _archive/
+specs/
+
+# Benchmark intermediate outputs
+benchmark/results/
 
 # Docs build artefacts
 site/

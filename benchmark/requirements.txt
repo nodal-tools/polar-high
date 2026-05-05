@@ -1,0 +1,14 @@
+# Pinned dependencies for the benchmark.
+# Tools-under-test are unpinned (latest released wheels) so the plot
+# reflects current state of each library; pin here when locking down a
+# specific run for the docs.
+polar-high
+linopy>=0.3
+pyomo>=6.7
+highspy
+xarray
+numpy
+polars
+pandas
+matplotlib
+psutil
