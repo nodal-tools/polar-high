@@ -8,7 +8,7 @@ joins and group-bys under the hood.
 
 If you have used Pyomo or JuMP, the data structures will feel
 familiar; the semantics will not. Read this section before the API
-reference — most of the surface only makes sense once the dim/join
+reference. It will make better sense once the dim/join
 model clicks.
 
 ## Reading order

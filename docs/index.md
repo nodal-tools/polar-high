@@ -4,7 +4,7 @@ A Python library for building and solving large indexed linear and
 mixed-integer programs.
 
 polar-high lets you describe an indexed optimization model
-directly in [polars](https://pola.rs/) — variables and parameters
+directly in [polars](https://pola.rs/). Variables and parameters
 are DataFrames, expressions are joins and group-by-sums on those
 frames, and the matrix is assembled into [HiGHS](https://highs.dev/)
 without an intermediate matrix builder. The model can also be
@@ -14,7 +14,7 @@ supply chains, or any specific application.
 
 ## Why this exists
 
-If you write large indexed LPs, the bottleneck is not always the solver —
+If you create large indexed LPs, the bottleneck is not always the solver —
 it can be the time spent translating sets and parameters into a sparse
 matrix. polar-high keeps every step in polars: index sets are
 DataFrames, multiplications are joins, summations are group-bys, and
@@ -37,18 +37,18 @@ You will probably like this engine if:
 - Building a real model? Start in
   [Concepts](concepts/index.md) — the indexed-frame mental model is
   what you need before the API makes sense.
-- Already have a Pyomo / linopy / JuMP model in mind? Jump to
+- Already know Pyomo / linopy / JuMP framework? Jump to
   [Compare](compare/alternatives.md) for the design tradeoffs.
 - Need raw API surface? [Reference](reference/api.md).
 
 ## Status
 
-Version 1.0.0. The engine is heavily tested but correct functioning
-is **not guaranteed** — see [About](about/about.md).
+The engine is heavily tested but correct functioning
+is **not guaranteed**. See [About](about/about.md).
 
 The first downstream user is the
 [FlexTool](https://github.com/irena-flextool/flextool) energy-system
-modelling toolkit. FlexTool's test fleet — comparing the new
-polar-high implementation against the earlier GNU MathProg one
-across many scenarios — is the primary correctness validation for the
-kernel.
+modelling toolkit. FlexTool's fleet of system tests (from earlier
+GNU MathProg to HiGHS implementation) has been used to test
+polar-high in real modelling use cases. In addition
+polar-high kernel has its own set of unit and system tests.

@@ -1,8 +1,8 @@
 # polar-high
 
-[![PyPI](https://img.shields.io/pypi/v/polar-high.svg)](https://pypi.org/project/polar-high/)
-[![Python versions](https://img.shields.io/pypi/pyversions/polar-high.svg)](https://pypi.org/project/polar-high/)
-[![License](https://img.shields.io/pypi/l/polar-high.svg)](https://github.com/nodal-tools/polar-high/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/polar-high.svg?v=1)](https://pypi.org/project/polar-high/)
+[![Python versions](https://img.shields.io/pypi/pyversions/polar-high.svg?v=1)](https://pypi.org/project/polar-high/)
+[![License](https://img.shields.io/pypi/l/polar-high.svg?v=1)](https://github.com/nodal-tools/polar-high/blob/main/LICENSE)
 [![tests](https://img.shields.io/github/actions/workflow/status/nodal-tools/polar-high/test.yml?branch=main&label=tests)](https://github.com/nodal-tools/polar-high/actions/workflows/test.yml)
 [![docs](https://img.shields.io/github/actions/workflow/status/nodal-tools/polar-high/docs.yml?branch=main&label=docs)](https://nodal-tools.fi/polar-high/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -94,11 +94,16 @@ Build locally: `pip install -e ".[docs]" && mkdocs serve`.
 
 polar-high is the build engine behind the
 [FlexTool](https://github.com/irena-flextool/flextool) energy-system
-modelling toolkit (not in master branch yet).
-FlexTool's test fleet — comparing the new
-implementation against the earlier GNU MathProg one across many
-scenarios — has been used as validation for the kernel in addition
-to kernel's own testing.
+modelling toolkit.
+FlexTool's fleet of system tests (from earlier
+GNU MathProg to HiGHS implementation) has been used to test
+polar-high in real modelling use cases. In addition
+polar-high kernel has its own set of unit and system tests.
+
+## Created by
+
+polar-high was created by **Juha Kiviluoma** of **Nodal-Tools** using
+**Claude Opus**.
 
 ## License
 
