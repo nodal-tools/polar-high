@@ -148,6 +148,58 @@ pl_df = pl.from_pandas(pd_df)
 `pl.from_pandas` and `pl.from_numpy` cover the cases where another
 library got the data first.
 
+## Memory: long format vs wide grids
+
+Every polar-high `Param` frame is `(*dims, value)` long format. For
+a regular grid with N nodes × T hours that means **N · T rows each
+carrying both index columns plus the value**. xarray's dense layout
+would store the dim coordinates *once* and a bare `(N × T)` value
+array. So for a 1000-node × 8760-hour grid with `int64` indices,
+the long-format Param is roughly:
+
+| storage | columns | bytes |
+|---|---|---:|
+| polar-high (long) | node + hour + value, all `int64`/`float64`, 8.76 M rows | ≈ 210 MB |
+| xarray (wide) | 1000-long node coord + 8760-long hour coord + 1000×8760 value | ≈ 70 MB |
+
+Three-ish times. polars does **not** auto-deduplicate the repeated
+index values; what you load is what's in memory.
+
+polar-high accepts this overhead because:
+
+1. **Most real-world indexed LPs aren't regular grids.** Energy
+   systems, supply chains, transport networks have irregular
+   topologies (different nodes connect to different counterparties,
+   different processes use different commodities). Long format is
+   then *intrinsically* sparse — rows exist only where data
+   exists. There's nothing to deduplicate.
+2. **The benchmark page numbers it.** On the dense `N×N` test case,
+   xarray (linopy) wins peak memory; on the irregular network LP,
+   polar-high wins. Pick the layout that matches your model shape.
+3. **You can recover the constant factor for string dims.** Polars'
+   `Categorical` or `Enum` dtype stores each unique value once and
+   a small index per row. For grids with repeated string keys
+   (`node`, `unit`, `commodity`, ...) it's the easiest load-time
+   win:
+
+   ```python
+   demand_df = pl.read_csv("demand.csv").with_columns(
+       node=pl.col("node").cast(pl.Categorical),
+   )
+   demand = Param(("node", "hour"), demand_df)
+   ```
+
+   polar-high doesn't care that `node` is categorical — joins and
+   group-bys behave identically — but the column footprint drops
+   from ~20 bytes per row (a typical string) to 4. For numeric dim
+   columns there's no equivalent shortcut; you pay 8 bytes per row.
+
+If your model is dominated by a single regular grid and memory is
+a hard constraint, the trade-off may not favour polar-high. For
+mixed shapes (most real workloads), the long-format penalty on the
+regular pieces is dwarfed by the simpler join semantics on the
+irregular pieces.
+
 ## Densification: when missing cells matter
 
 `Param * Var`, `Param + Param`, and the joins inside `add_cstr` are
