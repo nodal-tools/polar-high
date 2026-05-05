@@ -65,6 +65,48 @@ cost = Param(("i", "j"), cost_long)
 `unpivot` (formerly `melt`) flips wide to long; `drop_nulls("value")`
 removes empty cells if your spreadsheet has gaps.
 
+### How column names become dim names
+
+A note on the bookkeeping. polar-high uses **polars's column names
+as the dim names** — the engine doesn't track dims separately from
+the frame's schema. When you write `Param(("i", "j"), cost_long)`,
+the engine verifies that `cost_long` has columns named `i`, `j`,
+and `value`, and stores the LazyFrame. Whenever `cost` is later
+multiplied by a `Var` that also declares `("i", "j")`, polars joins
+the two frames on shared column names and the result keeps those
+names. Dim tracking is bookkeeping polars does for you.
+
+The wide-format example above leans on this twice in the unpivot
+call:
+
+```python
+cost_long = df.unpivot(
+    index="i",
+    on=["a", "b"],          # values that go into the new dim column
+    variable_name="j",      # name of the new dim column
+    value_name="value",     # name of the coefficient column
+)
+```
+
+`variable_name="j"` is what links the wide CSV's column headers to
+polar-high's `Param(("i", "j"), …)` declaration. If you wrote
+`variable_name="product"` instead, the Param would carry the dim
+`"product"` and the engine would only join it against `Var`s and
+constraints that declare a `"product"` dim. The string is the
+identity. Same for `value_name="value"` — polar-high looks for a
+column literally called `value` on every `Param`, so if your source
+calls it something else, rename it at load time:
+
+```python
+df = pl.read_parquet("cap.parquet").rename({"capacity": "value"})
+cap = Param(("e", "t"), df)
+```
+
+That's the whole bookkeeping protocol. There's no separate type
+system, no parameter registry, no name remapping at solve time —
+the polars schema is the source of truth from data load through to
+the COO triples that go into HiGHS.
+
 ## From parquet
 
 ```python
