@@ -1158,7 +1158,6 @@ class Problem:
             lp.integrality_ = integ_arr.tolist()
 
         h = highspy.Highs()
-        h.silent()
         # Apply solver options BEFORE passModel — some HiGHS options
         # (notably ``presolve``) must be set before the model is loaded
         # to take effect on the first run().  Per-call ``options`` kwarg
@@ -1256,7 +1255,6 @@ class Problem:
         col_obj_h = col_obj.astype(np.float64, copy=False)
 
         h = highspy.Highs()
-        h.silent()
 
         # Apply solver options BEFORE any model state is established —
         # mirrors the non-streaming path (``presolve`` and friends must
@@ -1427,7 +1425,12 @@ class Problem:
             fam_cols: list[np.ndarray] = []
             fam_vals: list[np.ndarray] = []
             if term_plans:
-                collected = pl.collect_all([p for _, p in term_plans])
+                # For large families collect one term at a time so peak
+                # memory stays O(one_frame) rather than O(n_terms × frame).
+                if row_count > 50_000:
+                    collected = [p.collect() for _, p in term_plans]
+                else:
+                    collected = pl.collect_all([p for _, p in term_plans])
                 for (kind, _), j in zip(term_plans, collected):
                     if kind == "dim":
                         if j.height == 0:
@@ -2704,7 +2707,6 @@ class WarmProblem:
             lp.integrality_ = integ_arr.tolist()
 
         h = highspy.Highs()
-        h.silent()
         opts = options if options is not None else p._solver_options
         if opts:
             import warnings
