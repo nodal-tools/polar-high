@@ -4,6 +4,7 @@ The model is built by importing debug_example (module-level code runs
 on import).  Tests assert the pre-solve state and post-solve values
 that the guide page shows as expected outputs.
 """
+
 import debug_example as ex  # conftest adds tests/fixtures/ to sys.path
 
 

@@ -4,6 +4,7 @@ Section markers are consumed by MkDocs (pymdownx.snippets) to embed
 this code verbatim in the guide pages.  Module-level placement keeps
 the snippet at zero indentation in the rendered docs.
 """
+
 # --8<-- [start:model]
 import polars as pl
 
@@ -12,12 +13,17 @@ from polar_high import Param, Problem, Sum
 p = Problem()
 
 # Decision variable v_production[unit, hour] >= 0
-v_idx = pl.DataFrame({
-    "unit": ["wind", "wind", "wind", "coal", "coal", "coal"],
-    "hour": [1, 2, 3, 1, 2, 3],
-})
+v_idx = pl.DataFrame(
+    {
+        "unit": ["wind", "wind", "wind", "coal", "coal", "coal"],
+        "hour": [1, 2, 3, 1, 2, 3],
+    }
+)
 v_production = p.add_var(
-    "v_production", dims=("unit", "hour"), index=v_idx, lower=0.0,
+    "v_production",
+    dims=("unit", "hour"),
+    index=v_idx,
+    lower=0.0,
 )
 
 # Operating cost per unit
@@ -29,11 +35,13 @@ cost = Param(
 # Available capacity per unit per hour (wind drops in hour 2)
 cap = Param(
     ("unit", "hour"),
-    pl.DataFrame({
-        "unit":  ["wind", "wind", "wind", "coal", "coal", "coal"],
-        "hour":  [1, 2, 3, 1, 2, 3],
-        "value": [3.0, 1.0, 4.0, 10.0, 10.0, 10.0],
-    }),
+    pl.DataFrame(
+        {
+            "unit": ["wind", "wind", "wind", "coal", "coal", "coal"],
+            "hour": [1, 2, 3, 1, 2, 3],
+            "value": [3.0, 1.0, 4.0, 10.0, 10.0, 10.0],
+        }
+    ),
 )
 
 # Demand per hour
@@ -65,6 +73,6 @@ p.add_cstr(
 )
 
 sol = p.solve()
-print(f"objective: {sol.obj}")   # 72.0
+print(f"objective: {sol.obj}")  # 72.0
 print(sol.value("v_production"))
 # --8<-- [end:model]

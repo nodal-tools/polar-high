@@ -1,4 +1,5 @@
 """Verifies the worked example from docs/guide/lagrangian.md."""
+
 import lagrangian_example as ex  # conftest adds tests/fixtures/ to sys.path
 
 

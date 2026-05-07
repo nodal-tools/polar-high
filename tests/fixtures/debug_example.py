@@ -6,6 +6,7 @@ guide page.  The file is kept at module level (no enclosing function)
 so that the included snippet lands without indentation in the rendered
 docs.
 """
+
 # --8<-- [start:model]
 import polars as pl
 
@@ -13,11 +14,11 @@ import polar_high as ph
 
 nodes = pl.DataFrame({"node": ["west"]})
 hours = pl.DataFrame({"hour": [1, 2]})
-index = nodes.join(hours, how="cross")   # (node, hour)
+index = nodes.join(hours, how="cross")  # (node, hour)
 
-demand  = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(100.0)))
-cap     = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(120.0)))
-cost    = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(1.0)))
+demand = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(100.0)))
+cap = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(120.0)))
+cost = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(1.0)))
 penalty = ph.Param(("node", "hour"), index.with_columns(value=pl.lit(10.0)))
 
 p = ph.Problem()
