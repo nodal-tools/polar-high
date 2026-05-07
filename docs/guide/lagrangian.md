@@ -39,26 +39,35 @@ from polar_high import (
 
 ## Minimal example
 
+Two subproblems each with a local demand floor, linked by a consensus
+coupling that forces them to agree on a common flow value.  The model
+code is sourced from `tests/fixtures/lagrangian_example.py` and is
+verified by `tests/test_lagrangian_example.py`.
+
+Build the subproblems:
+
 ```python
-sub_a = build_problem_a()
-sub_b = build_problem_b()
+--8<-- "tests/fixtures/lagrangian_example.py:subproblems"
+```
 
-coupling = CouplingSpec(
-    entries=[
-        CouplingEntry(0, "x", dim_tuples=[(1, "t1"), (2, "t1")], coef=+1.0),
-        CouplingEntry(1, "x", dim_tuples=[(1, "t1"), (2, "t1")], coef=-1.0),
-    ],
-    rhs=0.0,
-)
+Assemble and solve:
 
-lp = LagrangianProblem(subproblems=[sub_a, sub_b],
-                       couplings=[coupling])
-sol = lp.solve(max_iters=50, step=1.0)
+```python
+--8<-- "tests/fixtures/lagrangian_example.py:coupling"
+```
 
-sol.total_objective       # best dual
+Inspect the result:
+
+```python
+sol.total_objective       # best dual bound (== 8.0 for this LP)
 sol.final_lambdas         # one array per coupling
 sol.iteration_log         # per-iter diagnostics
 ```
+
+`dim_tuples` lists the variable cells that participate in the coupling —
+one tuple per cell, with values matching the variable's dim columns in
+declaration order.  Here `"flow"` has a single dim `"k"` with one row
+`(0,)`, so `dim_tuples=[(0,)]`.
 
 ## When to use it
 

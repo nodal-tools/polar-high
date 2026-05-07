@@ -16,24 +16,7 @@ sol = p.solve()                         # build LP, hand to HiGHS, return Soluti
 Constraints are stored as protos and only materialize
 into LP rows when `solve()` (or `WarmProblem`) is invoked.
 
-## Two ways to add a constraint
-
-### Operator form
-
-For simple expressions:
-
-```python
-p.add_cstr("cap", v <= 5.0)         # not yet — see note below
-```
-
-!!! note "Use the dict form for indexed constraints"
-
-    The operator form is convenient for scalar constraints. For
-    indexed constraint families (almost all real-world cases), use
-    the labelled `lhs_terms` / `rhs_terms` form below — the engine
-    can produce term-isolated diagnostics when something goes wrong.
-
-### Labelled form
+## Adding a constraint
 
 ```python
 p.add_cstr(
@@ -70,9 +53,9 @@ when you need to look up row indices for warm updates or duals.
 sol = p.solve()
 sol.optimal              # bool
 sol.obj                  # float — objective value (with offset applied)
-sol.value(v)             # polars frame: (*dims, value)
-sol.value_wide(v, …)     # wide-form frame for time-indexed vars
-sol.constraint_dual("balance")   # polars frame: (*over_dims, dual)
+sol.value("v")             # polars frame: (*dims, value)
+sol.value_wide("v", …)    # wide-form frame for time-indexed vars
+sol.constraint_dual("balance")   # polars frame: (key, dual)
 sol.col_dual             # numpy array of reduced costs
 sol.highs                # the live highspy.Highs instance — for advanced use
 ```

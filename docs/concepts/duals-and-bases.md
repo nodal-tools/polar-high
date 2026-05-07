@@ -8,7 +8,7 @@ the primal solution.
 ```python
 sol = p.solve()
 duals = sol.constraint_dual("balance")
-# polars frame: (*over_dims, dual)
+# polars frame: (key, dual) — key is a comma-joined string of dim values
 ```
 
 The frame's index columns mirror the `over=` frame you supplied to

@@ -8,7 +8,8 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A Python library for building and solving large linear and
-mixed-integer programs. Variables and parameters are
+mixed-integer optimisation programs, i.e. domain specific language
+(DSL) for algebraic modelling. Variables and parameters are
 [polars](https://pola.rs/) DataFrames, expressions are joined and
 grouped lazily, and the matrix is assembled directly through
 [HiGHS](https://highs.dev/) — or exported as MPS for any other LP
@@ -29,45 +30,7 @@ A tiny dispatch LP — wind + coal over three hours, minimise cost
 subject to capacity and per-hour demand.
 
 ```python
-import polars as pl
-from polar_high import Problem, Param, Sum
-
-p = Problem()
-
-v_idx = pl.DataFrame({
-    "unit": ["wind", "wind", "wind", "coal", "coal", "coal"],
-    "hour": [1, 2, 3, 1, 2, 3],
-})
-v_production = p.add_var("v_production", dims=("unit", "hour"),
-                         index=v_idx, lower=0.0)
-
-cost = Param(("unit",),
-             pl.DataFrame({"unit": ["wind", "coal"],
-                           "value": [2.0, 8.0]}))
-
-cap = Param(("unit", "hour"), pl.DataFrame({
-    "unit":  ["wind", "wind", "wind", "coal", "coal", "coal"],
-    "hour":  [1, 2, 3, 1, 2, 3],
-    "value": [3.0, 1.0, 4.0, 10.0, 10.0, 10.0],
-}))
-
-demand = Param(("hour",),
-               pl.DataFrame({"hour": [1, 2, 3], "value": [5.0, 6.0, 4.0]}))
-
-p.set_objective(cost * v_production, sense="min")
-
-p.add_cstr("capacity", over=v_idx, sense="<=",
-           lhs_terms={"production": v_production},
-           rhs_terms={"cap": cap})
-
-p.add_cstr("demand_balance",
-           over=v_idx.select("hour").unique().sort("hour"),
-           sense="==",
-           lhs_terms={"production": Sum(v_production, over=("unit",))},
-           rhs_terms={"demand": demand})
-
-sol = p.solve()
-print(sol.obj, sol.value("v_production"))
+--8<-- "tests/fixtures/quickstart_example.py:model"
 ```
 
 ## Documentation
@@ -94,7 +57,7 @@ Build locally: `pip install -e ".[docs]" && mkdocs serve`.
 
 polar-high is the build engine behind the
 [FlexTool](https://github.com/irena-flextool/flextool) energy-system
-modelling toolkit.
+modelling toolkit (still in dev branch only, 7.5.2026 situation).
 FlexTool's fleet of system tests (from earlier
 GNU MathProg to HiGHS implementation) has been used to test
 polar-high in real modelling use cases. In addition

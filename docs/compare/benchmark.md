@@ -80,7 +80,7 @@ test:
   through an intermediate text format; polar-high skips that step
   via `highspy`).
 
-The honest take-away: which tool wins on memory depends on which
+The take-away: which tool wins on memory depends on which
 phase of the build/solve cycle dominates your run. Re-run on your own
 model before assuming any of these ratios apply.
 
