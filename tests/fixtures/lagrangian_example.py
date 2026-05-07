@@ -9,6 +9,7 @@ Section markers are consumed by MkDocs (pymdownx.snippets).
 """
 # --8<-- [start:subproblems]
 import polars as pl
+
 import polar_high as ph
 from polar_high import CouplingEntry, CouplingSpec, LagrangianProblem
 

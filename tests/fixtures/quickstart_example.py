@@ -6,6 +6,7 @@ the snippet at zero indentation in the rendered docs.
 """
 # --8<-- [start:model]
 import polars as pl
+
 from polar_high import Param, Problem, Sum
 
 p = Problem()
