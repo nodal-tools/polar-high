@@ -926,10 +926,156 @@ class Problem:
                 keep_solver=keep_solver,
             )
 
-        # constraints — build COO triples
-        # rows_lb / rows_ub accumulate per family as small numpy arrays;
-        # concatenated once at the end (avoids a Python list with O(rows)
-        # appends + a second O(rows) list-comp at HiGHS-pass time).
+        # Build the row + matrix arrays via the shared helper.  Both the
+        # non-streaming solve path and :meth:`peek_lp_ranges` use this
+        # helper so the LP arrays HiGHS sees are byte-for-byte identical
+        # to those used for diagnostic inspection.
+        (
+            col_lb_h,
+            col_ub_h,
+            row_lb_h,
+            row_ub_h,
+            sorted_v,
+            sorted_r,
+            starts,
+            row_names,
+            n_rows,
+        ) = self._build_lp_arrays(
+            n_cols=n_cols, col_lb=col_lb, col_ub=col_ub,
+        )
+
+        lp = highspy.HighsLp()
+        lp.num_col_ = int(n_cols)
+        lp.num_row_ = int(n_rows)
+        lp.col_cost_ = col_obj.astype(np.float64)
+        lp.col_lower_ = col_lb_h
+        lp.col_upper_ = col_ub_h
+        lp.row_lower_ = row_lb_h
+        lp.row_upper_ = row_ub_h
+        lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
+        lp.a_matrix_.num_col_ = int(n_cols)
+        lp.a_matrix_.num_row_ = int(n_rows)
+        lp.a_matrix_.start_ = starts
+        lp.a_matrix_.index_ = sorted_r
+        lp.a_matrix_.value_ = sorted_v
+        lp.sense_ = (
+            highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
+        )
+        if self._obj_offset:
+            lp.offset_ = float(self._obj_offset)
+        if col_int.any():
+            kCont = highspy.HighsVarType.kContinuous
+            kInt = highspy.HighsVarType.kInteger
+            # vectorized lookup via numpy, then a single .tolist()
+            # (passing through a Python list is what highspy expects)
+            integ_arr = np.where(col_int, kInt, kCont)
+            lp.integrality_ = integ_arr.tolist()
+
+        h = highspy.Highs()
+        # Apply solver options BEFORE passModel — some HiGHS options
+        # (notably ``presolve``) must be set before the model is loaded
+        # to take effect on the first run().  Per-call ``options`` kwarg
+        # wins over options stored on the Problem.
+        opts = options if options is not None else self._solver_options
+        if opts:
+            import warnings
+
+            ok_status = getattr(highspy.HighsStatus, "kOk", None)
+            for key, val in opts.items():
+                try:
+                    status = h.setOptionValue(key, val)
+                except Exception as exc:  # belt-and-braces — highspy may raise
+                    warnings.warn(
+                        f"HiGHS rejected option {key}={val!r}: {exc}",
+                        stacklevel=2,
+                    )
+                    continue
+                # highspy returns HighsStatus.kOk on success, kError on a bad
+                # option name OR a bad value for a known option.  Either way
+                # we don't want to crash — just log and continue.
+                if ok_status is not None and status != ok_status:
+                    warnings.warn(
+                        f"HiGHS rejected option {key}={val!r} (status={status!r})",
+                        stacklevel=2,
+                    )
+        h.passModel(lp)
+
+        # names — passColName / passRowName per item (cheap)
+        for i, n in enumerate(col_names):
+            if n is not None:
+                h.passColName(i, n)
+        for i, n in enumerate(row_names):
+            h.passRowName(i, n)
+
+        h.run()
+        sol = h.getSolution()
+        status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
+        obj_val = h.getObjectiveValue()
+        col_value = np.asarray(sol.col_value, dtype=np.float64)
+        row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
+        col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
+        # ``keep_solver=False`` releases the live HiGHS instance after
+        # the primal/dual/objective have been extracted into numpy
+        # arrays.  Drop the local reference (and the LP handle) so the
+        # C-side LP storage can be freed; Solution.highs becomes None.
+        if keep_solver:
+            sol_highs: highspy.Highs | None = h
+        else:
+            sol_highs = None
+            del h, lp
+        return Solution(
+            optimal=status_ok,
+            obj=obj_val,
+            col_value=col_value,
+            row_dual=row_dual,
+            col_dual=col_dual,
+            col_names=col_names,
+            row_names=row_names,
+            vars=dict(self._vars),
+            highs=sol_highs,
+        )
+
+    # ------------------------------------------------------------------
+    # Shared non-streaming LP-array builder
+    #
+    # Extracted from :meth:`solve` so :meth:`peek_lp_ranges` can inspect
+    # the exact arrays HiGHS would see during passModel — no need to
+    # actually instantiate ``HighsLp`` or run a solver.  The build is
+    # deterministic and uses no HiGHS state, so the two callers always
+    # see identical numbers.
+    def _build_lp_arrays(
+        self,
+        *,
+        n_cols: int,
+        col_lb: np.ndarray,
+        col_ub: np.ndarray,
+    ) -> tuple[
+        np.ndarray,  # col_lb_h
+        np.ndarray,  # col_ub_h
+        np.ndarray,  # row_lb_h
+        np.ndarray,  # row_ub_h
+        np.ndarray,  # sorted_v (matrix values, CSC order)
+        np.ndarray,  # sorted_r (row indices, CSC order)
+        np.ndarray,  # starts (CSC column starts)
+        list[str],   # row_names
+        int,         # n_rows
+    ]:
+        """Build the per-row + matrix arrays for the non-streaming path.
+
+        Walks ``self._cstrs``, folds rhs Var/Expr terms into lhs, builds
+        per-family ``rows_lb`` / ``rows_ub`` vectors, materialises every
+        LHS term to a (row, col, coef) triple via a batched
+        :func:`pl.collect_all`, then dedup-sums coincident triples and
+        emits a CSC column-major sparse representation.
+
+        Returns
+        -------
+        tuple of numpy arrays + list[str] + int
+            ``(col_lb_h, col_ub_h, row_lb_h, row_ub_h, sorted_v, sorted_r,
+            starts, row_names, n_rows)``.  The bound arrays use HiGHS'
+            ``kHighsInf`` sentinel in place of ``np.inf`` so they're
+            ready for ``HighsLp.row_lower_`` / ``row_upper_``.
+        """
         rows_lb_chunks: list[np.ndarray] = []
         rows_ub_chunks: list[np.ndarray] = []
         row_names: list[str] = []
@@ -1130,96 +1276,201 @@ class Problem:
             np.add.at(starts[1:], sorted_c, 1)
         starts = np.cumsum(starts).astype(idx_dtype)
 
-        lp = highspy.HighsLp()
-        lp.num_col_ = int(n_cols)
-        lp.num_row_ = int(n_rows)
-        lp.col_cost_ = col_obj.astype(np.float64)
-        lp.col_lower_ = col_lb_h
-        lp.col_upper_ = col_ub_h
-        lp.row_lower_ = row_lb_h
-        lp.row_upper_ = row_ub_h
-        lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
-        lp.a_matrix_.num_col_ = int(n_cols)
-        lp.a_matrix_.num_row_ = int(n_rows)
-        lp.a_matrix_.start_ = starts
-        lp.a_matrix_.index_ = sorted_r
-        lp.a_matrix_.value_ = sorted_v
-        lp.sense_ = (
-            highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
+        return (
+            col_lb_h, col_ub_h, row_lb_h, row_ub_h,
+            sorted_v, sorted_r, starts, row_names, n_rows,
         )
-        if self._obj_offset:
-            lp.offset_ = float(self._obj_offset)
-        if col_int.any():
-            kCont = highspy.HighsVarType.kContinuous
-            kInt = highspy.HighsVarType.kInteger
-            # vectorized lookup via numpy, then a single .tolist()
-            # (passing through a Python list is what highspy expects)
-            integ_arr = np.where(col_int, kInt, kCont)
-            lp.integrality_ = integ_arr.tolist()
 
-        h = highspy.Highs()
-        # Apply solver options BEFORE passModel — some HiGHS options
-        # (notably ``presolve``) must be set before the model is loaded
-        # to take effect on the first run().  Per-call ``options`` kwarg
-        # wins over options stored on the Problem.
-        opts = options if options is not None else self._solver_options
-        if opts:
-            import warnings
+    # ------------------------------------------------------------------
+    # Coefficient-range inspection
+    def peek_lp_ranges(
+        self, top_k: int = 0
+    ) -> dict[str, tuple[float, float] | None | list]:
+        """Build the LP into numpy arrays and return coefficient ranges,
+        WITHOUT running HiGHS.
 
-            ok_status = getattr(highspy.HighsStatus, "kOk", None)
-            for key, val in opts.items():
-                try:
-                    status = h.setOptionValue(key, val)
-                except Exception as exc:  # belt-and-braces — highspy may raise
-                    warnings.warn(
-                        f"HiGHS rejected option {key}={val!r}: {exc}",
-                        stacklevel=2,
-                    )
-                    continue
-                # highspy returns HighsStatus.kOk on success, kError on a bad
-                # option name OR a bad value for a known option.  Either way
-                # we don't want to crash — just log and continue.
-                if ok_status is not None and status != ok_status:
-                    warnings.warn(
-                        f"HiGHS rejected option {key}={val!r} (status={status!r})",
-                        stacklevel=2,
-                    )
-        h.passModel(lp)
+        Returns a dict with these keys:
+        * ``'matrix'``, ``'cost'``, ``'col_bound'``, ``'row_bound'`` —
+          ``(abs_min, abs_max)`` of the finite, non-zero, non-infinity
+          values, or ``None`` when empty.
+        * When ``top_k > 0``, also includes ``'matrix_smallest'``,
+          ``'matrix_largest'``, ``'cost_smallest'``, ``'cost_largest'``,
+          ``'col_bound_smallest'``, ``'col_bound_largest'``,
+          ``'row_bound_smallest'``, ``'row_bound_largest'`` — lists of
+          ``(abs_value, col_name, row_name_or_None)`` triples
+          (``row_name`` is ``None`` for cost / col_bound; ``col_name``
+          is ``None`` for row_bound).
 
-        # names — passColName / passRowName per item (cheap)
-        for i, n in enumerate(col_names):
-            if n is not None:
-                h.passColName(i, n)
-        for i, n in enumerate(row_names):
-            h.passRowName(i, n)
+        The returned ranges are exactly what HiGHS would see during its
+        "Coefficient ranges" diagnostic.
 
-        h.run()
-        sol = h.getSolution()
-        status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
-        obj_val = h.getObjectiveValue()
-        col_value = np.asarray(sol.col_value, dtype=np.float64)
-        row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
-        col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
-        # ``keep_solver=False`` releases the live HiGHS instance after
-        # the primal/dual/objective have been extracted into numpy
-        # arrays.  Drop the local reference (and the LP handle) so the
-        # C-side LP storage can be freed; Solution.highs becomes None.
-        if keep_solver:
-            sol_highs: highspy.Highs | None = h
-        else:
-            sol_highs = None
-            del h, lp
-        return Solution(
-            optimal=status_ok,
-            obj=obj_val,
-            col_value=col_value,
-            row_dual=row_dual,
-            col_dual=col_dual,
-            col_names=col_names,
-            row_names=row_names,
-            vars=dict(self._vars),
-            highs=sol_highs,
+        Notes
+        -----
+        * Uses the non-streaming build path (single ``HighsLp``
+          construction).
+        * Cost: scans ``col_obj`` (per-column objective coefficients).
+        * Matrix: scans ``sorted_v`` (CSC values, with parallel
+          ``sorted_r`` row indices + ``starts`` col offsets for name
+          lookup when ``top_k > 0``).
+        * Col bounds: scans col-bound arrays, filtered to finite +
+          ``|v| < kHighsInf`` + ``v != 0``.
+        * Row bounds (RHS): same filter on row-bound arrays.
+        """
+        # --- column setup — same code as the head of :meth:`solve`. -----
+        n_cols = self._next_col
+        col_lb = np.zeros(n_cols, dtype=np.float64)
+        col_ub = np.full(n_cols, np.inf, dtype=np.float64)
+        col_obj = np.zeros(n_cols, dtype=np.float64)
+
+        # Build col_names lazily — only needed when top_k > 0.  Mirrors
+        # the construction in ``solve()`` at lines 871-902.
+        col_names: list[str] | None = None
+        if top_k > 0:
+            col_names = [None] * n_cols  # type: ignore[list-item]
+        for v in self._vars.values():
+            ids = v.frame["col_id"].to_numpy()
+            col_lb[ids] = float(v.lower)
+            col_ub[ids] = float(v.upper)
+            if col_names is not None:
+                if v.dims:
+                    tagged = (
+                        v.frame.select(
+                            pl.format(
+                                "{}[{}]",
+                                pl.lit(v.name),
+                                pl.concat_str(
+                                    [pl.col(d).cast(pl.String) for d in v.dims],
+                                    separator=",",
+                                ),
+                            ).alias("__name")
+                        )
+                    )["__name"].to_list()
+                    for cid, nm in zip(ids.tolist(), tagged):
+                        col_names[cid] = nm
+                else:
+                    col_names[int(ids[0])] = v.name
+        for t in self._obj_terms:
+            f = t.lazy.collect()
+            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            del f
+
+        (
+            col_lb_h, col_ub_h, row_lb_h, row_ub_h,
+            sorted_v, sorted_r, starts, row_names, _n_rows,
+        ) = self._build_lp_arrays(n_cols=n_cols, col_lb=col_lb, col_ub=col_ub)
+
+        inf = float(highspy.kHighsInf)
+
+        def _range(values: np.ndarray) -> tuple[float, float] | None:
+            """Return ``(abs_min, abs_max)`` of finite, non-inf, non-zero
+            entries, or ``None`` when no qualifying entry exists."""
+            if values.size == 0:
+                return None
+            abs_v = np.abs(values)
+            mask = np.isfinite(abs_v) & (abs_v < inf) & (abs_v != 0.0)
+            kept = abs_v[mask]
+            if kept.size == 0:
+                return None
+            return (float(kept.min()), float(kept.max()))
+
+        bounds_col = np.concatenate([col_lb_h, col_ub_h]) if n_cols else np.zeros(0)
+        bounds_row = (
+            np.concatenate([row_lb_h, row_ub_h]) if row_lb_h.size else np.zeros(0)
         )
+
+        out: dict[str, tuple[float, float] | None | list] = {
+            "matrix": _range(sorted_v),
+            "cost": _range(col_obj),
+            "col_bound": _range(bounds_col),
+            "row_bound": _range(bounds_row),
+        }
+
+        if top_k <= 0:
+            return out
+
+        # --- Top-K offenders ---------------------------------------------
+        # Helper: find top-K smallest and top-K largest |values| in a
+        # filtered numpy array, returning their indices into the array.
+        def _topk_indices(
+            arr: np.ndarray, k: int
+        ) -> tuple[np.ndarray, np.ndarray]:
+            abs_v = np.abs(arr)
+            mask = np.isfinite(abs_v) & (abs_v < inf) & (abs_v != 0.0)
+            valid_idx = np.where(mask)[0]
+            if valid_idx.size == 0:
+                return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+            vals = abs_v[valid_idx]
+            k_eff = min(k, vals.size)
+            if k_eff < vals.size:
+                small_part = np.argpartition(vals, k_eff)[:k_eff]
+                large_part = np.argpartition(vals, vals.size - k_eff)[
+                    vals.size - k_eff:
+                ]
+                small = valid_idx[small_part[np.argsort(vals[small_part])]]
+                large = valid_idx[
+                    large_part[np.argsort(-vals[large_part])]
+                ]
+            else:
+                order = np.argsort(vals)
+                small = valid_idx[order]
+                large = valid_idx[order[::-1]]
+            return small, large
+
+        # --- Matrix: each nonzero is at (col, row).  Find col via
+        # bisecting ``starts`` for each nonzero's flat index.
+        mat_small, mat_large = _topk_indices(sorted_v, top_k)
+        # Map flat nonzero indices to (col_id, row_id).
+        def _flat_to_col(flat_idx: np.ndarray) -> np.ndarray:
+            # starts has length n_cols + 1; col k owns [starts[k], starts[k+1]).
+            return np.searchsorted(starts, flat_idx, side="right") - 1
+
+        def _mat_triple(flat_idx: int) -> tuple[float, str, str]:
+            cid = int(_flat_to_col(np.array([flat_idx]))[0])
+            rid = int(sorted_r[flat_idx])
+            cn = col_names[cid] if col_names and cid < len(col_names) else f"col_{cid}"
+            rn = row_names[rid] if rid < len(row_names) else f"row_{rid}"
+            return (abs(float(sorted_v[flat_idx])), cn or f"col_{cid}", rn)
+
+        out["matrix_smallest"] = [_mat_triple(int(i)) for i in mat_small]
+        out["matrix_largest"] = [_mat_triple(int(i)) for i in mat_large]
+
+        # --- Cost: each nonzero is on one column.
+        cost_small, cost_large = _topk_indices(col_obj, top_k)
+
+        def _col_pair(cid: int, arr: np.ndarray) -> tuple[float, str, None]:
+            cn = col_names[cid] if col_names and cid < len(col_names) else f"col_{cid}"
+            return (abs(float(arr[cid])), cn or f"col_{cid}", None)
+
+        out["cost_smallest"] = [_col_pair(int(i), col_obj) for i in cost_small]
+        out["cost_largest"] = [_col_pair(int(i), col_obj) for i in cost_large]
+
+        # --- Col bounds: concatenated [lb, ub]; map index back to col.
+        cb_small, cb_large = _topk_indices(bounds_col, top_k)
+
+        def _cb_pair(flat_idx: int) -> tuple[float, str, str]:
+            # First n_cols are lower bounds, next n_cols are upper bounds.
+            cid = flat_idx % n_cols if n_cols else 0
+            side = "lower" if flat_idx < n_cols else "upper"
+            cn = col_names[cid] if col_names and cid < len(col_names) else f"col_{cid}"
+            return (abs(float(bounds_col[flat_idx])), cn or f"col_{cid}", side)
+
+        out["col_bound_smallest"] = [_cb_pair(int(i)) for i in cb_small]
+        out["col_bound_largest"] = [_cb_pair(int(i)) for i in cb_large]
+
+        # --- Row bounds: concatenated [lb, ub]; map index back to row.
+        rb_small, rb_large = _topk_indices(bounds_row, top_k)
+        n_rows = row_lb_h.size
+
+        def _rb_pair(flat_idx: int) -> tuple[float, str, str]:
+            rid = flat_idx % n_rows if n_rows else 0
+            side = "lower" if flat_idx < n_rows else "upper"
+            rn = row_names[rid] if rid < len(row_names) else f"row_{rid}"
+            return (abs(float(bounds_row[flat_idx])), rn, side)
+
+        out["row_bound_smallest"] = [_rb_pair(int(i)) for i in rb_small]
+        out["row_bound_largest"] = [_rb_pair(int(i)) for i in rb_large]
+
+        return out
 
     # ------------------------------------------------------------------
     # Streaming variant: opt-in alternative to the passModel fast path.
@@ -1759,6 +2010,16 @@ class WarmProblem:
         #                                multiplies or divides by the
         #                                ratio)
         self._param_cells: dict[str, dict] = {}
+
+    @property
+    def problem(self) -> Problem:
+        """The underlying :class:`Problem`.
+
+        Useful for diagnostics that need to inspect the un-built LP —
+        e.g. :meth:`Problem.peek_lp_ranges` to read coefficient ranges
+        before the first :meth:`solve` triggers the build.
+        """
+        return self._p
 
     # -- public update API -----------------------------------------------
 

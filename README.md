@@ -12,7 +12,7 @@ mixed-integer optimisation programs, i.e. domain specific language
 (DSL) for algebraic modelling. Variables and parameters are
 [polars](https://pola.rs/) DataFrames, expressions are joined and
 grouped lazily, and the matrix is assembled directly through
-[HiGHS](https://highs.dev/) — or exported as MPS for any other LP
+[HiGHS](https://highs.dev/) — or exported as MPS for any other LP/MIP
 solver. The kernel is intentionally domain-free: it has no opinions
 about energy systems, supply chains, or any specific application.
 
