@@ -21,6 +21,7 @@ Memory measurement strategy:
                              the whole process). Same metric as the
                              original column for backwards-compat.
 """
+
 from __future__ import annotations
 
 import gc

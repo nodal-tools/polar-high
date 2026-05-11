@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [1.1.4] — 2026-05-11
+
+### Added
+
+- `Problem.peek_lp_ranges()`: build the LP into numpy arrays and
+  return the abs-value ranges of finite non-zero entries on each
+  axis (matrix, cost, bounds, rhs) — same numbers HiGHS prints in
+  its "Coefficient ranges" diagnostic, but available *before*
+  `passModel()` runs. Optional `top_k` returns the worst offenders
+  per axis as `(abs_value, col_name, row_name_or_side)` triples.
+  Lets callers pick `user_bound_scale` / `user_cost_scale` or
+  refuse to solve a catastrophically scaled LP without paying for
+  a full solve. Uses `np.argpartition` so the cost is
+  `O(n_nonzeros)`.
+- `.github/dependabot.yml`: weekly dependency PRs for GitHub
+  Actions and Python (pip) ecosystems. The initial commit
+  (c3836f5) was the GitHub-provided template with an empty
+  `package-ecosystem`; this release fills it in so the bot
+  actually opens PRs.
+
+### Changed
+
+- `engine.py`: factor the non-streaming LP-build out of `solve()`
+  into a private `_build_lp_arrays()` helper. `solve()` and
+  `peek_lp_ranges()` now share the same arrays — diagnostics are
+  byte-for-byte what HiGHS sees.
+- `engine.py`: for constraint families with > 50 000 rows,
+  collect term plans one at a time instead of `pl.collect_all`.
+  Peak memory drops from `O(n_terms × frame)` to `O(frame)`,
+  preventing stalls under memory pressure on large network
+  models.
+- `engine.py`: HiGHS no longer suppressed via `h.silent()` —
+  solver progress and the "Coefficient ranges" line now print to
+  stdout by default. Pass `options={"output_flag": False}` to
+  silence.
+
+## [1.1.3] — 2026-05-07
+
+### Changed
+
+- `docs/guide/debugging.md`: expanded with worked examples; doc
+  snippets are now wired to test fixtures
+  (`tests/fixtures/debug_example.py`,
+  `tests/fixtures/lagrangian_example.py`,
+  `tests/fixtures/quickstart_example.py`) so they're exercised by
+  the test suite and can't silently rot.
+- `mkdocs.yml`: drop `dedent_sections` from the `snippets`
+  pymdownx config — incompatible with the multi-fixture snippet
+  layout.
+
 ## [1.1.2] — 2026-05-05
 
 ### Added

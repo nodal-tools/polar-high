@@ -941,7 +941,9 @@ class Problem:
             row_names,
             n_rows,
         ) = self._build_lp_arrays(
-            n_cols=n_cols, col_lb=col_lb, col_ub=col_ub,
+            n_cols=n_cols,
+            col_lb=col_lb,
+            col_ub=col_ub,
         )
 
         lp = highspy.HighsLp()
@@ -1057,8 +1059,8 @@ class Problem:
         np.ndarray,  # sorted_v (matrix values, CSC order)
         np.ndarray,  # sorted_r (row indices, CSC order)
         np.ndarray,  # starts (CSC column starts)
-        list[str],   # row_names
-        int,         # n_rows
+        list[str],  # row_names
+        int,  # n_rows
     ]:
         """Build the per-row + matrix arrays for the non-streaming path.
 
@@ -1277,15 +1279,20 @@ class Problem:
         starts = np.cumsum(starts).astype(idx_dtype)
 
         return (
-            col_lb_h, col_ub_h, row_lb_h, row_ub_h,
-            sorted_v, sorted_r, starts, row_names, n_rows,
+            col_lb_h,
+            col_ub_h,
+            row_lb_h,
+            row_ub_h,
+            sorted_v,
+            sorted_r,
+            starts,
+            row_names,
+            n_rows,
         )
 
     # ------------------------------------------------------------------
     # Coefficient-range inspection
-    def peek_lp_ranges(
-        self, top_k: int = 0
-    ) -> dict[str, tuple[float, float] | None | list]:
+    def peek_lp_ranges(self, top_k: int = 0) -> dict[str, tuple[float, float] | None | list]:
         """Build the LP into numpy arrays and return coefficient ranges,
         WITHOUT running HiGHS.
 
@@ -1355,8 +1362,15 @@ class Problem:
             del f
 
         (
-            col_lb_h, col_ub_h, row_lb_h, row_ub_h,
-            sorted_v, sorted_r, starts, row_names, _n_rows,
+            col_lb_h,
+            col_ub_h,
+            row_lb_h,
+            row_ub_h,
+            sorted_v,
+            sorted_r,
+            starts,
+            row_names,
+            _n_rows,
         ) = self._build_lp_arrays(n_cols=n_cols, col_lb=col_lb, col_ub=col_ub)
 
         inf = float(highspy.kHighsInf)
@@ -1374,9 +1388,7 @@ class Problem:
             return (float(kept.min()), float(kept.max()))
 
         bounds_col = np.concatenate([col_lb_h, col_ub_h]) if n_cols else np.zeros(0)
-        bounds_row = (
-            np.concatenate([row_lb_h, row_ub_h]) if row_lb_h.size else np.zeros(0)
-        )
+        bounds_row = np.concatenate([row_lb_h, row_ub_h]) if row_lb_h.size else np.zeros(0)
 
         out: dict[str, tuple[float, float] | None | list] = {
             "matrix": _range(sorted_v),
@@ -1391,9 +1403,7 @@ class Problem:
         # --- Top-K offenders ---------------------------------------------
         # Helper: find top-K smallest and top-K largest |values| in a
         # filtered numpy array, returning their indices into the array.
-        def _topk_indices(
-            arr: np.ndarray, k: int
-        ) -> tuple[np.ndarray, np.ndarray]:
+        def _topk_indices(arr: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
             abs_v = np.abs(arr)
             mask = np.isfinite(abs_v) & (abs_v < inf) & (abs_v != 0.0)
             valid_idx = np.where(mask)[0]
@@ -1403,13 +1413,9 @@ class Problem:
             k_eff = min(k, vals.size)
             if k_eff < vals.size:
                 small_part = np.argpartition(vals, k_eff)[:k_eff]
-                large_part = np.argpartition(vals, vals.size - k_eff)[
-                    vals.size - k_eff:
-                ]
+                large_part = np.argpartition(vals, vals.size - k_eff)[vals.size - k_eff :]
                 small = valid_idx[small_part[np.argsort(vals[small_part])]]
-                large = valid_idx[
-                    large_part[np.argsort(-vals[large_part])]
-                ]
+                large = valid_idx[large_part[np.argsort(-vals[large_part])]]
             else:
                 order = np.argsort(vals)
                 small = valid_idx[order]
@@ -1419,6 +1425,7 @@ class Problem:
         # --- Matrix: each nonzero is at (col, row).  Find col via
         # bisecting ``starts`` for each nonzero's flat index.
         mat_small, mat_large = _topk_indices(sorted_v, top_k)
+
         # Map flat nonzero indices to (col_id, row_id).
         def _flat_to_col(flat_idx: np.ndarray) -> np.ndarray:
             # starts has length n_cols + 1; col k owns [starts[k], starts[k+1]).

@@ -7,6 +7,7 @@ Indexed LP (mirrors the linopy benchmark, linearised):
          x[i,j] + y[i,j] >= 0        for i,j ∈ {1,…,N}
          x, y >= 0
 """
+
 from __future__ import annotations
 
 import numpy as np

@@ -12,6 +12,7 @@ Usage:
     python benchmark/run.py --tools polar linopy --repeats 5
     python benchmark/run.py --threads 1 4 16 32 --sizes 1000 --tools polar linopy
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,7 +38,10 @@ THREAD_ENV_VARS = (
 
 
 def run_cell(
-    tool: str, N: int, threads: int, timeout: int,
+    tool: str,
+    N: int,
+    threads: int,
+    timeout: int,
     time_limit: float | None = None,
 ) -> dict | None:
     cmd = [sys.executable, str(HERE / "run_one.py"), tool, str(N)]
@@ -46,18 +50,20 @@ def run_cell(
         env["BENCH_TIME_LIMIT"] = str(time_limit)
     try:
         r = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout, check=True, env=env,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+            env=env,
         )
     except subprocess.TimeoutExpired:
-        print(f"[timeout] {tool} N={N} threads={threads} after {timeout}s",
-              file=sys.stderr)
+        print(f"[timeout] {tool} N={N} threads={threads} after {timeout}s", file=sys.stderr)
         return None
     except subprocess.CalledProcessError as e:
         msg = (e.stderr or "").strip().splitlines()
         tail = msg[-1] if msg else "(no stderr)"
-        print(f"[fail]    {tool} N={N} threads={threads}: {tail[:200]}",
-              file=sys.stderr)
+        print(f"[fail]    {tool} N={N} threads={threads}: {tail[:200]}", file=sys.stderr)
         return None
 
     line = r.stdout.strip().splitlines()[-1]
@@ -81,28 +87,45 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tools", nargs="+", default=DEFAULT_TOOLS)
     ap.add_argument("--sizes", nargs="+", type=int, default=DEFAULT_SIZES)
-    ap.add_argument("--threads", nargs="+", type=int, default=default_threads,
-                    help=f"Cap on cores per cell (default: {default_threads})")
+    ap.add_argument(
+        "--threads",
+        nargs="+",
+        type=int,
+        default=default_threads,
+        help=f"Cap on cores per cell (default: {default_threads})",
+    )
     ap.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
-    ap.add_argument("--time-limit", type=float, default=None,
-                    help="HiGHS time-limit in seconds. With ~1e-6 the LP "
-                         "solve short-circuits, so solve_s captures only "
-                         "the per-tool model→HiGHS handoff.")
+    ap.add_argument(
+        "--time-limit",
+        type=float,
+        default=None,
+        help="HiGHS time-limit in seconds. With ~1e-6 the LP "
+        "solve short-circuits, so solve_s captures only "
+        "the per-tool model→HiGHS handoff.",
+    )
     ap.add_argument("--out", default=str(HERE / "results" / "results.csv"))
-    ap.add_argument("--append", action="store_true",
-                    help="Append to existing CSV instead of overwriting.")
+    ap.add_argument(
+        "--append", action="store_true", help="Append to existing CSV instead of overwriting."
+    )
     args = ap.parse_args()
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
-        "tool", "N", "threads", "rep",
-        "build_s", "solve_s",
-        "rss_start_mb", "rss_after_build_mb", "rss_after_solve_mb",
+        "tool",
+        "N",
+        "threads",
+        "rep",
+        "build_s",
+        "solve_s",
+        "rss_start_mb",
+        "rss_after_build_mb",
+        "rss_after_solve_mb",
         "peak_rss_mb",
-        "obj", "optimal",
+        "obj",
+        "optimal",
     ]
 
     write_header = not (args.append and out.exists())
@@ -122,12 +145,17 @@ def main() -> None:
                             file=sys.stderr,
                         )
                         res = run_cell(
-                            tool, N, threads, args.timeout,
+                            tool,
+                            N,
+                            threads,
+                            args.timeout,
                             time_limit=args.time_limit,
                         )
                         row: dict = {
-                            "tool": tool, "N": N,
-                            "threads": threads, "rep": rep,
+                            "tool": tool,
+                            "N": N,
+                            "threads": threads,
+                            "rep": rep,
                         }
                         if res is None:
                             row.update(

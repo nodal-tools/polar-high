@@ -51,20 +51,16 @@ def build(N: int) -> pe.ConcreteModel:
     m.capacity = pe.Constraint(m.E, m.T, rule=_cap_rule)
 
     def _balance_rule(m, n, t):
-        return (
-            sum(m.flow[e, t] for e in incoming[n])
-            - sum(m.flow[e, t] for e in outgoing[n])
-            == float(demand_arr[n, t])
-        )
+        return sum(m.flow[e, t] for e in incoming[n]) - sum(
+            m.flow[e, t] for e in outgoing[n]
+        ) == float(demand_arr[n, t])
 
     m.node_balance = pe.Constraint(m.N, m.T, rule=_balance_rule)
 
     return m
 
 
-def solve(
-    model: pe.ConcreteModel, time_limit: float | None = None
-) -> tuple[bool, float]:
+def solve(model: pe.ConcreteModel, time_limit: float | None = None) -> tuple[bool, float]:
     try:
         from pyomo.contrib.appsi.solvers import Highs
 

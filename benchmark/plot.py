@@ -21,33 +21,33 @@ Conventions used by all three "dense LP" figures:
 
 The network figure has its own scale (very different LP size).
 """
+
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).parent
 REPO_ROOT = HERE.parent
 
 TOOL_COLORS = {
-    "polar":      "#1f77b4",
-    "linopy":     "#d97706",
-    "pyomo":      "#a91b0d",
-    "polar_net":  "#1f77b4",
+    "polar": "#1f77b4",
+    "linopy": "#d97706",
+    "pyomo": "#a91b0d",
+    "polar_net": "#1f77b4",
     "linopy_net": "#d97706",
-    "pyomo_net":  "#a91b0d",
+    "pyomo_net": "#a91b0d",
 }
 TOOL_LABELS = {
-    "polar":      "polar-high",
-    "linopy":     "linopy",
-    "pyomo":      "Pyomo",
-    "polar_net":  "polar-high",
+    "polar": "polar-high",
+    "linopy": "linopy",
+    "pyomo": "Pyomo",
+    "polar_net": "polar-high",
     "linopy_net": "linopy",
-    "pyomo_net":  "Pyomo",
+    "pyomo_net": "Pyomo",
 }
 TOOL_ORDER_DENSE = ["polar", "linopy", "pyomo"]
 TOOL_ORDER_NET = ["polar_net", "linopy_net", "pyomo_net"]
@@ -70,11 +70,10 @@ def _load_all(in_csv_glob: list[str]) -> pd.DataFrame:
     # ``polar_lean_net`` tool ids — fold them into the canonical
     # ``polar`` / ``polar_net`` since the lean settings are now the
     # engine defaults.
-    df["tool"] = df["tool"].replace(
-        {"polar_lean": "polar", "polar_lean_net": "polar_net"}
-    )
+    df["tool"] = df["tool"].replace({"polar_lean": "polar", "polar_lean_net": "polar_net"})
     df = df.drop_duplicates(
-        subset=["tool", "N", "threads", "rep"], keep="last",
+        subset=["tool", "N", "threads", "rep"],
+        keep="last",
     )
     return df
 
@@ -83,14 +82,11 @@ def _aggregate(df: pd.DataFrame, group: list[str]) -> pd.DataFrame:
     # ``total_s`` is build_s + solve_s per *rep* (the apples-to-apples
     # cross-tool measurement: full time from no-model to solution).
     df = df.assign(total_s=df["build_s"] + df["solve_s"])
-    return (
-        df.groupby(group, as_index=False)
-        .agg(
-            build_s=("build_s", "median"),
-            solve_s=("solve_s", "median"),
-            total_s=("total_s", "median"),
-            peak_rss_mb=("peak_rss_mb", "median"),
-        )
+    return df.groupby(group, as_index=False).agg(
+        build_s=("build_s", "median"),
+        solve_s=("solve_s", "median"),
+        total_s=("total_s", "median"),
+        peak_rss_mb=("peak_rss_mb", "median"),
     )
 
 
@@ -151,8 +147,11 @@ def _draw_three_panels(
         if sub.empty:
             continue
         kw = dict(
-            marker="o", linewidth=1.6, markersize=5,
-            color=TOOL_COLORS[tool], label=TOOL_LABELS[tool],
+            marker="o",
+            linewidth=1.6,
+            markersize=5,
+            color=TOOL_COLORS[tool],
+            label=TOOL_LABELS[tool],
         )
         axes[0].plot(sub[x_col], sub["build_s"], **kw)
         axes[1].plot(sub[x_col], sub["solve_s"], **kw)
@@ -183,7 +182,8 @@ def _draw_three_panels(
 
     fig.suptitle(
         f"polar-high vs linopy vs Pyomo — LP benchmark {title_suffix}",
-        y=1.02, fontsize=11,
+        y=1.02,
+        fontsize=11,
     )
     fig.tight_layout()
 
@@ -203,30 +203,29 @@ def _draw_threading_benefit(
     at 32 threads, linopy at 1 thread. Shows where polars parallelism
     starts paying as N grows."""
     df = df_net.assign(total_s=df_net["build_s"] + df_net["solve_s"])
-    agg = (
-        df.groupby(["tool", "threads", "N"], as_index=False)
-        .agg(
-            total_s=("total_s", "median"),
-            peak_rss_mb=("peak_rss_mb", "median"),
-        )
+    agg = df.groupby(["tool", "threads", "N"], as_index=False).agg(
+        total_s=("total_s", "median"),
+        peak_rss_mb=("peak_rss_mb", "median"),
     )
 
     series = [
-        ("polar_net",  1,  "polar-high (1 thread)",   "#1f77b4", "-"),
-        ("polar_net",  32, "polar-high (32 threads)", "#1f77b4", "--"),
-        ("linopy_net", 1,  "linopy (1 thread)",        "#d97706", "-"),
+        ("polar_net", 1, "polar-high (1 thread)", "#1f77b4", "-"),
+        ("polar_net", 32, "polar-high (32 threads)", "#1f77b4", "--"),
+        ("linopy_net", 1, "linopy (1 thread)", "#d97706", "-"),
     ]
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.6), sharex=True)
     for tool, threads, label, color, linestyle in series:
-        sub = agg[
-            (agg["tool"] == tool) & (agg["threads"] == threads)
-        ].sort_values("N")
+        sub = agg[(agg["tool"] == tool) & (agg["threads"] == threads)].sort_values("N")
         if sub.empty:
             continue
         kw = dict(
-            marker="o", linewidth=1.6, markersize=5,
-            color=color, linestyle=linestyle, label=label,
+            marker="o",
+            linewidth=1.6,
+            markersize=5,
+            color=color,
+            linestyle=linestyle,
+            label=label,
         )
         axes[0].plot(sub["N"], sub["total_s"], **kw)
         axes[1].plot(sub["N"], sub["peak_rss_mb"], **kw)
@@ -249,7 +248,8 @@ def _draw_threading_benefit(
 
     fig.suptitle(
         "polar-high vs linopy — network LP, threading benefit on polars",
-        y=1.02, fontsize=11,
+        y=1.02,
+        fontsize=11,
     )
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,8 +282,11 @@ def _draw_two_panels(
         if sub.empty:
             continue
         kw = dict(
-            marker="o", linewidth=1.6, markersize=5,
-            color=TOOL_COLORS[tool], label=TOOL_LABELS[tool],
+            marker="o",
+            linewidth=1.6,
+            markersize=5,
+            color=TOOL_COLORS[tool],
+            label=TOOL_LABELS[tool],
         )
         axes[0].plot(sub[x_col], sub["total_s"], **kw)
         axes[1].plot(sub[x_col], sub["peak_rss_mb"], **kw)
@@ -308,7 +311,8 @@ def _draw_two_panels(
 
     fig.suptitle(
         f"polar-high vs linopy vs Pyomo — LP benchmark {title_suffix}",
-        y=1.02, fontsize=11,
+        y=1.02,
+        fontsize=11,
     )
     fig.tight_layout()
 
@@ -321,7 +325,9 @@ def _draw_two_panels(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--in", dest="in_csvs", nargs="+",
+        "--in",
+        dest="in_csvs",
+        nargs="+",
         default=[
             str(HERE / "results" / "results.csv"),
             str(HERE / "results" / "results_v1_1.csv"),
@@ -359,9 +365,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--out-threading-benefit",
-        default=str(
-            REPO_ROOT / "docs" / "assets" / "benchmark_threading_benefit.png"
-        ),
+        default=str(REPO_ROOT / "docs" / "assets" / "benchmark_threading_benefit.png"),
         help=(
             "Three-line figure (polar @1 thread, polar @32 threads, "
             "linopy @1 thread) on the network LP — shows where polars's "
@@ -397,9 +401,7 @@ def main() -> None:
         df_thr = df_thr_src[df_thr_src["N"] == N_thr_target]
         agg_thr = _aggregate(df_thr, group=["tool", "threads"])
         counts = agg_thr.groupby("tool").size()
-        agg_thr = agg_thr[
-            agg_thr["tool"].isin(set(counts[counts > 1].index))
-        ]
+        agg_thr = agg_thr[agg_thr["tool"].isin(set(counts[counts > 1].index))]
         N_thr = N_thr_target
     else:
         agg_thr = pd.DataFrame()
@@ -428,18 +430,14 @@ def main() -> None:
     # we actually care about.
     if not agg_b.empty:
         _draw_two_panels(
-            agg_b, x_col="N",
+            agg_b,
+            x_col="N",
             x_label="N (variable grid is N × N)",
-            title_suffix=(
-                "(build-only — HiGHS time-limited to ~1 µs; "
-                "modelling-layer cost only)"
-            ),
+            title_suffix=("(build-only — HiGHS time-limited to ~1 µs; modelling-layer cost only)"),
             out_path=Path(args.out_main),
             tool_order=TOOL_ORDER_DENSE,
             y_limits=y_lims,
-            time_panel_title=(
-                "Time in build() + solve()  (HiGHS short-circuited)"
-            ),
+            time_panel_title=("Time in build() + solve()  (HiGHS short-circuited)"),
         )
 
     # Replication: 3-panel linopy-style format with full HiGHS.
@@ -447,11 +445,10 @@ def main() -> None:
     if not agg_main.empty:
         y_lims_repl = _shared_limits(agg_main)
         _draw_three_panels(
-            agg_main, x_col="N",
+            agg_main,
+            x_col="N",
             x_label="N (variable grid is N × N)",
-            title_suffix=(
-                "(linopy-format replication: full HiGHS solve included)"
-            ),
+            title_suffix=("(linopy-format replication: full HiGHS solve included)"),
             out_path=Path(args.out_replication),
             tool_order=TOOL_ORDER_DENSE,
             y_limits=y_lims_repl,
@@ -459,18 +456,15 @@ def main() -> None:
 
     if not agg_thr.empty:
         _draw_two_panels(
-            agg_thr, x_col="threads",
+            agg_thr,
+            x_col="threads",
             x_label="threads",
-            title_suffix=(
-                f"(N = {N_thr}, scaling with threads, build-only)"
-            ),
+            title_suffix=(f"(N = {N_thr}, scaling with threads, build-only)"),
             out_path=Path(args.out_threads),
             tool_order=TOOL_ORDER_DENSE,
             x_log=False,
             y_limits=y_lims,
-            time_panel_title=(
-                "Time in build() + solve()  (HiGHS short-circuited)"
-            ),
+            time_panel_title=("Time in build() + solve()  (HiGHS short-circuited)"),
         )
 
     # --- Network LP family (build-only too) ------------------------------
@@ -479,43 +473,30 @@ def main() -> None:
         # Standard network plot uses lowest-threads-per-cell rule
         # (gives polar threads=1 if available, threads=32 if not).
         df_net_main = df_net.copy()
-        df_net_main["_min_t"] = (
-            df_net_main.groupby(["tool", "N"])["threads"].transform("min")
+        df_net_main["_min_t"] = df_net_main.groupby(["tool", "N"])["threads"].transform("min")
+        df_net_main = df_net_main[df_net_main["threads"] == df_net_main["_min_t"]].drop(
+            columns="_min_t"
         )
-        df_net_main = df_net_main[
-            df_net_main["threads"] == df_net_main["_min_t"]
-        ].drop(columns="_min_t")
         agg_net = _aggregate(df_net_main, group=["tool", "N"])
         y_lims_net = _shared_limits(agg_net)
         _draw_two_panels(
-            agg_net, x_col="N",
+            agg_net,
+            x_col="N",
             x_label="N (nodes; edges = 5·N, T = 168)",
-            title_suffix=(
-                "(network LP — irregular topology, build-only, 1 thread)"
-            ),
+            title_suffix=("(network LP — irregular topology, build-only, 1 thread)"),
             out_path=Path(args.out_network),
             tool_order=TOOL_ORDER_NET,
             y_limits=y_lims_net,
-            time_panel_title=(
-                "Time in build() + solve()  (HiGHS short-circuited)"
-            ),
+            time_panel_title=("Time in build() + solve()  (HiGHS short-circuited)"),
         )
 
         # --- Threading-benefit figure: same network LP, three series.
         # If threads=32 polar_net data is present, show where polars
         # parallelism starts paying.
-        thr_pairs = (
-            df_net.groupby(["tool", "threads"]).size().reset_index()
-        )
-        has_polar_t1 = (
-            (thr_pairs["tool"] == "polar_net") & (thr_pairs["threads"] == 1)
-        ).any()
-        has_polar_t32 = (
-            (thr_pairs["tool"] == "polar_net") & (thr_pairs["threads"] == 32)
-        ).any()
-        has_linopy_t1 = (
-            (thr_pairs["tool"] == "linopy_net") & (thr_pairs["threads"] == 1)
-        ).any()
+        thr_pairs = df_net.groupby(["tool", "threads"]).size().reset_index()
+        has_polar_t1 = ((thr_pairs["tool"] == "polar_net") & (thr_pairs["threads"] == 1)).any()
+        has_polar_t32 = ((thr_pairs["tool"] == "polar_net") & (thr_pairs["threads"] == 32)).any()
+        has_linopy_t1 = ((thr_pairs["tool"] == "linopy_net") & (thr_pairs["threads"] == 1)).any()
         if has_polar_t1 and has_polar_t32 and has_linopy_t1:
             _draw_threading_benefit(
                 df_net,

@@ -4,6 +4,7 @@ Uses the appsi_highs persistent-solver interface (the fastest Pyomo
 path to HiGHS). Falls back to writing an LP file via SolverFactory
 if appsi is unavailable.
 """
+
 from __future__ import annotations
 
 import pyomo.environ as pe
@@ -25,9 +26,7 @@ def build(N: int) -> pe.ConcreteModel:
     return m
 
 
-def solve(
-    model: pe.ConcreteModel, time_limit: float | None = None
-) -> tuple[bool, float]:
+def solve(model: pe.ConcreteModel, time_limit: float | None = None) -> tuple[bool, float]:
     try:
         from pyomo.contrib.appsi.solvers import Highs
 

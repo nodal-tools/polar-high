@@ -1,4 +1,5 @@
 """linopy model for the benchmark LP. Same problem as models/polar.py."""
+
 from __future__ import annotations
 
 import math
