@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [Unreleased]
+
+### Added
+
+- `polar_high.solvers` module: multi-solver dispatch behind a single
+  `solve(problem, solver_name=..., io_api=..., env=..., **options)`
+  entry point. HiGHS remains the default; **Gurobi**, **CPLEX**,
+  **FICO Xpress**, and **COPT** are supported on a
+  bring-your-own-license basis (we ship no binaries and no licenses).
+- `polar_high.solvers.available_solvers`: runtime registry of
+  installed solver Python wrappers, populated at import time. Tells
+  you which wrappers are *installed*; license checks fire inside the
+  adapter.
+- `IOMode.MPS` file-based fallback for users with a solver's CLI
+  binary on `PATH` but no matching Python wrapper. Writes a temp MPS
+  via `highspy`, invokes the CLI, parses the resulting `.sol` file.
+  Covers `gurobi_cl`, `cplex`, Xpress `optimizer`, and `copt_cmd`.
+- `polar_high.solvers._lp_view.LpView`: frozen, solver-agnostic
+  extraction surface that every adapter consumes. Engine-private
+  attribute access (`Problem._build_lp_arrays` etc.) is confined to
+  this single module.
+- Optional install extras: `polar-high[gurobi]`, `polar-high[cplex]`,
+  `polar-high[xpress]`, `polar-high[copt]`. Each pulls only the
+  vendor's Python wrapper (plus `scipy` where vectorized loads need
+  it).
+- `docs/guide/solvers.md`: user-facing guide covering detection,
+  per-solver install, the `io_api='mps'` escape hatch, the `env=`
+  passthrough (Gurobi WLS example), and license troubleshooting.
+
+### Changed
+
+- `Problem.solve(streaming=False)` now routes through
+  `polar_high.solvers._highs.run`. Behaviour and return type
+  unchanged — `streaming=True` retains the existing HiGHS-only
+  per-family `addRows` path.
+
 ## [1.1.4] — 2026-05-11
 
 ### Added

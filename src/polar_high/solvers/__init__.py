@@ -1,14 +1,21 @@
 """Multi-solver dispatch for polar-high.
 
-Phase 1 scaffold: this module exposes the registry of installed solver Python
-wrappers (``available_solvers``) and a :func:`solve` dispatch entry point.
-Every solver branch currently raises :class:`NotImplementedError` — real
-adapters are wired in later phases of
-``specs/polar-high-multi-solver-implementation-plan.md``.
+This module exposes the registry of installed solver Python wrappers
+(``available_solvers``) and a :func:`solve` dispatch entry point. Each
+solver-specific branch imports its adapter lazily and forwards an
+:class:`~polar_high.solvers._lp_view.LpView` plus user-supplied options.
 
 The bring-your-own-license stance from the handoff doc means: the registry
 detects which wrappers are *installed*, not which ones are *usable*. License
 checks happen later when an env or model is constructed inside an adapter.
+
+.. note::
+
+    TODO: post-1.2.0 — evaluate whether the four direct adapters
+    (``_highs``, ``_gurobi``, ``_cplex``, ``_xpress``, ``_copt``) have
+    converged enough on a common shape to extract a ``Solver`` ABC.
+    Until then we keep the duplication intentional per the handoff doc's
+    "What NOT to do" guidance.
 """
 
 from __future__ import annotations

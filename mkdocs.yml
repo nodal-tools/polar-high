@@ -93,6 +93,7 @@ nav:
       - Duals and Bases: concepts/duals-and-bases.md
   - Guide:
       - Loading data: guide/loading-data.md
+      - Solvers: guide/solvers.md
       - Warm-starting: guide/warm-starting.md
       - Lagrangian: guide/lagrangian.md
       - Performance: guide/performance.md
