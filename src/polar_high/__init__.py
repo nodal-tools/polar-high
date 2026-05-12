@@ -27,6 +27,15 @@ from polar_high.lagrangian import (
     LagrangianProblem,
     LagrangianSolution,
 )
+from polar_high.solvers import (
+    IOMode,
+    LicenseError,
+    SolverError,
+    SolverNotAvailableError,
+    SolverResult,
+    SolverStatus,
+    solve,
+)
 
 __all__ = [
     "Var",
@@ -43,4 +52,11 @@ __all__ = [
     "CouplingSpec",
     "LagrangianProblem",
     "LagrangianSolution",
+    "solve",
+    "IOMode",
+    "SolverStatus",
+    "SolverResult",
+    "SolverNotAvailableError",
+    "LicenseError",
+    "SolverError",
 ]
