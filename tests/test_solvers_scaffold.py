@@ -40,21 +40,24 @@ def test_empty_registry_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "highspy" in msg
 
 
-def test_default_solver_is_first_available() -> None:
+def test_default_solver_is_first_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """With ``solver_name=None``, dispatch picks ``available_solvers[0]``.
 
-    In Phase 1 every branch raises ``NotImplementedError``; the adapter name
-    is embedded in the error message so we can confirm which branch ran.
+    The HiGHS branch is wired in Phase 2, so to keep this test independent
+    of which solvers are installed we monkey-patch ``available_solvers``
+    with a non-HiGHS entry and confirm dispatch routes into its branch by
+    inspecting the (still-unwired) ``NotImplementedError``.
     """
-    assert available_solvers, "test precondition: at least one solver installed"
-    expected = available_solvers[0]
     branch_keywords = {
         "gurobi": "Gurobi",
         "cplex": "CPLEX",
         "xpress": "Xpress",
         "copt": "COPT",
-        "highs": "HiGHS",
     }
-    with pytest.raises(NotImplementedError) as excinfo:
-        solve(object(), io_api=IOMode.DIRECT)
-    assert branch_keywords[expected] in str(excinfo.value)
+    for name, kw in branch_keywords.items():
+        monkeypatch.setattr(solvers, "available_solvers", [name])
+        with pytest.raises(NotImplementedError) as excinfo:
+            solve(object(), io_api=IOMode.DIRECT)
+        assert kw in str(excinfo.value), (
+            f"dispatch routed {name!r} to the wrong branch: {excinfo.value}"
+        )

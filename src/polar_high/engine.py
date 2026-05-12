@@ -926,113 +926,51 @@ class Problem:
                 keep_solver=keep_solver,
             )
 
-        # Build the row + matrix arrays via the shared helper.  Both the
-        # non-streaming solve path and :meth:`peek_lp_ranges` use this
-        # helper so the LP arrays HiGHS sees are byte-for-byte identical
-        # to those used for diagnostic inspection.
-        (
-            col_lb_h,
-            col_ub_h,
-            row_lb_h,
-            row_ub_h,
-            sorted_v,
-            sorted_r,
-            starts,
-            row_names,
-            n_rows,
-        ) = self._build_lp_arrays(
-            n_cols=n_cols,
-            col_lb=col_lb,
-            col_ub=col_ub,
+        # Non-streaming path now delegates to the HiGHS adapter behind
+        # :mod:`polar_high.solvers`.  The adapter recomputes the column +
+        # LP arrays from ``self``, runs HiGHS via ``passModel``, and
+        # returns a :class:`SolverResult`.  We then convert that back
+        # into the legacy :class:`Solution` shape so callers see no
+        # breaking change.  The adapter stashes the raw numpy arrays as
+        # private attributes on the result for zero-copy round-trip; the
+        # public dict fields exist for cross-solver consumers.
+        #
+        # NOTE: the streaming path above is HiGHS-only and intentionally
+        # bypasses :mod:`polar_high.solvers`.  See ``_highs.py``'s module
+        # docstring for the locked rationale.
+        from .solvers._base import SolverStatus
+        from .solvers._highs import run as _highs_run
+
+        result = _highs_run(
+            self,
+            options=options,
+            keep_solver=keep_solver,
         )
 
-        lp = highspy.HighsLp()
-        lp.num_col_ = int(n_cols)
-        lp.num_row_ = int(n_rows)
-        lp.col_cost_ = col_obj.astype(np.float64)
-        lp.col_lower_ = col_lb_h
-        lp.col_upper_ = col_ub_h
-        lp.row_lower_ = row_lb_h
-        lp.row_upper_ = row_ub_h
-        lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
-        lp.a_matrix_.num_col_ = int(n_cols)
-        lp.a_matrix_.num_row_ = int(n_rows)
-        lp.a_matrix_.start_ = starts
-        lp.a_matrix_.index_ = sorted_r
-        lp.a_matrix_.value_ = sorted_v
-        lp.sense_ = (
-            highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
-        )
-        if self._obj_offset:
-            lp.offset_ = float(self._obj_offset)
-        if col_int.any():
-            kCont = highspy.HighsVarType.kContinuous
-            kInt = highspy.HighsVarType.kInteger
-            # vectorized lookup via numpy, then a single .tolist()
-            # (passing through a Python list is what highspy expects)
-            integ_arr = np.where(col_int, kInt, kCont)
-            lp.integrality_ = integ_arr.tolist()
+        # SolverResult → Solution round-trip.  All of these private
+        # attributes are populated unconditionally by ``_highs.run``;
+        # cross-solver code paths read the public ``primal`` / ``dual``
+        # dicts instead.
+        col_value: np.ndarray = result._col_value
+        row_dual: np.ndarray = result._row_dual
+        col_dual: np.ndarray = result._col_dual
+        col_names_out: list[str] = result._col_names
+        row_names_out: list[str] = result._row_names
+        sol_highs: highspy.Highs | None = result._highs_instance
 
-        h = highspy.Highs()
-        # Apply solver options BEFORE passModel — some HiGHS options
-        # (notably ``presolve``) must be set before the model is loaded
-        # to take effect on the first run().  Per-call ``options`` kwarg
-        # wins over options stored on the Problem.
-        opts = options if options is not None else self._solver_options
-        if opts:
-            import warnings
-
-            ok_status = getattr(highspy.HighsStatus, "kOk", None)
-            for key, val in opts.items():
-                try:
-                    status = h.setOptionValue(key, val)
-                except Exception as exc:  # belt-and-braces — highspy may raise
-                    warnings.warn(
-                        f"HiGHS rejected option {key}={val!r}: {exc}",
-                        stacklevel=2,
-                    )
-                    continue
-                # highspy returns HighsStatus.kOk on success, kError on a bad
-                # option name OR a bad value for a known option.  Either way
-                # we don't want to crash — just log and continue.
-                if ok_status is not None and status != ok_status:
-                    warnings.warn(
-                        f"HiGHS rejected option {key}={val!r} (status={status!r})",
-                        stacklevel=2,
-                    )
-        h.passModel(lp)
-
-        # names — passColName / passRowName per item (cheap)
-        for i, n in enumerate(col_names):
-            if n is not None:
-                h.passColName(i, n)
-        for i, n in enumerate(row_names):
-            h.passRowName(i, n)
-
-        h.run()
-        sol = h.getSolution()
-        status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
-        obj_val = h.getObjectiveValue()
-        col_value = np.asarray(sol.col_value, dtype=np.float64)
-        row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
-        col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
-        # ``keep_solver=False`` releases the live HiGHS instance after
-        # the primal/dual/objective have been extracted into numpy
-        # arrays.  Drop the local reference (and the LP handle) so the
-        # C-side LP storage can be freed; Solution.highs becomes None.
-        if keep_solver:
-            sol_highs: highspy.Highs | None = h
-        else:
-            sol_highs = None
-            del h, lp
+        # Pre-Phase-2 behaviour: ``Solution.obj`` carried the HiGHS-reported
+        # objective regardless of model status.  SolverResult zeros the
+        # ``objective`` field for non-optimal solves, so we read the raw
+        # HiGHS objective off the private ``_objective_raw`` field for
+        # bit-identical round-trip.
         return Solution(
-            optimal=status_ok,
-            obj=obj_val,
+            optimal=result.status == SolverStatus.OPTIMAL,
+            obj=result._objective_raw,
             col_value=col_value,
             row_dual=row_dual,
             col_dual=col_dual,
-            col_names=col_names,
-            row_names=row_names,
+            col_names=col_names_out,
+            row_names=row_names_out,
             vars=dict(self._vars),
             highs=sol_highs,
         )

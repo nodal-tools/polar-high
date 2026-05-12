@@ -114,10 +114,9 @@ def solve(
     elif solver_name == "copt":
         raise NotImplementedError("COPT adapter is not yet implemented (Phase 6).")
     elif solver_name == "highs":
-        raise NotImplementedError(
-            "HiGHS adapter is not yet wired through solvers.solve (Phase 2). "
-            "Use polar_high.Problem.solve() for now."
-        )
+        from ._highs import run
+
+        return run(model, env=env, **solver_options)
     else:
         raise ValueError(f"Unknown solver: {solver_name}")
 
