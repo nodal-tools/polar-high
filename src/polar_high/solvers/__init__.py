@@ -110,7 +110,7 @@ def solve(
         # fire one frame deeper.
         _extra_hint = {
             "gurobi": "  Install via:  pip install 'polar-high[gurobi]'",
-            "cplex": "",
+            "cplex": "  Install via:  pip install 'polar-high[cplex]'",
             "xpress": "",
             "copt": "  Install via:  pip install 'polar-high[copt]'",
         }.get(solver_name, "")
@@ -151,7 +151,11 @@ def solve(
         view = LpView.from_problem(model)
         return _gurobi_run(view, env=env, **solver_options)
     elif solver_name == "cplex":
-        raise NotImplementedError("CPLEX adapter is not yet implemented (Phase 7).")
+        from ._cplex import run as _cplex_run
+        from ._lp_view import LpView
+
+        view = LpView.from_problem(model)
+        return _cplex_run(view, env=env, **solver_options)
     elif solver_name == "xpress":
         raise NotImplementedError("Xpress adapter is not yet implemented (Phase 8).")
     elif solver_name == "copt":

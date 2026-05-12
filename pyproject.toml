@@ -48,6 +48,7 @@ docs = [
 # user's responsibility (see specs/polar-high-multi-solver-handoff.md).
 gurobi = ["gurobipy", "scipy"]
 copt = ["coptpy", "scipy"]
+cplex = ["cplex"]
 
 [project.urls]
 Homepage = "https://github.com/nodal-tools/polar-high"
