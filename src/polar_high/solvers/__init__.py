@@ -115,8 +115,20 @@ def solve(
         raise NotImplementedError("COPT adapter is not yet implemented (Phase 6).")
     elif solver_name == "highs":
         from ._highs import run
+        from ._lp_view import LpView
 
-        return run(model, env=env, **solver_options)
+        # Build the LP view once; ``_highs.run`` consumes it directly
+        # without reaching back into engine internals.  The
+        # ``set_solver_options`` precedence is preserved here so callers
+        # of ``solvers.solve`` see the same option resolution as
+        # ``Problem.solve``: per-call options win over what was stored
+        # on the Problem via ``set_solver_options``.
+        view = LpView.from_problem(model)
+        opts = solver_options.pop("options", None)
+        if opts is None:
+            opts = getattr(model, "_solver_options", None)
+        keep_solver = solver_options.pop("keep_solver", False)
+        return run(view, env=env, options=opts, keep_solver=keep_solver, **solver_options)
     else:
         raise ValueError(f"Unknown solver: {solver_name}")
 

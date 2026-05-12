@@ -940,10 +940,14 @@ class Problem:
         # docstring for the locked rationale.
         from .solvers._base import SolverStatus
         from .solvers._highs import run as _highs_run
+        from .solvers._lp_view import LpView
 
+        view = LpView.from_problem(self)
+        # Per-call ``options`` wins over what was stored on the Problem.
+        opts = options if options is not None else self._solver_options
         result = _highs_run(
-            self,
-            options=options,
+            view,
+            options=opts,
             keep_solver=keep_solver,
         )
 
