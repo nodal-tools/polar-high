@@ -3,7 +3,7 @@
 # reflects current state of each library; pin here when locking down a
 # specific run for the docs.
 polar-high
-linopy>=0.3
+linopy>=0.7.0
 pyomo>=6.7
 highspy
 xarray
