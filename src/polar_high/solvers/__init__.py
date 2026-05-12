@@ -112,7 +112,7 @@ def solve(
             "gurobi": "  Install via:  pip install 'polar-high[gurobi]'",
             "cplex": "",
             "xpress": "",
-            "copt": "",
+            "copt": "  Install via:  pip install 'polar-high[copt]'",
         }.get(solver_name, "")
         raise SolverNotAvailableError(
             f"Solver '{solver_name}' not available. Installed: {_available}." + _extra_hint
@@ -155,7 +155,11 @@ def solve(
     elif solver_name == "xpress":
         raise NotImplementedError("Xpress adapter is not yet implemented (Phase 8).")
     elif solver_name == "copt":
-        raise NotImplementedError("COPT adapter is not yet implemented (Phase 6).")
+        from ._copt import run as _copt_run
+        from ._lp_view import LpView
+
+        view = LpView.from_problem(model)
+        return _copt_run(view, env=env, **solver_options)
     elif solver_name == "highs":
         from ._highs import run
         from ._lp_view import LpView

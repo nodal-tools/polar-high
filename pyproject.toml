@@ -47,6 +47,7 @@ docs = [
 # for vectorized load; the solver binary and its license remain the
 # user's responsibility (see specs/polar-high-multi-solver-handoff.md).
 gurobi = ["gurobipy", "scipy"]
+copt = ["coptpy", "scipy"]
 
 [project.urls]
 Homepage = "https://github.com/nodal-tools/polar-high"

@@ -48,14 +48,13 @@ def test_default_solver_is_first_available(monkeypatch: pytest.MonkeyPatch) -> N
     with a non-HiGHS entry and confirm dispatch routes into its branch by
     inspecting the (still-unwired) ``NotImplementedError``.
     """
-    # gurobi was wired in Phase 5 and now raises SolverNotAvailableError
-    # when gurobipy is not installed (rather than NotImplementedError).
-    # The remaining direct branches still raise NotImplementedError until
-    # Phases 6-8.
+    # gurobi (Phase 5) and copt (Phase 6) are now wired and raise
+    # SolverNotAvailableError when their Python wrapper is not installed
+    # (rather than NotImplementedError).  The remaining direct branches
+    # still raise NotImplementedError until Phases 7-8.
     branch_keywords = {
         "cplex": "CPLEX",
         "xpress": "Xpress",
-        "copt": "COPT",
     }
     for name, kw in branch_keywords.items():
         monkeypatch.setattr(solvers, "available_solvers", [name])
