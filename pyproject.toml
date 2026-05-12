@@ -42,6 +42,11 @@ docs = [
     "mike",
     "mkdocs-include-markdown-plugin",
 ]
+# Commercial-solver adapters — bring-your-own-license.  Each extra
+# installs only the *Python wrapper* and any pure-Python helpers needed
+# for vectorized load; the solver binary and its license remain the
+# user's responsibility (see specs/polar-high-multi-solver-handoff.md).
+gurobi = ["gurobipy", "scipy"]
 
 [project.urls]
 Homepage = "https://github.com/nodal-tools/polar-high"

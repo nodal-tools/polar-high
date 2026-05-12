@@ -103,8 +103,19 @@ def solve(
     if solver_name is None:
         solver_name = _available[0]
     if solver_name not in _available and not _mps_eligible:
+        # Surface the optional-extra install hint when the user asked for
+        # a solver whose adapter we ship but whose Python wrapper is not
+        # installed.  This keeps the error UX consistent with the
+        # adapter-internal SolverNotAvailableError that would otherwise
+        # fire one frame deeper.
+        _extra_hint = {
+            "gurobi": "  Install via:  pip install 'polar-high[gurobi]'",
+            "cplex": "",
+            "xpress": "",
+            "copt": "",
+        }.get(solver_name, "")
         raise SolverNotAvailableError(
-            f"Solver '{solver_name}' not available. Installed: {_available}"
+            f"Solver '{solver_name}' not available. Installed: {_available}." + _extra_hint
         )
 
     if io_api == IOMode.LP:
@@ -134,7 +145,11 @@ def solve(
         return run_via_file(view, solver_name, io_api, **solver_options)
 
     if solver_name == "gurobi":
-        raise NotImplementedError("Gurobi adapter is not yet implemented (Phase 5).")
+        from ._gurobi import run as _gurobi_run
+        from ._lp_view import LpView
+
+        view = LpView.from_problem(model)
+        return _gurobi_run(view, env=env, **solver_options)
     elif solver_name == "cplex":
         raise NotImplementedError("CPLEX adapter is not yet implemented (Phase 7).")
     elif solver_name == "xpress":
