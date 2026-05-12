@@ -12,6 +12,7 @@ the procedure is documented at the bottom of this file.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 # Module-level skip — collected as one "skipped" entry rather than per
@@ -25,6 +26,8 @@ from toy_model import build_dispatch  # noqa: E402
 
 from polar_high import Problem  # noqa: E402
 from polar_high.solvers import SolverResult, SolverStatus, solve  # noqa: E402
+from polar_high.solvers._copt import run as _copt_run  # noqa: E402
+from polar_high.solvers._lp_view import LpView  # noqa: E402
 
 
 def _toy_lp_problem() -> Problem:
@@ -33,20 +36,43 @@ def _toy_lp_problem() -> Problem:
     return pb
 
 
-def _toy_mip_problem() -> Problem:
-    """A tiny self-contained MIP.
+def _toy_mip_view() -> LpView:
+    """Hand-built MIP :class:`LpView`.
+
+    ``Problem.add_var`` requires ``dims`` and ``index`` arguments, which
+    makes single-scalar-MIP test setup awkward to build via the public
+    API; we therefore construct the :class:`LpView` directly.
 
     Maximise ``3x + 2y`` subject to ``x + y <= 4`` and ``x + 3y <= 6``,
-    with ``x, y`` non-negative integers.  Optimum: ``x=3, y=1, obj=11``
-    (verifiable by inspection).
+    with ``x, y`` non-negative integers in ``[0, 10]``.  Optimum:
+    ``x=4, y=0, obj=12``.
     """
-    pb = Problem()
-    x = pb.add_var("x", lower=0.0, upper=10.0, integer=True)
-    y = pb.add_var("y", lower=0.0, upper=10.0, integer=True)
-    pb.add_cstr("c1", sense="<=", lhs_terms={"a": x, "b": y}, rhs_terms={"r": 4})
-    pb.add_cstr("c2", sense="<=", lhs_terms={"a": x, "b": 3 * y}, rhs_terms={"r": 6})
-    pb.set_objective(3 * x + 2 * y, sense="max")
-    return pb
+    col_obj = np.array([3.0, 2.0])
+    col_lb = np.array([0.0, 0.0])
+    col_ub = np.array([10.0, 10.0])
+    integrality = np.array([1, 1], dtype=np.int8)
+    row_lb = np.array([-np.inf, -np.inf])
+    row_ub = np.array([4.0, 6.0])
+    a_start = np.array([0, 2, 4], dtype=np.int32)
+    a_index = np.array([0, 1, 0, 1], dtype=np.int32)
+    a_value = np.array([1.0, 1.0, 1.0, 3.0])
+    return LpView(
+        n_cols=2,
+        n_rows=2,
+        col_obj=col_obj,
+        col_lb=col_lb,
+        col_ub=col_ub,
+        integrality=integrality,
+        row_lb=row_lb,
+        row_ub=row_ub,
+        a_start=a_start,
+        a_index=a_index,
+        a_value=a_value,
+        col_names=["x", "y"],
+        row_names=["c1", "c2"],
+        sense="max",
+        obj_offset=0.0,
+    )
 
 
 def test_copt_solves_toy_lp_returns_optimal() -> None:
@@ -66,12 +92,12 @@ def test_copt_solves_toy_lp_returns_optimal() -> None:
 
 def test_copt_solves_toy_mip_respects_integrality() -> None:
     """MIP variables come back integral and dual is None."""
-    pb = _toy_mip_problem()
-    result = solve(pb, solver_name="copt")
+    view = _toy_mip_view()
+    result = _copt_run(view)
 
     assert result.status == SolverStatus.OPTIMAL
     assert result.objective is not None
-    assert abs(result.objective - 11.0) < 1e-6
+    assert abs(result.objective - 12.0) < 1e-6
     assert result.primal is not None
     for nm, val in result.primal.items():
         assert abs(val - round(val)) < 1e-6, f"{nm}={val} not integral"
