@@ -86,24 +86,52 @@ def solve(
     # Re-read the module-level list at call time so monkey-patching in tests
     # (and runtime mutation by callers) is honoured.
     from . import available_solvers as _available
+    from ._mps_fallback import _BINARY_NAMES as _MPS_SOLVERS
 
-    if not _available:
+    # The MPS-file path does not need the solver's Python wrapper — only
+    # its CLI binary.  So if the caller asked for io_api=MPS and the
+    # target is one of the four commercial solvers, we let it through
+    # the registry check.  The dispatch into ``_mps_fallback`` will then
+    # surface a clean ``SolverError`` if the binary is also missing.
+    _mps_eligible = io_api == IOMode.MPS and solver_name is not None and solver_name in _MPS_SOLVERS
+
+    if not _available and not _mps_eligible:
         raise SolverNotAvailableError(
             "No solver Python wrapper found. Install at least one of: "
             "highspy, gurobipy, cplex, xpress, coptpy."
         )
     if solver_name is None:
         solver_name = _available[0]
-    if solver_name not in _available:
+    if solver_name not in _available and not _mps_eligible:
         raise SolverNotAvailableError(
             f"Solver '{solver_name}' not available. Installed: {_available}"
         )
 
-    if io_api in (IOMode.MPS, IOMode.LP):
+    if io_api == IOMode.LP:
+        # The LP file format is reserved by the enum but the Phase 4
+        # plan ("Out of scope") leaves implementation to a follow-up.
         raise NotImplementedError(
-            f"File-based dispatch (io_api={io_api.value!r}) is not yet "
-            "implemented; wired in Phase 4 of the multi-solver plan."
+            "io_api='lp' is reserved but not implemented. Use io_api='mps' "
+            "for the file-based fallback, or io_api='direct' for the "
+            "in-memory adapter."
         )
+
+    if io_api == IOMode.MPS:
+        # HiGHS: refuse loudly rather than silently round-trip through a
+        # temp MPS file (would lose names and incur a write/read cost
+        # for no benefit — the in-memory HiGHS path is always strictly
+        # better).  See ``_mps_fallback.run_via_file``'s docstring.
+        if solver_name == "highs":
+            raise ValueError(
+                "io_api='mps' is not supported for solver_name='highs'. "
+                "HiGHS always uses the in-memory direct path; use "
+                "io_api=IOMode.DIRECT (the default) for HiGHS."
+            )
+        from ._lp_view import LpView
+        from ._mps_fallback import run_via_file
+
+        view = LpView.from_problem(model)
+        return run_via_file(view, solver_name, io_api, **solver_options)
 
     if solver_name == "gurobi":
         raise NotImplementedError("Gurobi adapter is not yet implemented (Phase 5).")
