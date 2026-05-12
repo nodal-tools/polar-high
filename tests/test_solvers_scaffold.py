@@ -43,23 +43,25 @@ def test_empty_registry_path(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_solver_is_first_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """With ``solver_name=None``, dispatch picks ``available_solvers[0]``.
 
-    The HiGHS branch is wired in Phase 2, so to keep this test independent
-    of which solvers are installed we monkey-patch ``available_solvers``
-    with a non-HiGHS entry and confirm dispatch routes into its branch by
-    inspecting the (still-unwired) ``NotImplementedError``.
+    After Phase 8 every direct branch (gurobi, cplex, xpress, copt,
+    highs) is wired to a real adapter — there is no longer a
+    ``NotImplementedError`` branch left to assert against.  We
+    therefore confirm the *registry-default* behaviour: monkey-patching
+    ``available_solvers`` to a single-entry list ``[name]`` makes
+    ``solve(..., solver_name=None)`` route to ``name``.  We use the
+    HiGHS branch as the routing target (always installed in CI) and
+    just verify the call returns a HiGHS-tagged result.
     """
-    # gurobi (Phase 5), copt (Phase 6) and cplex (Phase 7) are now
-    # wired and raise SolverNotAvailableError when their Python wrapper
-    # is not installed (rather than NotImplementedError).  Xpress is
-    # the only remaining direct branch still raising NotImplementedError
-    # (Phase 8 will wire it).
-    branch_keywords = {
-        "xpress": "Xpress",
-    }
-    for name, kw in branch_keywords.items():
-        monkeypatch.setattr(solvers, "available_solvers", [name])
-        with pytest.raises(NotImplementedError) as excinfo:
-            solve(object(), io_api=IOMode.DIRECT)
-        assert kw in str(excinfo.value), (
-            f"dispatch routed {name!r} to the wrong branch: {excinfo.value}"
-        )
+    # We can only meaningfully exercise the "first-available" routing
+    # when that first solver actually has its Python wrapper installed.
+    # HiGHS is the safe choice — always installed in CI.
+    monkeypatch.setattr(solvers, "available_solvers", ["highs"])
+    from toy_data import make_toy_data
+    from toy_model import build_dispatch
+
+    from polar_high import Problem
+
+    pb = Problem()
+    build_dispatch(pb, make_toy_data())  # type: ignore[no-untyped-call]
+    result = solve(pb, io_api=IOMode.DIRECT)
+    assert result.solver_name == "highs"

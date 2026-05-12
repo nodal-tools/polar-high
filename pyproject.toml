@@ -49,6 +49,7 @@ docs = [
 gurobi = ["gurobipy", "scipy"]
 copt = ["coptpy", "scipy"]
 cplex = ["cplex"]
+xpress = ["xpress"]
 
 [project.urls]
 Homepage = "https://github.com/nodal-tools/polar-high"
