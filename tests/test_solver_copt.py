@@ -12,6 +12,9 @@ the procedure is documented at the bottom of this file.
 
 from __future__ import annotations
 
+import shutil
+import sys
+
 import numpy as np
 import pytest
 
@@ -20,6 +23,19 @@ import pytest
 # touches coptpy when it isn't installed.
 cp = pytest.importorskip("coptpy")
 pytest.importorskip("scipy")
+
+# When ``highspy`` is loaded in the same interpreter (always true for a
+# normal polar_high test run), ``_copt.run`` auto-routes through the
+# ``copt_cmd`` CLI to avoid the COPT/HiGHS native-symbol conflict.
+# Skip this whole module when the binary is missing — the adapter would
+# raise ``SolverNotAvailableError`` and every assertion would fail with
+# an unhelpful message.
+if "highspy" in sys.modules and shutil.which("copt_cmd") is None:
+    pytest.skip(
+        "copt_cmd not on PATH; required when highspy is loaded "
+        "(COPT/HiGHS in-process conflict — see solvers/_copt.py docstring).",
+        allow_module_level=True,
+    )
 
 from toy_data import make_toy_data  # noqa: E402
 from toy_model import build_dispatch  # noqa: E402

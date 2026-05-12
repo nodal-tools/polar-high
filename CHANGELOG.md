@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `polar_high.solvers._highs.run`. Behaviour and return type
   unchanged — `streaming=True` retains the existing HiGHS-only
   per-family `addRows` path.
+- COPT adapter auto-routes through the `copt_cmd` CLI fallback
+  whenever `highspy` is already loaded in the interpreter. COPT
+  8.x's native core conflicts with HiGHS in-process (`Highs.run()`
+  segfaults once `coptpy` is imported); the auto-route keeps both
+  solvers usable from the same `polar-high` venv at the cost of a
+  per-solve MPS write + subprocess invocation. Requires `copt_cmd`
+  on PATH (not shipped by the `coptpy` pip wheel); a clean
+  `SolverNotAvailableError` is raised when it is missing. Details
+  in `docs/guide/solvers.md`.
 
 ## [1.1.4] — 2026-05-11
 

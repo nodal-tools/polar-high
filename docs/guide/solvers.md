@@ -119,6 +119,32 @@ build a `coptpy.Envr` and pass it via `env=`.
 Vendor docs:
 [COPT manual](https://www.shanshu.ai/copt).
 
+!!! warning "COPT and HiGHS in the same Python process"
+
+    COPT 8.x ships native code (`coptpy.coptcore`) that conflicts with
+    `highspy` once both are loaded into one interpreter: `Highs.run()`
+    segfaults after `coptpy` is imported. The conflict is on the solver
+    side only — `highspy.Highs.writeModel` is unaffected.
+
+    Since `polar-high` always imports `highspy` (it is the matrix
+    builder), the COPT adapter cannot use its in-memory Python path
+    when called from a `polar_high` process. It **transparently
+    auto-routes** through the file-based `copt_cmd` CLI in that case:
+    `highspy` writes the MPS, then a subprocess invokes `copt_cmd`
+    (no in-process `coptpy` load).
+
+    This requires the standalone `copt_cmd` binary on `PATH`. The
+    `coptpy` pip wheel does **not** ship it; install it from the
+    [full COPT distribution](https://www.shanshu.ai/copt). If
+    `copt_cmd` is missing the adapter raises `SolverNotAvailableError`
+    with a pointer to this section. As an alternative, invoke COPT
+    from a Python process that does not import `polar_high` — for
+    example, write the MPS via `Problem.solve(write_mps=...)` (or any
+    other route) and call `coptpy` directly.
+
+    No other commercial solver exhibits this conflict — Gurobi,
+    CPLEX, and Xpress coexist with HiGHS in-process without issue.
+
 ## File-based fallback: `io_api='mps'`
 
 If you have a solver binary on `PATH` (e.g. an IT-managed install of

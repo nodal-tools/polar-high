@@ -5,7 +5,7 @@ Phase 6 of ``specs/polar-high-multi-solver-implementation-plan.md``.
 This adapter consumes a fully-extracted
 :class:`~polar_high.solvers._lp_view.LpView` and pushes it into a fresh
 ``coptpy.Model`` in memory.  Vectorized load via
-``scipy.sparse.csc_matrix`` + ``Model.addMVars`` + ``Model.addMConstrs``,
+``scipy.sparse.csc_matrix`` + ``Model.addMVar`` + ``Model.addMConstr``,
 mirroring the Phase 5 Gurobi adapter — COPT's API is Gurobi-shaped, so
 the structure is intentionally identical.
 
@@ -31,6 +31,28 @@ Dependency note
 not at module load, so this module is always importable.  A missing
 wrapper raises :class:`~polar_high.solvers._base.SolverNotAvailableError`
 with an install pointer.
+
+HiGHS / COPT process-coexistence
+--------------------------------
+COPT 8.x ships native code (``coptpy.coptcore``) that conflicts with
+``highspy`` when both are loaded into the same Python interpreter:
+``highspy.Highs.run()`` segfaults once ``coptpy`` has been imported.
+The conflict is on the solver side only — ``highspy.Highs.writeModel``
+is unaffected.
+
+To stay safe, :func:`run` auto-detects this situation (``highspy`` and
+``polar_high.solvers._highs`` both present in ``sys.modules``) and
+transparently routes the solve through the file-based fallback in
+:mod:`~polar_high.solvers._mps_fallback`: ``highspy`` writes an MPS,
+then the ``copt_cmd`` CLI is invoked as a subprocess (no in-process
+``coptpy`` load).  The direct in-memory path is reserved for
+processes that *only* use COPT.
+
+This requires the standalone ``copt_cmd`` binary on ``PATH``.  If it
+is missing, the fallback raises :class:`SolverError` with a clear
+"binary not found" message; install ``copt_cmd`` from the COPT
+distribution or use ``solver_name='copt'`` from a process that has
+not imported ``polar_high.solvers._highs``.
 
 Out of scope (matching the plan)
 --------------------------------
@@ -127,6 +149,34 @@ def run(
         Any other ``CoptError`` from model construction or solve.
     """
     # ------------------------------------------------------------------
+    # HiGHS / COPT coexistence guard.  If ``highspy`` is already loaded
+    # in this interpreter, importing ``coptpy`` would corrupt highspy's
+    # solver core (see module docstring).  Route through the file-based
+    # MPS fallback instead — ``highspy.writeModel`` is unaffected, and
+    # the ``copt_cmd`` CLI runs in a fresh subprocess that never sees
+    # highspy's symbols.
+    # ------------------------------------------------------------------
+    import shutil
+    import sys
+
+    if "highspy" in sys.modules:
+        if shutil.which("copt_cmd") is None:
+            raise SolverNotAvailableError(
+                "COPT cannot be used in-process when ``highspy`` is loaded "
+                "— coptpy.coptcore corrupts highspy's solver core (segfault "
+                "inside Highs.run()).  ``polar_high`` would route the solve "
+                "through the ``copt_cmd`` CLI, but the binary is not on "
+                "PATH.  Either install ``copt_cmd`` from the COPT "
+                "distribution (it is not shipped by the ``coptpy`` pip "
+                "wheel), or invoke COPT from a Python process that has not "
+                "imported ``polar_high.solvers._highs`` / ``highspy``."
+            )
+        from ._base import IOMode
+        from ._mps_fallback import run_via_file
+
+        return run_via_file(view, "copt", IOMode.MPS, **options)
+
+    # ------------------------------------------------------------------
     # Lazy imports — keep the module importable without [copt] extra.
     # ------------------------------------------------------------------
     try:
@@ -176,7 +226,7 @@ def run(
         else:
             vtype = np.where(view.integrality.astype(bool), COPT.INTEGER, COPT.CONTINUOUS)
 
-        x = m.addMVars(
+        x = m.addMVar(
             n_cols,
             lb=view.col_lb,
             ub=view.col_ub,
@@ -194,7 +244,7 @@ def run(
 
         # --------------------------------------------------------------
         # Constraint matrix and RHS — same shape as Phase 5: split
-        # ranged rows upstream, then a single vectorized ``addMConstrs``
+        # ranged rows upstream, then a single vectorized ``addMConstr``
         # call with a scipy CSC matrix.
         # --------------------------------------------------------------
         load_view = view.split_ranged_rows()
@@ -210,7 +260,7 @@ def run(
         sense_chars = np.array([sense_map[s] for s in senses_arr.tolist()], dtype=object)
 
         if load_n_rows > 0:
-            constrs = m.addMConstrs(a, x, sense_chars, rhs_arr)
+            constrs = m.addMConstr(a, x, sense_chars, rhs_arr)
             for i, nm in enumerate(load_view.row_names):
                 # row_names may contain empty strings on the lo/hi
                 # halves of an originally anonymous ranged row.
@@ -218,7 +268,7 @@ def run(
                     constrs[i].name = nm
 
         # --------------------------------------------------------------
-        # Objective.  ``addMVars(..., obj=...)`` already set the linear
+        # Objective.  ``addMVar(..., obj=...)`` already set the linear
         # coefficients; we just need the sense and any offset.  COPT
         # exposes the constant via the ObjConst parameter.
         # --------------------------------------------------------------

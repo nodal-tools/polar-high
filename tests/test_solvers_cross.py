@@ -23,6 +23,7 @@ Coverage:
 from __future__ import annotations
 
 import shutil
+import sys
 
 import numpy as np
 import pytest
@@ -47,6 +48,20 @@ _CLI_BINARY = {
     "xpress": "optimizer",
     "copt": "copt_cmd",
 }
+
+
+def _skip_if_copt_unreachable(solver_name: str) -> None:
+    """Skip when ``solver_name='copt'`` would auto-route through a missing CLI.
+
+    COPT/HiGHS conflict in one process: ``_copt.run`` auto-routes through
+    the ``copt_cmd`` CLI whenever ``highspy`` is loaded.  If the binary
+    is absent the adapter raises ``SolverNotAvailableError`` — skip the
+    case rather than fail.
+    """
+    if solver_name == "copt" and "highspy" in sys.modules and shutil.which("copt_cmd") is None:
+        pytest.skip(
+            "COPT auto-routes to copt_cmd when highspy is loaded; binary not on PATH in this venv."
+        )
 
 
 def _toy_lp_problem() -> Problem:
@@ -136,6 +151,8 @@ def test_objectives_agree_across_available_solvers(solver_name: str) -> None:
     in the registry agrees on the same anchored value, not just on a
     floating reference solve.
     """
+    _skip_if_copt_unreachable(solver_name)
+
     pb = _toy_lp_problem()
     result = solve(pb, solver_name=solver_name)
 
@@ -161,6 +178,8 @@ def test_objectives_agree_across_available_solvers_mip(solver_name: str) -> None
     constructing an equivalent scalar-integer ``Problem`` via the
     public API is awkward (see the per-adapter test suites).
     """
+    _skip_if_copt_unreachable(solver_name)
+
     view = _toy_mip_view()
     run = _direct_adapter(solver_name)
     result = run(view)
