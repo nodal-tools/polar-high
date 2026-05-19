@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [1.3.0] — 2026-05-19
+
+### Added
+
+- Generic Enum-dtype alignment on every internal join site. When two
+  frames are joined on a column that is `pl.Enum` on both sides but
+  with different categorical vocabularies, polar-high now up-casts
+  the narrower side to the wider Enum (provided one's categories are
+  a subset of the other's). Enum-vs-`pl.Utf8` mismatches are
+  resolved by casting the string side to the Enum dtype. Two Enums
+  with neither-subset vocabs raise a clear `ValueError` pointing the
+  caller to cast to `pl.Utf8` or build a union Enum. The behaviour
+  is exposed as the internal helper `polar_high.engine._align_enum_join_keys`
+  and exercised by every internal `.join` call site (operator joins,
+  `Where`, `Sum`, `Lag`, constraint-emission, `WarmProblem` updates).
+- `tests/test_enum_dtype_align.py`: unit + end-to-end coverage of the
+  new alignment behaviour, including the disjoint-vocab raise path
+  and an end-to-end `Problem.add_cstr` / `solve` with a narrower-vocab
+  rhs Param.
+
+### Changed
+
+- README "Enum dtype handling" subsection documenting the
+  subset-up-cast rule and the raise-for-no-subset behaviour. No DSL
+  surface change — existing models keep building unchanged; mixed-vocab
+  models that previously needed per-site casts in caller code no
+  longer do.
+
 ## [1.2.0] — 2026-05-12
 
 ### Added

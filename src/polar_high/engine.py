@@ -23,9 +23,139 @@ to ``over=`` at ``add_cstr`` time.
 
 from __future__ import annotations
 
+from typing import Union
+
 import highspy
 import numpy as np
 import polars as pl
+
+# ---------------------------------------------------------------------------
+# Enum-dtype-aware join helpers
+#
+# polars 1.40 refuses to join two columns of dtype ``pl.Enum`` when the
+# Enums carry different categorical vocabularies — even when the values
+# present in the rows would coerce cleanly.  Linear-programming DSLs
+# routinely have this pattern: one Param defined on a subset of an
+# axis, another on the superset, both named ``p`` (process), ``n``
+# (node), etc.  The kernel can fix this automatically without losing
+# the categorical semantics — we pick the wider Enum and cast the
+# narrower side into it before the join.
+#
+# These helpers are intentionally generic — no domain assumptions
+# (axis names, vocab contents, etc).  They sit at every internal
+# ``.join`` site that takes axis-aware keys.
+# ---------------------------------------------------------------------------
+
+
+_Frame = Union[pl.DataFrame, pl.LazyFrame]
+
+
+def _column_dtype(frame: _Frame, name: str) -> pl.DataType | None:
+    """Return the dtype of column ``name`` in ``frame`` (eager or lazy),
+    or ``None`` if the column is absent.  Uses ``collect_schema`` so
+    lazy plans don't need to be materialised.
+    """
+    schema = frame.collect_schema() if isinstance(frame, pl.LazyFrame) else frame.schema
+    return schema.get(name)
+
+
+def _align_enum_join_keys(
+    left: _Frame,
+    right: _Frame,
+    on: list[str] | tuple[str, ...],
+) -> tuple[_Frame, _Frame]:
+    """Align dtypes of shared join keys so polars's strict Enum check
+    doesn't reject otherwise-compatible joins.
+
+    For each key in ``on``:
+
+    * If both sides have the same dtype, no change.
+    * If both are ``pl.Enum`` and one's categories ⊆ the other's,
+      cast the narrower side to the wider Enum dtype (``strict=False``
+      — values outside the wider vocab become null, which inner / left
+      joins drop or surface naturally).
+    * If both are ``pl.Enum`` but neither vocab is a subset of the
+      other, raise a clear ``ValueError`` pointing the caller to align
+      explicitly (e.g. cast both sides to ``pl.Utf8`` or to a
+      pre-built union Enum).
+    * If one side is ``pl.Enum`` and the other is ``pl.Utf8`` /
+      ``pl.String``, cast the string side to the Enum dtype
+      (``strict=False``).
+    * Other dtype mismatches are left untouched; polars's normal
+      coercion rules apply (typically a clear error from polars).
+
+    Returns the (possibly transformed) ``(left, right)`` pair.  Both
+    eager and lazy frames are supported and the same kind is returned
+    as was passed in.
+    """
+    if not on:
+        return left, right
+    left_out = left
+    right_out = right
+    for key in on:
+        lt = _column_dtype(left_out, key)
+        rt = _column_dtype(right_out, key)
+        if lt is None or rt is None or lt == rt:
+            continue
+        l_is_enum = isinstance(lt, pl.Enum)
+        r_is_enum = isinstance(rt, pl.Enum)
+        if l_is_enum and r_is_enum:
+            l_cats = set(lt.categories.to_list())
+            r_cats = set(rt.categories.to_list())
+            if l_cats <= r_cats:
+                left_out = left_out.with_columns(pl.col(key).cast(rt, strict=False))
+            elif r_cats <= l_cats:
+                right_out = right_out.with_columns(pl.col(key).cast(lt, strict=False))
+            else:
+                raise ValueError(
+                    f"cannot align Enum dtypes on join key {key!r}: "
+                    f"left categories {sorted(l_cats)} and right "
+                    f"categories {sorted(r_cats)} have no subset "
+                    "relation. Cast one or both sides to a common "
+                    "dtype before joining (e.g. pl.Utf8, or build a "
+                    "union Enum and cast both sides to it)."
+                )
+        elif l_is_enum and rt in (pl.Utf8, pl.String):
+            right_out = right_out.with_columns(pl.col(key).cast(lt, strict=False))
+        elif r_is_enum and lt in (pl.Utf8, pl.String):
+            left_out = left_out.with_columns(pl.col(key).cast(rt, strict=False))
+        # else: leave untouched; polars's normal coercion handles it.
+    return left_out, right_out
+
+
+def _aligned_join(
+    left: _Frame,
+    right: _Frame,
+    *,
+    on: list[str] | tuple[str, ...] | None = None,
+    left_on: list[str] | tuple[str, ...] | None = None,
+    right_on: list[str] | tuple[str, ...] | None = None,
+    how: str = "inner",
+    suffix: str = "_right",
+    coalesce: bool | None = None,
+) -> _Frame:
+    """Wrap ``polars.DataFrame.join`` / ``LazyFrame.join`` with
+    automatic Enum-dtype alignment on shared keys.  See
+    :func:`_align_enum_join_keys` for the alignment rules.
+
+    Only ``on`` joins are alignment-aware (the common case in the
+    kernel — symmetric join keys).  ``left_on`` / ``right_on`` joins
+    pass through unchanged: by definition their key columns are named
+    differently, so polars's strict Enum check fires per-column and a
+    caller-side cast is the only consistent fix.
+    """
+    if on is not None:
+        on_list = [on] if isinstance(on, str) else list(on)
+        left, right = _align_enum_join_keys(left, right, on_list)
+        kwargs: dict = {"on": on_list, "how": how, "suffix": suffix}
+        if coalesce is not None:
+            kwargs["coalesce"] = coalesce
+        return left.join(right, **kwargs)
+    kwargs = {"left_on": left_on, "right_on": right_on, "how": how, "suffix": suffix}
+    if coalesce is not None:
+        kwargs["coalesce"] = coalesce
+    return left.join(right, **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Core types
@@ -116,11 +246,11 @@ class Param:
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
-            j = (
-                self.lazy.join(other.lazy, on=shared, how="inner", suffix="__r")
-                if shared
-                else self.lazy.join(other.lazy, how="cross", suffix="__r")
-            )
+            if shared:
+                left_lf, right_lf = _align_enum_join_keys(self.lazy, other.lazy, shared)
+                j = left_lf.join(right_lf, on=shared, how="inner", suffix="__r")
+            else:
+                j = self.lazy.join(other.lazy, how="cross", suffix="__r")
             merged = _merge_param_sources(
                 self._sources_for_propagation(), other._sources_for_propagation(), flip_other=False
             )
@@ -147,11 +277,11 @@ class Param:
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
-            j = (
-                self.lazy.join(other.lazy, on=shared, how="inner", suffix="__r")
-                if shared
-                else self.lazy.join(other.lazy, how="cross", suffix="__r")
-            )
+            if shared:
+                left_lf, right_lf = _align_enum_join_keys(self.lazy, other.lazy, shared)
+                j = left_lf.join(right_lf, on=shared, how="inner", suffix="__r")
+            else:
+                j = self.lazy.join(other.lazy, how="cross", suffix="__r")
             merged = _merge_param_sources(
                 self._sources_for_propagation(), other._sources_for_propagation(), flip_other=True
             )
@@ -189,7 +319,8 @@ class Param:
             # keep inner-join semantics — multiplying by a sparse Param IS
             # a legitimate "apply where defined" filter.)
             if shared:
-                j = self.lazy.join(other.lazy, on=shared, how="full", suffix="__r", coalesce=True)
+                left_lf, right_lf = _align_enum_join_keys(self.lazy, other.lazy, shared)
+                j = left_lf.join(right_lf, on=shared, how="full", suffix="__r", coalesce=True)
             else:
                 j = self.lazy.join(other.lazy, how="cross", suffix="__r")
             return Param(
@@ -278,11 +409,11 @@ class Var:
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
             lf = self.frame.lazy()
-            j = (
-                lf.join(other.lazy, on=shared, how="inner")
-                if shared
-                else lf.join(other.lazy, how="cross")
-            )
+            if shared:
+                lf, right_lf = _align_enum_join_keys(lf, other.lazy, shared)
+                j = lf.join(right_lf, on=shared, how="inner")
+            else:
+                j = lf.join(other.lazy, how="cross")
             j = j.rename({"value": "coef"}).select(*new_dims, "col_id", "coef")
             psrc = other._sources_for_propagation()
             return Expr([_Term(j, new_dims, param_sources=psrc)])
@@ -409,11 +540,11 @@ class Expr:
             for t in self.terms:
                 shared = [d for d in t.dims if d in scalar.dims]
                 new_dims = tuple(dict.fromkeys(t.dims + scalar.dims))
-                j = (
-                    t.lazy.join(scalar.lazy, on=shared, how="inner")
-                    if shared
-                    else t.lazy.join(scalar.lazy, how="cross")
-                )
+                if shared:
+                    left_lf, right_lf = _align_enum_join_keys(t.lazy, scalar.lazy, shared)
+                    j = left_lf.join(right_lf, on=shared, how="inner")
+                else:
+                    j = t.lazy.join(scalar.lazy, how="cross")
                 j = j.with_columns(coef=pl.col("coef") * pl.col("value")).select(
                     *new_dims, "col_id", "coef"
                 )
@@ -433,11 +564,11 @@ class Expr:
             for t in self.terms:
                 shared = [d for d in t.dims if d in other.dims]
                 new_dims = tuple(dict.fromkeys(t.dims + other.dims))
-                j = (
-                    t.lazy.join(other.lazy, on=shared, how="inner")
-                    if shared
-                    else t.lazy.join(other.lazy, how="cross")
-                )
+                if shared:
+                    left_lf, right_lf = _align_enum_join_keys(t.lazy, other.lazy, shared)
+                    j = left_lf.join(right_lf, on=shared, how="inner")
+                else:
+                    j = t.lazy.join(other.lazy, how="cross")
                 j = j.with_columns(coef=pl.col("coef") / pl.col("value")).select(
                     *new_dims, "col_id", "coef"
                 )
@@ -549,8 +680,20 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
             continue
         carry = [c for c in lag_cols if c in t.dims and c != time_dim and c != lag_col]
         lagged = t.lazy.rename({time_dim: "_lag_src"})
-        j = lag_lf.join(
-            lagged, left_on=carry + [lag_col], right_on=carry + ["_lag_src"], how="inner"
+        # Align Enum dtypes on the carry columns (symmetric keys) and on
+        # the asymmetric (lag_col, _lag_src) pair.  The asymmetric pair
+        # is handled by temporarily renaming so we can reuse the
+        # subset-aware helper, then rename back.
+        lag_lf_a, lagged_a = _align_enum_join_keys(lag_lf, lagged, carry)
+        lag_keyed = lag_lf_a.rename({lag_col: "__lag_join_key"})
+        lagged_keyed = lagged_a.rename({"_lag_src": "__lag_join_key"})
+        lag_keyed, lagged_keyed = _align_enum_join_keys(
+            lag_keyed, lagged_keyed, ["__lag_join_key"]
+        )
+        lag_lf_a = lag_keyed.rename({"__lag_join_key": lag_col})
+        lagged_a = lagged_keyed.rename({"__lag_join_key": "_lag_src"})
+        j = lag_lf_a.join(
+            lagged_a, left_on=carry + [lag_col], right_on=carry + ["_lag_src"], how="inner"
         )
         new_terms.append(
             _Term(
@@ -591,7 +734,8 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
         extra = tuple(c for c in frame_cols if c not in term_cols)
         f = t.lazy
         if shared:
-            f = f.join(frame_lf, on=shared, how="inner")
+            f, frame_lf_a = _align_enum_join_keys(f, frame_lf, shared)
+            f = f.join(frame_lf_a, on=shared, how="inner")
         new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
     return Expr(new)
 
@@ -636,7 +780,9 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
         if where_lf is not None:
             shared = [c for c in where_cols if c in t.dims]
             if shared:
-                f = f.join(where_lf.select(shared).unique(), on=shared, how="inner")
+                where_sub = where_lf.select(shared).unique()
+                f, where_sub = _align_enum_join_keys(f, where_sub, shared)
+                f = f.join(where_sub, on=shared, how="inner")
         keep = tuple(d for d in t.dims if d not in over)
         # If the Sum collapses any of the source-Param's dim columns,
         # multiple cells (with different param values) get merged into
@@ -1070,7 +1216,8 @@ class Problem:
                     )
                 on = list(rhs.dims)
                 if on:
-                    j = row_index.join(rhs.frame, on=on, how="left")
+                    ri_a, rf_a = _align_enum_join_keys(row_index, rhs.frame, on)
+                    j = ri_a.join(rf_a, on=on, how="left")
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -1127,7 +1274,8 @@ class Problem:
                             f"{missing} via Sum() before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
+                    plan = rl_a.join(tl_a, on=on, how="inner").select(
                         "_rid", "col_id", "coef"
                     )
                     pending.append(("dim", base_row, plan))
@@ -1552,7 +1700,8 @@ class Problem:
                     )
                 on = list(rhs.dims)
                 if on:
-                    j = row_index.join(rhs.frame, on=on, how="left")
+                    ri_a, rf_a = _align_enum_join_keys(row_index, rhs.frame, on)
+                    j = ri_a.join(rf_a, on=on, how="left")
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -1614,7 +1763,8 @@ class Problem:
                             f"{missing} via Sum() before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
+                    plan = rl_a.join(tl_a, on=on, how="inner").select(
                         "_rid", "col_id", "coef"
                     )
                     term_plans.append(("dim", plan))
@@ -2086,7 +2236,8 @@ class WarmProblem:
                 if inplace:
                     cost = pf["value"].to_numpy().astype(np.float64, copy=False)
                 else:
-                    j = col_frame.join(pf, on=on, how="left").with_columns(
+                    cf_a, pf_a = _align_enum_join_keys(col_frame, pf, on)
+                    j = cf_a.join(pf_a, on=on, how="left").with_columns(
                         value=pl.col("value").fill_null(0.0)
                     )
                     cost = j["value"].to_numpy().astype(np.float64, copy=False)
@@ -2178,7 +2329,9 @@ class WarmProblem:
             for d, val in zip(v.dims, dt):
                 cols_data[d].append(val)
         lookup = pl.DataFrame(cols_data).with_row_index("__rid")
-        joined = lookup.join(v.frame, on=list(v.dims), how="left").sort("__rid")
+        on_v = list(v.dims)
+        lookup_a, vframe_a = _align_enum_join_keys(lookup, v.frame, on_v)
+        joined = lookup_a.join(vframe_a, on=on_v, how="left").sort("__rid")
         if joined["col_id"].null_count() > 0:
             missing_idx = (
                 joined.with_row_index("__r2").filter(pl.col("col_id").is_null()).head(1)["__r2"][0]
@@ -2271,11 +2424,10 @@ class WarmProblem:
                 # so we can re-sort the join output back into cell
                 # order.
                 dim_keys: pl.DataFrame = cells["dim_keys"]
-                lookup = (
-                    dim_keys.with_row_index("__rid")
-                    .join(new_param.frame, on=list(sig), how="left")
-                    .sort("__rid")
-                )
+                _sig_on = list(sig)
+                _dk_lhs = dim_keys.with_row_index("__rid")
+                _dk_lhs, _np_rhs = _align_enum_join_keys(_dk_lhs, new_param.frame, _sig_on)
+                lookup = _dk_lhs.join(_np_rhs, on=_sig_on, how="left").sort("__rid")
                 new_vals = lookup["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
         else:
             raise TypeError(
@@ -2492,7 +2644,8 @@ class WarmProblem:
                     return param_frame["value"].to_numpy().astype(np.float64, copy=False)
             # Fallback — join on dims; left-join preserves over-frame
             # order so the resulting "value" column is row-aligned.
-            j = over.join(param_frame, on=on, how="left")
+            over_a, pf_a = _align_enum_join_keys(over, param_frame, on)
+            j = over_a.join(pf_a, on=on, how="left")
             return j["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
         raise TypeError(
             f"update_rhs({cstr_name!r}): unsupported new_param type {type(new_param).__name__}"
@@ -2592,7 +2745,8 @@ class WarmProblem:
                     )
                 on = list(rhs.dims)
                 if on:
-                    j = row_index.join(rhs.frame, on=on, how="left")
+                    ri_a, rf_a = _align_enum_join_keys(row_index, rhs.frame, on)
+                    j = ri_a.join(rf_a, on=on, how="left")
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -2657,17 +2811,18 @@ class WarmProblem:
                             f"before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
+                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
                     if tracked_sources:
                         # Keep the term's open dims so we can recover
                         # source-Param dim tuples per cell.
-                        plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                        plan = rl_a.join(tl_a, on=on, how="inner").select(
                             "_rid", "col_id", "coef", *term.dims
                         )
                         pending.append(
                             ("dim_track", base_row, plan, tracked_sources, tuple(term.dims))
                         )
                     else:
-                        plan = row_index_lf.join(term.lazy, on=on, how="inner").select(
+                        plan = rl_a.join(tl_a, on=on, how="inner").select(
                             "_rid", "col_id", "coef"
                         )
                         pending.append(("dim", base_row, plan))
@@ -2742,9 +2897,13 @@ class WarmProblem:
                             continue
                         if pdims:
                             keys_df = j.select(*pdims)
+                            _kd_lhs = keys_df.with_row_index("__ridx")
+                            _pdims_on = list(pdims)
+                            _kd_lhs, _pf_rhs = _align_enum_join_keys(
+                                _kd_lhs, pobj.frame, _pdims_on
+                            )
                             joined = (
-                                keys_df.with_row_index("__ridx")
-                                .join(pobj.frame, on=list(pdims), how="left")
+                                _kd_lhs.join(_pf_rhs, on=_pdims_on, how="left")
                                 .sort("__ridx")
                             )
                             old_vals = (
