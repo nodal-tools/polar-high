@@ -58,8 +58,8 @@ p.set_objective(cost * v_production, sense="min")
 p.add_cstr(
     "capacity",
     over=composite_index,
-    sense="<=",
     lhs_terms={"production": v_production},
+    sense="<=",
     rhs_terms={"cap": cap},
 )
 
@@ -67,8 +67,8 @@ p.add_cstr(
 p.add_cstr(
     "demand_balance",
     over=time_index,
-    sense="==",
     lhs_terms={"production": Sum(v_production, over=("unit",))},
+    sense="==",
     rhs_terms={"demand": demand},
 )
 
