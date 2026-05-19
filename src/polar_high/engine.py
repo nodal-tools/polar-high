@@ -1863,14 +1863,8 @@ class Problem:
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here
         # matches the row index inside HiGHS.
-        # Null row names indicate a producer-side issue: an axis column on
-        # the constraint's ``over`` frame contained null, so pl.format()
-        # propagated null to the formatted row name.  Skip those here
-        # (parallel to the col-name guard above) so the LP still builds;
-        # the underlying null-axis bug must be fixed in the producer.
         for i, nm in enumerate(row_names):
-            if nm is not None:
-                h.passRowName(i, nm)
+            h.passRowName(i, nm)
 
         h.run()
         sol = h.getSolution()
