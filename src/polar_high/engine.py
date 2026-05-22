@@ -1926,56 +1926,51 @@ class Problem:
                     _caller_n = int(_opts_eff["user_bound_scale"])
                 except (TypeError, ValueError):
                     _caller_n = None
+            cb = streamed_lp_ranges.get("col_bound")
+            rb = streamed_lp_ranges.get("row_bound")
+            cb_str = (
+                f"{cb[0]:.2e}..{cb[1]:.2e}" if cb is not None else "n/a"
+            )
+            rb_str = (
+                f"{rb[0]:.2e}..{rb[1]:.2e}" if rb is not None else "n/a"
+            )
             if already_set:
-                # Caller's explicit override wins.  Report what HiGHS
-                # will see so the log records the actual scaling.
                 if _caller_n is not None:
                     print(
-                        f"auto_user_bound_scale: caller override in place "
-                        f"(user_bound_scale={_caller_n})",
+                        f"polar-high caller override user_bound_scale={_caller_n}",
                         flush=True,
                     )
                 else:
                     print(
-                        "auto_user_bound_scale: caller override in place "
-                        "(user_bound_scale set; value not introspectable)",
+                        "polar-high caller override user_bound_scale (value not introspectable)",
                         flush=True,
                     )
+            elif cb is None and rb is None:
+                print(
+                    "polar-high no scaling | no finite bound or RHS entries",
+                    flush=True,
+                )
             else:
-                cb = streamed_lp_ranges.get("col_bound")
-                rb = streamed_lp_ranges.get("row_bound")
-                cb_str = (
-                    f"{cb[0]:.2e}..{cb[1]:.2e}" if cb is not None else "n/a"
+                n_rec = _recommend_user_bound_scale(cb, rb)
+                # Report ORIGINAL (pre-scale) ranges; HiGHS prints the
+                # post-scale ranges itself in its "Coefficient ranges"
+                # block right after, so we don't duplicate that.
+                print(
+                    f"Original bounds {cb_str}, rhs {rb_str}",
+                    flush=True,
                 )
-                rb_str = (
-                    f"{rb[0]:.2e}..{rb[1]:.2e}" if rb is not None else "n/a"
-                )
-                if cb is None and rb is None:
+                if n_rec != 0:
+                    h.setOptionValue("user_bound_scale", int(n_rec))
                     print(
-                        "auto_user_bound_scale: no scaling -- "
-                        "no finite bound or RHS entries to evaluate",
+                        f"polar-high set user_bound_scale={int(n_rec)}",
                         flush=True,
                     )
                 else:
-                    n_rec = _recommend_user_bound_scale(cb, rb)
-                    if n_rec != 0:
-                        h.setOptionValue("user_bound_scale", int(n_rec))
-                        print(
-                            f"auto_user_bound_scale: applying "
-                            f"user_bound_scale={int(n_rec)} "
-                            f"(bound {cb_str}, rhs {rb_str}; "
-                            f"HiGHS' own kExcessively[Small|Large]"
-                            f"BoundValue formula)",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"auto_user_bound_scale: no scaling -- "
-                            f"max(bound, rhs) already within HiGHS' "
-                            f"[1e-4, 1e+6] comfort zone "
-                            f"(bound {cb_str}, rhs {rb_str})",
-                            flush=True,
-                        )
+                    print(
+                        "polar-high no scaling needed "
+                        "| within HiGHS' [1e-4, 1e+6] zone.",
+                        flush=True,
+                    )
 
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here
