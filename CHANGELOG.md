@@ -58,6 +58,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reordered to `lhs_terms` before `sense` — reads more naturally as
   *lhs sense rhs*. No API change (these are keyword args).
 
+### Removed
+
+- **Breaking:** `Problem.peek_lp_ranges()` removed. The method rebuilt
+  the full LP into numpy arrays via the non-streaming path purely to
+  extract coefficient ranges — duplicate work the streaming solve
+  already does. Stream-time range accumulation now populates
+  `Solution.streamed_lp_ranges` with the same four `(abs_min, abs_max)`
+  tuples (`matrix`, `cost`, `col_bound`, `row_bound`) at zero extra
+  cost on every `solve()` that goes through `_solve_streaming` (the
+  default). Callers that previously relied on `peek_lp_ranges()` for
+  diagnostics should read `sol.streamed_lp_ranges` after `solve()`
+  returns; the module helper `polar_high.engine._recommend_user_bound_scale`
+  consumes the `(lo, hi)` of the `col_bound` entry for the
+  geo-midpoint heuristic. The `top_k > 0` per-coefficient name-lookup
+  variant of `peek_lp_ranges` has no streaming-time replacement; if
+  needed, build the LP via the non-streaming path
+  (`solve(streaming=False)`) and inspect via the solver-specific HiGHS
+  diagnostics.
+
 ## [1.2.0] — 2026-05-12
 
 ### Added

@@ -1206,11 +1206,11 @@ class Problem:
     # ------------------------------------------------------------------
     # Shared non-streaming LP-array builder
     #
-    # Extracted from :meth:`solve` so :meth:`peek_lp_ranges` can inspect
-    # the exact arrays HiGHS would see during passModel — no need to
-    # actually instantiate ``HighsLp`` or run a solver.  The build is
-    # deterministic and uses no HiGHS state, so the two callers always
-    # see identical numbers.
+    # Historically also fed :meth:`peek_lp_ranges` (removed in 1.3.0;
+    # callers now read ``Solution.streamed_lp_ranges`` populated during
+    # the streaming solve).  Retained for the non-streaming
+    # ``solve(streaming=False)`` benchmark path through
+    # :mod:`polar_high.solvers`.
     def _build_lp_arrays(
         self,
         *,
@@ -1481,195 +1481,6 @@ class Problem:
             row_names,
             n_rows,
         )
-
-    # ------------------------------------------------------------------
-    # Coefficient-range inspection
-    def peek_lp_ranges(self, top_k: int = 0) -> dict[str, tuple[float, float] | None | list]:
-        """Build the LP into numpy arrays and return coefficient ranges,
-        WITHOUT running HiGHS.
-
-        Returns a dict with these keys:
-        * ``'matrix'``, ``'cost'``, ``'col_bound'``, ``'row_bound'`` —
-          ``(abs_min, abs_max)`` of the finite, non-zero, non-infinity
-          values, or ``None`` when empty.
-        * When ``top_k > 0``, also includes ``'matrix_smallest'``,
-          ``'matrix_largest'``, ``'cost_smallest'``, ``'cost_largest'``,
-          ``'col_bound_smallest'``, ``'col_bound_largest'``,
-          ``'row_bound_smallest'``, ``'row_bound_largest'`` — lists of
-          ``(abs_value, col_name, row_name_or_None)`` triples
-          (``row_name`` is ``None`` for cost / col_bound; ``col_name``
-          is ``None`` for row_bound).
-
-        The returned ranges are exactly what HiGHS would see during its
-        "Coefficient ranges" diagnostic.
-
-        Notes
-        -----
-        * Uses the non-streaming build path (single ``HighsLp``
-          construction).
-        * Cost: scans ``col_obj`` (per-column objective coefficients).
-        * Matrix: scans ``sorted_v`` (CSC values, with parallel
-          ``sorted_r`` row indices + ``starts`` col offsets for name
-          lookup when ``top_k > 0``).
-        * Col bounds: scans col-bound arrays, filtered to finite +
-          ``|v| < kHighsInf`` + ``v != 0``.
-        * Row bounds (RHS): same filter on row-bound arrays.
-        """
-        # --- column setup — same code as the head of :meth:`solve`. -----
-        n_cols = self._next_col
-        col_lb = np.zeros(n_cols, dtype=np.float64)
-        col_ub = np.full(n_cols, np.inf, dtype=np.float64)
-        col_obj = np.zeros(n_cols, dtype=np.float64)
-
-        # Build col_names lazily — only needed when top_k > 0.  Mirrors
-        # the construction in ``solve()`` at lines 871-902.
-        col_names: list[str] | None = None
-        if top_k > 0:
-            col_names = [None] * n_cols  # type: ignore[list-item]
-        for v in self._vars.values():
-            ids = v.frame["col_id"].to_numpy()
-            col_lb[ids] = float(v.lower)
-            col_ub[ids] = float(v.upper)
-            if col_names is not None:
-                if v.dims:
-                    tagged = (
-                        v.frame.select(
-                            pl.format(
-                                "{}[{}]",
-                                pl.lit(v.name),
-                                pl.concat_str(
-                                    [pl.col(d).cast(pl.String) for d in v.dims],
-                                    separator=",",
-                                ),
-                            ).alias("__name")
-                        )
-                    )["__name"].to_list()
-                    for cid, nm in zip(ids.tolist(), tagged):
-                        col_names[cid] = nm
-                else:
-                    col_names[int(ids[0])] = v.name
-        for t in self._obj_terms:
-            f = t.lazy.collect()
-            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
-            del f
-
-        (
-            col_lb_h,
-            col_ub_h,
-            row_lb_h,
-            row_ub_h,
-            sorted_v,
-            sorted_r,
-            starts,
-            row_names,
-            _n_rows,
-        ) = self._build_lp_arrays(n_cols=n_cols, col_lb=col_lb, col_ub=col_ub)
-
-        inf = float(highspy.kHighsInf)
-
-        def _range(values: np.ndarray) -> tuple[float, float] | None:
-            """Return ``(abs_min, abs_max)`` of finite, non-inf, non-zero
-            entries, or ``None`` when no qualifying entry exists."""
-            if values.size == 0:
-                return None
-            abs_v = np.abs(values)
-            mask = np.isfinite(abs_v) & (abs_v < inf) & (abs_v != 0.0)
-            kept = abs_v[mask]
-            if kept.size == 0:
-                return None
-            return (float(kept.min()), float(kept.max()))
-
-        bounds_col = np.concatenate([col_lb_h, col_ub_h]) if n_cols else np.zeros(0)
-        bounds_row = np.concatenate([row_lb_h, row_ub_h]) if row_lb_h.size else np.zeros(0)
-
-        out: dict[str, tuple[float, float] | None | list] = {
-            "matrix": _range(sorted_v),
-            "cost": _range(col_obj),
-            "col_bound": _range(bounds_col),
-            "row_bound": _range(bounds_row),
-        }
-
-        if top_k <= 0:
-            return out
-
-        # --- Top-K offenders ---------------------------------------------
-        # Helper: find top-K smallest and top-K largest |values| in a
-        # filtered numpy array, returning their indices into the array.
-        def _topk_indices(arr: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-            abs_v = np.abs(arr)
-            mask = np.isfinite(abs_v) & (abs_v < inf) & (abs_v != 0.0)
-            valid_idx = np.where(mask)[0]
-            if valid_idx.size == 0:
-                return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-            vals = abs_v[valid_idx]
-            k_eff = min(k, vals.size)
-            if k_eff < vals.size:
-                small_part = np.argpartition(vals, k_eff)[:k_eff]
-                large_part = np.argpartition(vals, vals.size - k_eff)[vals.size - k_eff :]
-                small = valid_idx[small_part[np.argsort(vals[small_part])]]
-                large = valid_idx[large_part[np.argsort(-vals[large_part])]]
-            else:
-                order = np.argsort(vals)
-                small = valid_idx[order]
-                large = valid_idx[order[::-1]]
-            return small, large
-
-        # --- Matrix: each nonzero is at (col, row).  Find col via
-        # bisecting ``starts`` for each nonzero's flat index.
-        mat_small, mat_large = _topk_indices(sorted_v, top_k)
-
-        # Map flat nonzero indices to (col_id, row_id).
-        def _flat_to_col(flat_idx: np.ndarray) -> np.ndarray:
-            # starts has length n_cols + 1; col k owns [starts[k], starts[k+1]).
-            return np.searchsorted(starts, flat_idx, side="right") - 1
-
-        def _mat_triple(flat_idx: int) -> tuple[float, str, str]:
-            cid = int(_flat_to_col(np.array([flat_idx]))[0])
-            rid = int(sorted_r[flat_idx])
-            cn = col_names[cid] if col_names and cid < len(col_names) else f"col_{cid}"
-            rn = row_names[rid] if rid < len(row_names) else f"row_{rid}"
-            return (abs(float(sorted_v[flat_idx])), cn or f"col_{cid}", rn)
-
-        out["matrix_smallest"] = [_mat_triple(int(i)) for i in mat_small]
-        out["matrix_largest"] = [_mat_triple(int(i)) for i in mat_large]
-
-        # --- Cost: each nonzero is on one column.
-        cost_small, cost_large = _topk_indices(col_obj, top_k)
-
-        def _col_pair(cid: int, arr: np.ndarray) -> tuple[float, str, None]:
-            cn = col_names[cid] if col_names and cid < len(col_names) else f"col_{cid}"
-            return (abs(float(arr[cid])), cn or f"col_{cid}", None)
-
-        out["cost_smallest"] = [_col_pair(int(i), col_obj) for i in cost_small]
-        out["cost_largest"] = [_col_pair(int(i), col_obj) for i in cost_large]
-
-        # --- Col bounds: concatenated [lb, ub]; map index back to col.
-        cb_small, cb_large = _topk_indices(bounds_col, top_k)
-
-        def _cb_pair(flat_idx: int) -> tuple[float, str, str]:
-            # First n_cols are lower bounds, next n_cols are upper bounds.
-            cid = flat_idx % n_cols if n_cols else 0
-            side = "lower" if flat_idx < n_cols else "upper"
-            cn = col_names[cid] if col_names and cid < len(col_names) else f"col_{cid}"
-            return (abs(float(bounds_col[flat_idx])), cn or f"col_{cid}", side)
-
-        out["col_bound_smallest"] = [_cb_pair(int(i)) for i in cb_small]
-        out["col_bound_largest"] = [_cb_pair(int(i)) for i in cb_large]
-
-        # --- Row bounds: concatenated [lb, ub]; map index back to row.
-        rb_small, rb_large = _topk_indices(bounds_row, top_k)
-        n_rows = row_lb_h.size
-
-        def _rb_pair(flat_idx: int) -> tuple[float, str, str]:
-            rid = flat_idx % n_rows if n_rows else 0
-            side = "lower" if flat_idx < n_rows else "upper"
-            rn = row_names[rid] if rid < len(row_names) else f"row_{rid}"
-            return (abs(float(bounds_row[flat_idx])), rn, side)
-
-        out["row_bound_smallest"] = [_rb_pair(int(i)) for i in rb_small]
-        out["row_bound_largest"] = [_rb_pair(int(i)) for i in rb_large]
-
-        return out
 
     # ------------------------------------------------------------------
     # Streaming variant: opt-in alternative to the passModel fast path.
@@ -2019,11 +1830,10 @@ class Problem:
         n_rows = next_row
 
         # Materialise the four LP-range tuples (matrix / cost / col_bound /
-        # row_bound).  Same shape as :meth:`Problem.peek_lp_ranges` returns
-        # (without the per-key ``_smallest`` / ``_largest`` lists, which
-        # require name lookup off CSC arrays we don't keep here).  ``None``
-        # for an empty category — detected by the still-zero ``_hi``
-        # sentinel.
+        # row_bound) for :attr:`Solution.streamed_lp_ranges` — no per-key
+        # ``_smallest`` / ``_largest`` lists, since they'd require name
+        # lookup off CSC arrays we don't keep here.  ``None`` for an empty
+        # category — detected by the still-zero ``_hi`` sentinel.
         def _pack(lo: float, hi: float) -> tuple[float, float] | None:
             if hi == 0.0:
                 return None
@@ -2128,10 +1938,8 @@ class Solution:
         # Stream-time LP coefficient ranges captured during
         # :meth:`Problem._solve_streaming` — dict with keys ``matrix`` /
         # ``cost`` / ``col_bound`` / ``row_bound``, each
-        # ``(abs_min, abs_max) | None``.  Same shape as
-        # :meth:`Problem.peek_lp_ranges` returns (without the optional
-        # ``_smallest`` / ``_largest`` lists).  ``None`` when the
-        # solution was synthesised outside a streaming solve.
+        # ``(abs_min, abs_max) | None``.  ``None`` when the solution was
+        # synthesised outside a streaming solve.
         self.streamed_lp_ranges = streamed_lp_ranges
 
     def value(self, var_name: str) -> pl.DataFrame:
@@ -2316,9 +2124,11 @@ class WarmProblem:
     def problem(self) -> Problem:
         """The underlying :class:`Problem`.
 
-        Useful for diagnostics that need to inspect the un-built LP —
-        e.g. :meth:`Problem.peek_lp_ranges` to read coefficient ranges
-        before the first :meth:`solve` triggers the build.
+        Useful for diagnostics that need to inspect the un-built LP.
+        For coefficient ranges, prefer
+        :attr:`Solution.streamed_lp_ranges` on a returned
+        :class:`Solution` (populated during the streaming solve at zero
+        extra cost).
         """
         return self._p
 

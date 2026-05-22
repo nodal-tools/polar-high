@@ -44,22 +44,24 @@ def test_keep_solver_flag():
     assert abs(sol_default.obj - sol_keep.obj) < 1e-9
 
 
-def test_peek_lp_ranges_returns_finite_ranges():
-    """:meth:`Problem.peek_lp_ranges` builds the LP into numpy arrays
-    and reports per-array coefficient ranges *without* running HiGHS.
+def test_solution_streamed_lp_ranges_populated():
+    """:attr:`Solution.streamed_lp_ranges` reports per-array coefficient
+    ranges captured at stream time during :meth:`Problem._solve_streaming`.
 
     For the toy dispatch LP the values are hand-verifiable: matrix
     coefficients sit in [0.4, 1.0], objective costs in [50, 1000],
     and row RHS in [20, 200].  No column bounds are finite (all vars
     have ``[0, +inf)``) so the col_bound entry is ``None``.
-
-    Also: calling :meth:`peek_lp_ranges` must not perturb a subsequent
-    :meth:`solve` — the LazyFrame-backed terms stay reusable.
     """
     pb = Problem()
     build_dispatch(pb, make_toy_data())
 
-    ranges = pb.peek_lp_ranges()
+    sol = pb.solve()
+    assert sol.optimal
+    assert abs(sol.obj - 6500.0) < 1e-6
+
+    ranges = sol.streamed_lp_ranges
+    assert isinstance(ranges, dict)
     assert set(ranges) == {"matrix", "cost", "col_bound", "row_bound"}
 
     mn, mx = ranges["matrix"]
@@ -69,8 +71,3 @@ def test_peek_lp_ranges_returns_finite_ranges():
     assert ranges["col_bound"] is None  # toy LP has +inf upper bounds
     rmn, rmx = ranges["row_bound"]
     assert 0.0 < rmn <= rmx < float("inf")
-
-    # Peek must not break a downstream solve.
-    sol = pb.solve()
-    assert sol.optimal
-    assert abs(sol.obj - 6500.0) < 1e-6
