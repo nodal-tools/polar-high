@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [1.3.0] — 2026-05-19
+## [1.3.0] — 2026-05-22
 
 ### Added
 
@@ -34,6 +34,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface change — existing models keep building unchanged; mixed-vocab
   models that previously needed per-site casts in caller code no
   longer do.
+- `engine.py`: when a constraint's rhs is a `Param` (or a chain of
+  `Param * Param * ...`), pre-filter the rhs lazy plan with a semi-join
+  against `row_index`'s join keys and collect via the streaming engine
+  before the left-join into the constraint frame. Polars' optimiser
+  doesn't always propagate the implicit row-set restriction through a
+  multi-way Param product, so the intermediate buffers could blow up
+  by orders of magnitude relative to the final row count. On
+  FlexTool's South Africa 1-week PES-Hydro-dispatch case (a
+  `p_profile_value * p_process_existing_count * p_process_availability`
+  product), solver-finished ΔRSS drops from +28.77 GB to +9.40 GB
+  (-67%) and the section runtime drops from 57.7 s to 17.5 s.
+  Objective and total cost match the baseline byte-for-byte. Applied
+  to all three rhs-Param call sites: the non-streaming
+  `Problem.add_cstr` path, `_solve_streaming`, and `WarmProblem.solve`.
+  Falls back to `collect(streaming=True)` on polars < 1.x.
+- README: quickstart code is now inlined (GitHub/PyPI don't render
+  `pymdownx.snippets` includes); the cross-product index is split into
+  reusable `unit_index` / `time_index` sets; `cap` is built per-unit
+  then concatenated; `v_idx` renamed to `composite_index` (the `v_`
+  prefix is reserved for variables); `_idx` → `_index` throughout.
+- `Problem.add_cstr` arg order in README and quickstart fixture
+  reordered to `lhs_terms` before `sense` — reads more naturally as
+  *lhs sense rhs*. No API change (these are keyword args).
 
 ## [1.2.0] — 2026-05-12
 
