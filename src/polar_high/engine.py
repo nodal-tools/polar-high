@@ -23,11 +23,74 @@ to ``over=`` at ``add_cstr`` time.
 
 from __future__ import annotations
 
+import math
 from typing import Union
 
 import highspy
 import numpy as np
 import polars as pl
+
+
+# ---------------------------------------------------------------------------
+# Stream-time LP-range helpers
+#
+# Used inside ``_solve_streaming`` to accumulate the four coefficient-range
+# tuples (matrix / cost / col_bound / row_bound) at near-zero cost (a
+# handful of O(n) numpy scans on arrays we already build), and to derive a
+# col_bound-only ``user_bound_scale`` recommendation that mirrors flextool's
+# ``recommend_user_bound_scale_from_lp``.
+# ---------------------------------------------------------------------------
+
+
+def _running_finite_nonzero_min_max(
+    arr: np.ndarray,
+    cur_lo: float,
+    cur_hi: float,
+) -> tuple[float, float]:
+    """Update ``(cur_lo, cur_hi)`` with the finite, non-zero ``|arr|``.
+
+    ``cur_lo`` is seeded with ``math.inf`` and ``cur_hi`` with ``0.0`` so
+    that an entirely-empty category leaves the sentinels untouched and is
+    later packaged as ``None``.
+    """
+    if arr.size == 0:
+        return cur_lo, cur_hi
+    finite = np.isfinite(arr) & (arr != 0)
+    if not finite.any():
+        return cur_lo, cur_hi
+    a = np.abs(arr[finite])
+    return (min(cur_lo, float(a.min())), max(cur_hi, float(a.max())))
+
+
+def _recommend_user_bound_scale(col_bound_lo: float, col_bound_hi: float) -> int:
+    """col_bound-only geo-midpoint scaling recommendation.
+
+    Returns the integer ``N`` to use as HiGHS' ``user_bound_scale`` option
+    (= multiply col bounds and RHS by ``2**N``).  Returns 0 when the
+    col-bound spread is narrow enough that HiGHS' own scaling handles it.
+    Clamps to ``[-10, 0]`` to avoid crushing the bottom end; positive N
+    only tightens already-tight bounds and is never useful here.
+
+    See the matching flextool helper
+    ``flextool.engine_polars.scaling.recommend_user_bound_scale_from_lp``
+    for the design rationale (col_bound-only, Rivendell bug history).
+    """
+    if not (math.isfinite(col_bound_lo) and math.isfinite(col_bound_hi)):
+        return 0
+    if col_bound_lo <= 0 or col_bound_hi <= 0:
+        return 0
+    # 6-decade gate: if the col-bound spread is already tight, HiGHS'
+    # own scaling handles it.
+    spread_decades = math.log10(col_bound_hi) - math.log10(col_bound_lo)
+    if spread_decades <= 6.0:
+        return 0
+    geo_mid = math.sqrt(col_bound_lo * col_bound_hi)
+    n = -round(math.log2(geo_mid))
+    if n > 0:
+        n = 0
+    if n < -10:
+        n = -10
+    return int(n)
 
 # ---------------------------------------------------------------------------
 # Enum-dtype-aware join helpers
@@ -814,7 +877,21 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
 class Problem:
     """LP container.  Generic — no flextool-specific knowledge."""
 
-    def __init__(self) -> None:
+    def __init__(self, auto_user_bound_scale: bool = False) -> None:
+        """Construct an empty LP container.
+
+        Parameters
+        ----------
+        auto_user_bound_scale
+            When ``True`` and the caller has *not* set ``user_bound_scale``
+            explicitly via :meth:`set_solver_options` (or the ``options=``
+            kwarg on :meth:`solve`), the streaming solve path applies an
+            in-tree col_bound-only geo-midpoint recommendation (see
+            :func:`_recommend_user_bound_scale`) just before ``Highs.run()``.
+            Default ``False`` — pure ``polar_high`` is a generic LP kernel
+            and leaves scaling decisions to the caller; flextool opts in
+            on its own wrapper.
+        """
         self._vars: dict[str, Var] = {}
         self._cstrs: list[tuple[str, _CstrProto, pl.DataFrame | None]] = []
         self._next_col = 0
@@ -826,6 +903,7 @@ class Problem:
         # ``build_flextool`` when ``FlexData.solver_options`` is set).
         # An explicit ``options`` kwarg on ``solve()`` overrides this.
         self._solver_options: dict | None = None
+        self._auto_user_bound_scale = bool(auto_user_bound_scale)
 
     def set_solver_options(self, options: dict | None) -> None:
         """Store HiGHS options to be applied in ``solve()``.  Pass ``None``
@@ -1688,6 +1766,27 @@ class Problem:
             if nm is not None:
                 h.passColName(i, nm)
 
+        # Stream-time LP-range accumulation.  Cost is a handful of O(n)
+        # numpy scans on arrays we already build (per-family for matrix
+        # / row_bound, once here for cost / col_bound), so peak memory
+        # is unchanged.  Used by ``auto_user_bound_scale`` below and
+        # exposed on the returned :class:`Solution` as
+        # ``streamed_lp_ranges`` for caller diagnostics.
+        _r_matrix_lo, _r_matrix_hi = math.inf, 0.0
+        _r_row_lo, _r_row_hi = math.inf, 0.0
+        _r_cost_lo, _r_cost_hi = _running_finite_nonzero_min_max(
+            col_obj_h, math.inf, 0.0
+        )
+        # Filter col bounds to "real" bounds: drop the HiGHS infinity
+        # sentinel as well as +/-inf and zeros (zeros aren't bounds in
+        # the scaling-decision sense).
+        _cb_arr = np.concatenate([col_lb_h, col_ub_h])
+        _cb_mask = (np.abs(_cb_arr) < inf)
+        _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(
+            _cb_arr[_cb_mask], math.inf, 0.0
+        )
+        del _cb_arr, _cb_mask
+
         # Walk the constraint families one at a time.  For each family
         # we collect that family's term plans, build local COO arrays,
         # convert to row-CSR, and call addRows.  All locals fall out of
@@ -1899,6 +1998,17 @@ class Problem:
                 val64,
             )
 
+            # Update stream-time LP ranges from this family's arrays.
+            _r_matrix_lo, _r_matrix_hi = _running_finite_nonzero_min_max(
+                val64, _r_matrix_lo, _r_matrix_hi,
+            )
+            _rb_arr = np.concatenate([row_lb, row_ub])
+            _rb_mask = (np.abs(_rb_arr) < inf)
+            _r_row_lo, _r_row_hi = _running_finite_nonzero_min_max(
+                _rb_arr[_rb_mask], _r_row_lo, _r_row_hi,
+            )
+            del _rb_arr, _rb_mask
+
             # Track row range so dual lookup keeps working.  We don't
             # populate Problem-level metadata (Problem doesn't carry
             # _cstr_meta — that's a WarmProblem field), so this is
@@ -1907,6 +2017,40 @@ class Problem:
             del term_plans, fam_rows, fam_cols, fam_vals, fr, fc, fv, idx32, val64, starts
 
         n_rows = next_row
+
+        # Materialise the four LP-range tuples (matrix / cost / col_bound /
+        # row_bound).  Same shape as :meth:`Problem.peek_lp_ranges` returns
+        # (without the per-key ``_smallest`` / ``_largest`` lists, which
+        # require name lookup off CSC arrays we don't keep here).  ``None``
+        # for an empty category — detected by the still-zero ``_hi``
+        # sentinel.
+        def _pack(lo: float, hi: float) -> tuple[float, float] | None:
+            if hi == 0.0:
+                return None
+            return (lo, hi)
+
+        streamed_lp_ranges: dict[str, tuple[float, float] | None] = {
+            "matrix":    _pack(_r_matrix_lo, _r_matrix_hi),
+            "cost":      _pack(_r_cost_lo,   _r_cost_hi),
+            "col_bound": _pack(_r_cb_lo,     _r_cb_hi),
+            "row_bound": _pack(_r_row_lo,    _r_row_hi),
+        }
+
+        # Auto user_bound_scale: opt-in, gated on caller not having
+        # already set the option explicitly.  Caller's explicit value
+        # (via ``set_solver_options`` or per-call ``options=``) always
+        # wins.
+        if self._auto_user_bound_scale:
+            already_set = False
+            _opts_eff = options if options is not None else self._solver_options
+            if _opts_eff and "user_bound_scale" in _opts_eff:
+                already_set = True
+            if not already_set:
+                cb = streamed_lp_ranges.get("col_bound")
+                if cb is not None:
+                    n_rec = _recommend_user_bound_scale(cb[0], cb[1])
+                    if n_rec != 0:
+                        h.setOptionValue("user_bound_scale", int(n_rec))
 
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here
@@ -1938,6 +2082,7 @@ class Problem:
             row_names=row_names,
             vars=dict(self._vars),
             highs=sol_highs,
+            streamed_lp_ranges=streamed_lp_ranges,
         )
 
 
@@ -1961,6 +2106,7 @@ class Solution:
         vars: dict[str, Var],
         col_dual: np.ndarray | None = None,
         highs: highspy.Highs | None = None,
+        streamed_lp_ranges: dict | None = None,
     ):
         self.optimal = optimal
         self.obj = obj
@@ -1979,6 +2125,14 @@ class Solution:
         # ``None`` for callers that synthesise a Solution outside a real
         # solve.
         self.highs = highs
+        # Stream-time LP coefficient ranges captured during
+        # :meth:`Problem._solve_streaming` — dict with keys ``matrix`` /
+        # ``cost`` / ``col_bound`` / ``row_bound``, each
+        # ``(abs_min, abs_max) | None``.  Same shape as
+        # :meth:`Problem.peek_lp_ranges` returns (without the optional
+        # ``_smallest`` / ``_largest`` lists).  ``None`` when the
+        # solution was synthesised outside a streaming solve.
+        self.streamed_lp_ranges = streamed_lp_ranges
 
     def value(self, var_name: str) -> pl.DataFrame:
         """Long-form per-variable solution: ``(*dims, value)``."""
