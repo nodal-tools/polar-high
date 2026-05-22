@@ -1363,10 +1363,16 @@ class Problem:
                     # optimiser an explicit "keep only these keys" hint;
                     # the streaming engine bounds intermediate buffers
                     # while the upstream Param product runs.
-                    keys_lazy = row_index.lazy().select(on).unique()
                     ri_a, rf_a = _align_enum_join_keys(
                         row_index.lazy(), rhs.lazy, on,
                     )
+                    # Build the semi-join key set from the ALIGNED row
+                    # index so it shares the join-key dtypes with rf_a.
+                    # Building from the un-aligned ``row_index.lazy()``
+                    # raises a polars SchemaError on Enum mismatch when
+                    # rhs.lazy carries a subset-aligned Enum on the join
+                    # column (e.g. flextool's Lagrangian-region path).
+                    keys_lazy = ri_a.select(on).unique()
                     rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
                     _plan = ri_a.join(rf_pruned, on=on, how="left")
                     try:
@@ -1703,10 +1709,16 @@ class Problem:
                     # optimiser an explicit "keep only these keys" hint;
                     # the streaming engine bounds intermediate buffers
                     # while the upstream Param product runs.
-                    keys_lazy = row_index.lazy().select(on).unique()
                     ri_a, rf_a = _align_enum_join_keys(
                         row_index.lazy(), rhs.lazy, on,
                     )
+                    # Build the semi-join key set from the ALIGNED row
+                    # index so it shares the join-key dtypes with rf_a.
+                    # Building from the un-aligned ``row_index.lazy()``
+                    # raises a polars SchemaError on Enum mismatch when
+                    # rhs.lazy carries a subset-aligned Enum on the join
+                    # column (e.g. flextool's Lagrangian-region path).
+                    keys_lazy = ri_a.select(on).unique()
                     rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
                     _plan = ri_a.join(rf_pruned, on=on, how="left")
                     try:
@@ -2875,10 +2887,16 @@ class WarmProblem:
                     # optimiser an explicit "keep only these keys" hint;
                     # the streaming engine bounds intermediate buffers
                     # while the upstream Param product runs.
-                    keys_lazy = row_index.lazy().select(on).unique()
                     ri_a, rf_a = _align_enum_join_keys(
                         row_index.lazy(), rhs.lazy, on,
                     )
+                    # Build the semi-join key set from the ALIGNED row
+                    # index so it shares the join-key dtypes with rf_a.
+                    # Building from the un-aligned ``row_index.lazy()``
+                    # raises a polars SchemaError on Enum mismatch when
+                    # rhs.lazy carries a subset-aligned Enum on the join
+                    # column (e.g. flextool's Lagrangian-region path).
+                    keys_lazy = ri_a.select(on).unique()
                     rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
                     _plan = ri_a.join(rf_pruned, on=on, how="left")
                     try:
