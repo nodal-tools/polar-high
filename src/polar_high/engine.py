@@ -1216,8 +1216,32 @@ class Problem:
                     )
                 on = list(rhs.dims)
                 if on:
-                    ri_a, rf_a = _align_enum_join_keys(row_index, rhs.frame, on)
-                    j = ri_a.join(rf_a, on=on, how="left")
+                    # Bound the peak RAM of multi-Param rhs products.
+                    # rhs.lazy may be a chain of Param * Param * ... whose
+                    # eager materialisation (``rhs.frame``) explodes
+                    # intermediate join buffers by orders of magnitude
+                    # vs the constraint's row_count (FlexTool's
+                    # ``p_profile_value * p_process_existing_count *
+                    # p_process_availability`` allocates ~30 GB for a
+                    # constraint whose final row count is ~76k).
+                    #
+                    # Pre-prune via a semi-join against row_index's
+                    # actual join keys, then collect through polars's
+                    # streaming engine.  The semi-join gives the
+                    # optimiser an explicit "keep only these keys" hint;
+                    # the streaming engine bounds intermediate buffers
+                    # while the upstream Param product runs.
+                    keys_lazy = row_index.lazy().select(on).unique()
+                    ri_a, rf_a = _align_enum_join_keys(
+                        row_index.lazy(), rhs.lazy, on,
+                    )
+                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
+                    _plan = ri_a.join(rf_pruned, on=on, how="left")
+                    try:
+                        j = _plan.collect(engine="streaming")
+                    except TypeError:
+                        # polars < 1.x used the streaming=True kwarg.
+                        j = _plan.collect(streaming=True)
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -1700,8 +1724,32 @@ class Problem:
                     )
                 on = list(rhs.dims)
                 if on:
-                    ri_a, rf_a = _align_enum_join_keys(row_index, rhs.frame, on)
-                    j = ri_a.join(rf_a, on=on, how="left")
+                    # Bound the peak RAM of multi-Param rhs products.
+                    # rhs.lazy may be a chain of Param * Param * ... whose
+                    # eager materialisation (``rhs.frame``) explodes
+                    # intermediate join buffers by orders of magnitude
+                    # vs the constraint's row_count (FlexTool's
+                    # ``p_profile_value * p_process_existing_count *
+                    # p_process_availability`` allocates ~30 GB for a
+                    # constraint whose final row count is ~76k).
+                    #
+                    # Pre-prune via a semi-join against row_index's
+                    # actual join keys, then collect through polars's
+                    # streaming engine.  The semi-join gives the
+                    # optimiser an explicit "keep only these keys" hint;
+                    # the streaming engine bounds intermediate buffers
+                    # while the upstream Param product runs.
+                    keys_lazy = row_index.lazy().select(on).unique()
+                    ri_a, rf_a = _align_enum_join_keys(
+                        row_index.lazy(), rhs.lazy, on,
+                    )
+                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
+                    _plan = ri_a.join(rf_pruned, on=on, how="left")
+                    try:
+                        j = _plan.collect(engine="streaming")
+                    except TypeError:
+                        # polars < 1.x used the streaming=True kwarg.
+                        j = _plan.collect(streaming=True)
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -2745,8 +2793,32 @@ class WarmProblem:
                     )
                 on = list(rhs.dims)
                 if on:
-                    ri_a, rf_a = _align_enum_join_keys(row_index, rhs.frame, on)
-                    j = ri_a.join(rf_a, on=on, how="left")
+                    # Bound the peak RAM of multi-Param rhs products.
+                    # rhs.lazy may be a chain of Param * Param * ... whose
+                    # eager materialisation (``rhs.frame``) explodes
+                    # intermediate join buffers by orders of magnitude
+                    # vs the constraint's row_count (FlexTool's
+                    # ``p_profile_value * p_process_existing_count *
+                    # p_process_availability`` allocates ~30 GB for a
+                    # constraint whose final row count is ~76k).
+                    #
+                    # Pre-prune via a semi-join against row_index's
+                    # actual join keys, then collect through polars's
+                    # streaming engine.  The semi-join gives the
+                    # optimiser an explicit "keep only these keys" hint;
+                    # the streaming engine bounds intermediate buffers
+                    # while the upstream Param product runs.
+                    keys_lazy = row_index.lazy().select(on).unique()
+                    ri_a, rf_a = _align_enum_join_keys(
+                        row_index.lazy(), rhs.lazy, on,
+                    )
+                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
+                    _plan = ri_a.join(rf_pruned, on=on, how="left")
+                    try:
+                        j = _plan.collect(engine="streaming")
+                    except TypeError:
+                        # polars < 1.x used the streaming=True kwarg.
+                        j = _plan.collect(streaming=True)
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
