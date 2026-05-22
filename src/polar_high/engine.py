@@ -1853,14 +1853,56 @@ class Problem:
         if self._auto_user_bound_scale:
             already_set = False
             _opts_eff = options if options is not None else self._solver_options
+            _caller_n: int | None = None
             if _opts_eff and "user_bound_scale" in _opts_eff:
                 already_set = True
-            if not already_set:
+                try:
+                    _caller_n = int(_opts_eff["user_bound_scale"])
+                except (TypeError, ValueError):
+                    _caller_n = None
+            if already_set:
+                # Caller's explicit override wins.  Report what HiGHS
+                # will see so the log records the actual scaling.
+                if _caller_n is not None:
+                    print(
+                        f"auto_user_bound_scale: caller override in place "
+                        f"(user_bound_scale={_caller_n})",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "auto_user_bound_scale: caller override in place "
+                        "(user_bound_scale set; value not introspectable)",
+                        flush=True,
+                    )
+            else:
                 cb = streamed_lp_ranges.get("col_bound")
-                if cb is not None:
+                if cb is None:
+                    print(
+                        "auto_user_bound_scale: no scaling -- "
+                        "no finite col-bound entries to evaluate",
+                        flush=True,
+                    )
+                else:
                     n_rec = _recommend_user_bound_scale(cb[0], cb[1])
                     if n_rec != 0:
                         h.setOptionValue("user_bound_scale", int(n_rec))
+                        print(
+                            f"auto_user_bound_scale: applying "
+                            f"user_bound_scale={int(n_rec)} "
+                            f"(col_bound spread {cb[0]:.2e}..{cb[1]:.2e})",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"auto_user_bound_scale: no scaling -- "
+                            f"col_bound spread {cb[0]:.2e}..{cb[1]:.2e} "
+                            f"within 6-decade gate "
+                            f"(HiGHS' RHS-driven recommendation, if any, "
+                            f"is NOT applied; pass --user-bound-scale "
+                            f"explicitly to override)",
+                            flush=True,
+                        )
 
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here

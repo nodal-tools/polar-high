@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `row_lb` / `row_ub` numpy arrays. Cost is a handful of O(n) scans
   with no new allocations. Used to drive `auto_user_bound_scale` and
   exposed on `Solution.streamed_lp_ranges`.
+- When `auto_user_bound_scale=True`, the decision is now reported on
+  stdout so the run log shows what scaling (if any) was applied —
+  one of: `applying user_bound_scale=N (col_bound spread …)`, `no
+  scaling -- col_bound spread … within 6-decade gate (…)`, `no
+  scaling -- no finite col-bound entries to evaluate`, or `caller
+  override in place (user_bound_scale=N)`. Makes it visible when
+  the col-bound-only heuristic declines a HiGHS-suggested
+  RHS-driven scaling.
 
 ## [1.3.0] — 2026-05-22
 
