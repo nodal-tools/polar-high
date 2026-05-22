@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.0.0] — 2026-05-22
+
+### Removed
+
+- **Breaking:** `Problem.peek_lp_ranges()`. The method rebuilt the full
+  LP into numpy arrays via the non-streaming path purely to extract
+  coefficient ranges — duplicate work the streaming solve already does.
+  The same four `(abs_min, abs_max)` tuples (`matrix`, `cost`,
+  `col_bound`, `row_bound`) are now populated automatically on every
+  `solve()` and exposed as `Solution.streamed_lp_ranges`. Callers that
+  needed range inspection should read from the `Solution` instead;
+  there is no more pre-solve range-inspection API.
+
+### Added
+
+- `Problem(auto_user_bound_scale: bool = False)` constructor option.
+  When `True`, the streaming solve accumulates LP coefficient ranges
+  during the family loop (at no extra allocation cost — it walks the
+  per-family arrays we already build) and applies a `user_bound_scale`
+  recommendation via `setOptionValue` before `Highs.run()`, but only
+  when the caller has not already set `user_bound_scale` via the
+  options dict / `set_solver_options`. The embedded heuristic
+  `_recommend_user_bound_scale(lo, hi)` is a col-bound-only
+  geometric-midpoint policy with a 6-decade gate and a clamp to
+  `[-10, 0]` — same shape as the policy used by flextool's
+  Rivendell-bug-1+5+6 fix, deliberately ignoring row bounds to avoid
+  crushing tight column bounds on energy-system LPs with wide
+  cumulative-resource RHS magnitudes.
+- `Solution.streamed_lp_ranges: dict | None` field. Populated by every
+  solve that flows through `_solve_streaming` (which is the default
+  path) with the four `(abs_min, abs_max) | None` range tuples. `None`
+  on solves that don't go through streaming (e.g. the non-streaming
+  `solve(streaming=False)` path).
+
+### Changed
+
+- `_solve_streaming` now performs running min/max accumulation over
+  `col_obj_h`, `col_lb_h`/`col_ub_h`, and per-family `val64` /
+  `row_lb` / `row_ub` numpy arrays. Cost is a handful of O(n) scans
+  with no new allocations. Used to drive `auto_user_bound_scale` and
+  exposed on `Solution.streamed_lp_ranges`.
+
 ## [1.3.0] — 2026-05-22
 
 ### Added
