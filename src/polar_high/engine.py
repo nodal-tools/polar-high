@@ -62,34 +62,88 @@ def _running_finite_nonzero_min_max(
     return (min(cur_lo, float(a.min())), max(cur_hi, float(a.max())))
 
 
-def _recommend_user_bound_scale(col_bound_lo: float, col_bound_hi: float) -> int:
-    """col_bound-only geo-midpoint scaling recommendation.
+# HiGHS' own "excessively small / large bound" thresholds.  These are
+# the constants HiGHS uses in its presolve to flag bound magnitudes as
+# numerically risky; see ``HConst.h:38-41`` in the HiGHS source.
+_HIGHS_SMALL_BOUND = 1e-4   # kExcessivelySmallBoundValue
+_HIGHS_LARGE_BOUND = 1e6    # kExcessivelyLargeBoundValue
 
-    Returns the integer ``N`` to use as HiGHS' ``user_bound_scale`` option
-    (= multiply col bounds and RHS by ``2**N``).  Returns 0 when the
-    col-bound spread is narrow enough that HiGHS' own scaling handles it.
-    Clamps to ``[-10, 0]`` to avoid crushing the bottom end; positive N
-    only tightens already-tight bounds and is never useful here.
+# HiGHS rejects ``user_bound_scale`` values outside ``[-30, 30]`` (see
+# the option's documented range).  We never expect to come close, but
+# we clamp for defensive sanity.
+_USER_BOUND_SCALE_CLAMP_LO = -30
+_USER_BOUND_SCALE_CLAMP_HI = 30
 
-    See the matching flextool helper
-    ``flextool.engine_polars.scaling.recommend_user_bound_scale_from_lp``
-    for the design rationale (col_bound-only, Rivendell bug history).
+
+def _recommend_user_bound_scale(
+    bound_range: tuple[float, float] | None,
+    rhs_range: tuple[float, float] | None,
+    *,
+    current_user_bound_scale: int = 0,
+) -> int:
+    """HiGHS-anchored ``user_bound_scale`` recommendation.
+
+    Direct port of HiGHS' own ``suggestScaling`` lambda at
+    ``HighsSolve.cpp:570-607``.  Reproduces the integer that HiGHS prints
+    in its ``"Consider setting the user_bound_scale option to <N>"``
+    recommendation byte-for-byte.
+
+    Inputs are the running ``(abs_min, abs_max)`` ranges of column bounds
+    and row bounds (RHS), as accumulated during the streaming family
+    loop.  ``None`` on either side means "no finite entries observed";
+    HiGHS treats a missing range as 0.0 for the max comparison.
+
+    Returns ``current_user_bound_scale + delta`` where ``delta`` is the
+    integer that pulls ``max(bound_max, rhs_max)`` into HiGHS' comfort
+    zone ``[kExcessivelySmallBoundValue, kExcessivelyLargeBoundValue]``
+    = ``[1e-4, 1e+6]``.  Returns ``current_user_bound_scale`` unchanged
+    when the max is already inside the zone (this is the "no scaling
+    needed" branch HiGHS itself takes).
+
+    Design notes:
+
+    * Only the MAX of ``bound_max`` and ``rhs_max`` is considered;
+      ``min`` and the constraint matrix / objective ranges are
+      deliberately ignored.  HiGHS' own ``suggestScaling`` declares but
+      never reads its ``min_value`` argument, and ``user_bound_scale``
+      only affects column bounds + RHS (not matrix or cost — a separate
+      ``user_objective_scale`` would handle cost).
+    * Outer rounding (``floor`` when ratio<1, ``ceil`` when ratio>1)
+      picks the smaller-|N| value — the more conservative scaling.
+    * No 6-decade "gate" needed: HiGHS' formula naturally returns 0
+      whenever the model is already in ``[1e-4, 1e+6]``.
+
+    The previous heuristic (col_bound-only geometric midpoint with a
+    6-decade gate and ``[-10, 0]`` clamp) was driven by the
+    Rivendell-bug-1+5+6 episode where an earlier broken formula picked
+    ``N=-10`` and broke HiGHS presolve.  HiGHS' own formula picks
+    ``N=-2`` on the same Rivendell LP, which is conservative enough to
+    keep Rivendell solving — verified end-to-end before this change
+    landed.
     """
-    if not (math.isfinite(col_bound_lo) and math.isfinite(col_bound_hi)):
-        return 0
-    if col_bound_lo <= 0 or col_bound_hi <= 0:
-        return 0
-    # 6-decade gate: if the col-bound spread is already tight, HiGHS'
-    # own scaling handles it.
-    spread_decades = math.log10(col_bound_hi) - math.log10(col_bound_lo)
-    if spread_decades <= 6.0:
-        return 0
-    geo_mid = math.sqrt(col_bound_lo * col_bound_hi)
-    n = -round(math.log2(geo_mid))
-    if n > 0:
-        n = 0
-    if n < -10:
-        n = -10
+    # ``None`` -> treat as 0.0 for the max comparison (HiGHS' behaviour).
+    bound_max = bound_range[1] if bound_range is not None else 0.0
+    rhs_max = rhs_range[1] if rhs_range is not None else 0.0
+    max_b = max(bound_max, rhs_max)
+    if not math.isfinite(max_b) or max_b <= 0.0:
+        return int(current_user_bound_scale)
+    if max_b > _HIGHS_LARGE_BOUND:
+        ratio = _HIGHS_LARGE_BOUND / max_b
+    elif max_b < _HIGHS_SMALL_BOUND:
+        ratio = _HIGHS_SMALL_BOUND / max_b
+    else:
+        return int(current_user_bound_scale)
+    # Outer-rounded log2 — picks the more conservative (smaller-|delta|)
+    # value, matching HiGHS' ``suggestScaling``.
+    if ratio < 1:
+        dl = math.floor(math.log2(ratio))
+    else:
+        dl = math.ceil(math.log2(ratio))
+    n = int(current_user_bound_scale) + int(dl)
+    if n < _USER_BOUND_SCALE_CLAMP_LO:
+        n = _USER_BOUND_SCALE_CLAMP_LO
+    if n > _USER_BOUND_SCALE_CLAMP_HI:
+        n = _USER_BOUND_SCALE_CLAMP_HI
     return int(n)
 
 # ---------------------------------------------------------------------------
@@ -1877,30 +1931,37 @@ class Problem:
                     )
             else:
                 cb = streamed_lp_ranges.get("col_bound")
-                if cb is None:
+                rb = streamed_lp_ranges.get("row_bound")
+                cb_str = (
+                    f"{cb[0]:.2e}..{cb[1]:.2e}" if cb is not None else "n/a"
+                )
+                rb_str = (
+                    f"{rb[0]:.2e}..{rb[1]:.2e}" if rb is not None else "n/a"
+                )
+                if cb is None and rb is None:
                     print(
                         "auto_user_bound_scale: no scaling -- "
-                        "no finite col-bound entries to evaluate",
+                        "no finite bound or RHS entries to evaluate",
                         flush=True,
                     )
                 else:
-                    n_rec = _recommend_user_bound_scale(cb[0], cb[1])
+                    n_rec = _recommend_user_bound_scale(cb, rb)
                     if n_rec != 0:
                         h.setOptionValue("user_bound_scale", int(n_rec))
                         print(
                             f"auto_user_bound_scale: applying "
                             f"user_bound_scale={int(n_rec)} "
-                            f"(col_bound spread {cb[0]:.2e}..{cb[1]:.2e})",
+                            f"(bound {cb_str}, rhs {rb_str}; "
+                            f"HiGHS' own kExcessively[Small|Large]"
+                            f"BoundValue formula)",
                             flush=True,
                         )
                     else:
                         print(
                             f"auto_user_bound_scale: no scaling -- "
-                            f"col_bound spread {cb[0]:.2e}..{cb[1]:.2e} "
-                            f"within 6-decade gate "
-                            f"(HiGHS' RHS-driven recommendation, if any, "
-                            f"is NOT applied; pass --user-bound-scale "
-                            f"explicitly to override)",
+                            f"max(bound, rhs) already within HiGHS' "
+                            f"[1e-4, 1e+6] comfort zone "
+                            f"(bound {cb_str}, rhs {rb_str})",
                             flush=True,
                         )
 

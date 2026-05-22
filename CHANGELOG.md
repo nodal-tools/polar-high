@@ -29,12 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recommendation via `setOptionValue` before `Highs.run()`, but only
   when the caller has not already set `user_bound_scale` via the
   options dict / `set_solver_options`. The embedded heuristic
-  `_recommend_user_bound_scale(lo, hi)` is a col-bound-only
-  geometric-midpoint policy with a 6-decade gate and a clamp to
-  `[-10, 0]` — same shape as the policy used by flextool's
-  Rivendell-bug-1+5+6 fix, deliberately ignoring row bounds to avoid
-  crushing tight column bounds on energy-system LPs with wide
-  cumulative-resource RHS magnitudes.
+  `_recommend_user_bound_scale(bound_range, rhs_range)` is a direct
+  port of HiGHS' own `suggestScaling` lambda at
+  `HighsSolve.cpp:570-607`: it pulls `max(bound_max, rhs_max)` into
+  HiGHS' `[kExcessivelySmallBoundValue, kExcessivelyLargeBoundValue]`
+  = `[1e-4, 1e+6]` comfort zone using outer-rounded log2, and
+  reproduces the integer HiGHS prints in its `"Consider setting the
+  user_bound_scale option to <N>"` recommendation byte-for-byte (e.g.
+  `N=-6` on the DES scenario, `N=-2` on the historical Rivendell-fix
+  LP).
 - `Solution.streamed_lp_ranges: dict | None` field. Populated by every
   solve that flows through `_solve_streaming` (which is the default
   path) with the four `(abs_min, abs_max) | None` range tuples. `None`
@@ -50,12 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exposed on `Solution.streamed_lp_ranges`.
 - When `auto_user_bound_scale=True`, the decision is now reported on
   stdout so the run log shows what scaling (if any) was applied —
-  one of: `applying user_bound_scale=N (col_bound spread …)`, `no
-  scaling -- col_bound spread … within 6-decade gate (…)`, `no
-  scaling -- no finite col-bound entries to evaluate`, or `caller
-  override in place (user_bound_scale=N)`. Makes it visible when
-  the col-bound-only heuristic declines a HiGHS-suggested
-  RHS-driven scaling.
+  one of: `applying user_bound_scale=N (bound …, rhs …; HiGHS' own
+  kExcessively[Small|Large]BoundValue formula)`, `no scaling --
+  max(bound, rhs) already within HiGHS' [1e-4, 1e+6] comfort zone
+  (bound …, rhs …)`, `no scaling -- no finite bound or RHS entries
+  to evaluate`, or `caller override in place (user_bound_scale=N)`.
 
 ## [1.3.0] — 2026-05-22
 
