@@ -7,18 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [2.0.0] — 2026-05-22
+## [1.4.0] — 2026-05-22
 
 ### Removed
 
-- **Breaking:** `Problem.peek_lp_ranges()`. The method rebuilt the full
-  LP into numpy arrays via the non-streaming path purely to extract
-  coefficient ranges — duplicate work the streaming solve already does.
-  The same four `(abs_min, abs_max)` tuples (`matrix`, `cost`,
-  `col_bound`, `row_bound`) are now populated automatically on every
-  `solve()` and exposed as `Solution.streamed_lp_ranges`. Callers that
-  needed range inspection should read from the `Solution` instead;
-  there is no more pre-solve range-inspection API.
+- `Problem.peek_lp_ranges()`. The method rebuilt the full LP into
+  numpy arrays via the non-streaming path purely to extract coefficient
+  ranges — duplicate work the streaming solve already does. The same
+  four `(abs_min, abs_max)` tuples (`matrix`, `cost`, `col_bound`,
+  `row_bound`) are now populated automatically on every `solve()` and
+  exposed as `Solution.streamed_lp_ranges`. Callers that needed range
+  inspection should read from the `Solution` instead; there is no more
+  pre-solve range-inspection API.
 
 ### Added
 
