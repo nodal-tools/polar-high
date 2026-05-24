@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [1.5.1] — 2026-05-24
+
+### Changed
+
+- `docs/compare/benchmark.md`: trim the "how this differs from
+  earlier versions" methodology paragraph (covered in the 1.5.0
+  changelog entry) and minor wording cleanup.
+
 ## [1.5.0] — 2026-05-24
 
 ### Added
