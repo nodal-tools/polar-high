@@ -68,6 +68,9 @@ def run_cell(
 
     line = r.stdout.strip().splitlines()[-1]
     parts = line.split(",")
+    # New 17-field schema (with sidecar sampler + malloc_trim columns).
+    # Older 10-field rows are still readable by plot.py because the new
+    # columns are appended at the end.
     return {
         "tool": parts[0],
         "N": int(parts[1]),
@@ -77,8 +80,15 @@ def run_cell(
         "rss_after_build_mb": float(parts[5]),
         "rss_after_solve_mb": float(parts[6]),
         "peak_rss_mb": float(parts[7]),
-        "obj": float(parts[8]),
-        "optimal": bool(int(parts[9])),
+        "rss_after_build_trim_mb": float(parts[8]),
+        "rss_after_solve_trim_mb": float(parts[9]),
+        "rss_solve_min_mb": float(parts[10]),
+        "rss_solve_p50_mb": float(parts[11]),
+        "rss_solve_p95_mb": float(parts[12]),
+        "rss_solve_max_mb": float(parts[13]),
+        "n_samples": int(parts[14]),
+        "obj": float(parts[15]),
+        "optimal": bool(int(parts[16])),
     }
 
 
@@ -124,6 +134,13 @@ def main() -> None:
         "rss_after_build_mb",
         "rss_after_solve_mb",
         "peak_rss_mb",
+        "rss_after_build_trim_mb",
+        "rss_after_solve_trim_mb",
+        "rss_solve_min_mb",
+        "rss_solve_p50_mb",
+        "rss_solve_p95_mb",
+        "rss_solve_max_mb",
+        "n_samples",
         "obj",
         "optimal",
     ]
@@ -165,6 +182,13 @@ def main() -> None:
                                 rss_after_build_mb=float("nan"),
                                 rss_after_solve_mb=float("nan"),
                                 peak_rss_mb=float("nan"),
+                                rss_after_build_trim_mb=float("nan"),
+                                rss_after_solve_trim_mb=float("nan"),
+                                rss_solve_min_mb=float("nan"),
+                                rss_solve_p50_mb=float("nan"),
+                                rss_solve_p95_mb=float("nan"),
+                                rss_solve_max_mb=float("nan"),
+                                n_samples=0,
                                 obj=float("nan"),
                                 optimal=False,
                             )
@@ -176,6 +200,13 @@ def main() -> None:
                                 rss_after_build_mb=res["rss_after_build_mb"],
                                 rss_after_solve_mb=res["rss_after_solve_mb"],
                                 peak_rss_mb=res["peak_rss_mb"],
+                                rss_after_build_trim_mb=res["rss_after_build_trim_mb"],
+                                rss_after_solve_trim_mb=res["rss_after_solve_trim_mb"],
+                                rss_solve_min_mb=res["rss_solve_min_mb"],
+                                rss_solve_p50_mb=res["rss_solve_p50_mb"],
+                                rss_solve_p95_mb=res["rss_solve_p95_mb"],
+                                rss_solve_max_mb=res["rss_solve_max_mb"],
+                                n_samples=res["n_samples"],
                                 obj=res["obj"],
                                 optimal=res["optimal"],
                             )

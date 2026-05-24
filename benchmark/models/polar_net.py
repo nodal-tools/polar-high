@@ -94,6 +94,9 @@ def build(N: int) -> Problem:
 
 
 def solve(model: Problem, time_limit: float | None = None) -> tuple[bool, float]:
+    # save_memory=True opts out of polar-high's warm-restart / re-solve
+    # capability for a fair one-shot comparison.  See the matching note in
+    # ``benchmark/models/polar.py``.
     options = {"time_limit": float(time_limit)} if time_limit is not None else None
-    sol = model.solve(options=options)
+    sol = model.solve(options=options, save_memory=True)
     return bool(sol.optimal), float(sol.obj)

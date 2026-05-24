@@ -26,10 +26,27 @@ For each (tool, N) cell, in a fresh Python subprocess:
   the tool (everything before solver invocation).
 - **solve_s** — wall-clock time for the solver call. Same HiGHS
   underneath all three tools.
-- **peak_rss_mb** — `ru_maxrss` / 1024 (Linux) at end-of-run.
+
+Memory metrics (all MB, Linux):
+
+- **peak_rss_mb** — `ru_maxrss` / 1024, the unavoidable high-water
+  mark across the whole process. Right column for "how much RAM
+  does the machine need."
+- **rss_after_build_mb / rss_after_solve_mb** — point-in-time RSS
+  right after `gc.collect()` at the obvious checkpoints.
+- **rss_after_build_trim_mb / rss_after_solve_trim_mb** — same
+  checkpoints but after `malloc_trim(0)` forces glibc to return
+  freed-but-cached arenas to the OS. Diagnostic for how much
+  apparent "memory still used" is glibc retention.
+- **rss_solve_{min,p50,p95,max}_mb / n_samples** — a sidecar
+  thread polls VmRSS at 25 ms cadence while `solve()` runs.
+  `max` should align with `peak_rss_mb`; `p50` is the steady-state
+  working set after transient setup spikes wash out.
 
 Each cell runs `--repeats` times (default 3); the plot uses the
-median.
+median across reps of `peak_rss_mb`. See the
+[memory-measurement section in the comparison page](../docs/compare/benchmark.md#measuring-memory)
+for how to read each column.
 
 ## Running it
 

@@ -56,6 +56,13 @@ def build(N: int) -> Problem:
 
 
 def solve(model: Problem, time_limit: float | None = None) -> tuple[bool, float]:
+    # save_memory=True opts out of polar-high's warm-restart / re-solve
+    # capability for a fair one-shot comparison against linopy (which
+    # serialises the LP via io_api="lp" and frees its xarray side) and
+    # Pyomo (which does not retain a warm-restartable LP source either).
+    # Drops polar's Python LP source and does a HiGHS writeModel/readModel
+    # disk roundtrip to reset HiGHS's incremental-addRows allocator slack.
+    # See docs/compare/benchmark.md for the trade-off.
     options = {"time_limit": float(time_limit)} if time_limit is not None else None
-    sol = model.solve(options=options)
+    sol = model.solve(options=options, save_memory=True)
     return bool(sol.optimal), float(sol.obj)

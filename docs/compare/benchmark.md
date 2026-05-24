@@ -36,53 +36,155 @@ s.t. x[i,j] - y[i,j] >= i          for i,j ∈ {1,…,N}
 Variables: `2·N²`. Constraints: `2·N²`. Closed-form optimum
 `obj = N²·(N+1)`, used as the cross-tool correctness anchor.
 
-At N=3000 (a 18 M-variable LP):
+At N=3000 (an 18 M-variable LP):
 
-| | total time | peak memory |
-|---|---:|---:|
-| polar-high | 96 s | 12.7 GB |
-| linopy | 290 s | 23.6 GB |
-| Pyomo | (caps at N=1000) | (4.7 GB at N=1000) |
+| | total time | peak RSS | p50 during solve | post-trim |
+|---|---:|---:|---:|---:|
+| polar-high (save_memory=True) | 123 s | 13.4 GB | 10.4 GB | 5.5 GB |
+| linopy (io_api="lp") | 296 s | 22.4 GB | 2.0 GB | 5.9 GB |
+| Pyomo | (caps at N=1000) | 4.6 GB at N=1000 | 3.8 GB at N=1000 | 1.8 GB at N=1000 |
 
-polar-high is roughly 3× faster than linopy and uses about half the
-memory at N=3000. Pyomo's per-coefficient Python overhead makes it
-unable to keep up past N≈1000 in our 10-minute timeout.
+polar-high is roughly 2.4× faster than linopy and ~40 % lower peak
+RSS. The memory comparison depends on which column you read — see
+*Measuring memory* below for how to choose, and the *Two modes*
+section for the warm-restart trade-off this benchmark makes. Pyomo's
+per-coefficient Python overhead makes it unable to keep up past
+N≈1000 in our 10-minute timeout.
 
-### Note on the memory column
+### Two modes: regular (warm-restart) vs `save_memory` (one-shot)
 
-Peak RSS scales roughly linearly with `nnz` for all three tools, but
-the slope between Pyomo and the columnar tools differs by an order of
-magnitude. Pyomo carries each LP coefficient as a small Python
-expression-tree node (a `VarData` reference plus a numeric multiplier
-inside a `MonomialTermExpression`). CPython stores each of those at
-roughly 100–200 bytes once header, type pointer, refcount, and per-
-object dict are accounted for. polar-high and linopy hold coefficients
-as contiguous Arrow / numpy buffers of about 16 bytes per nonzero. At
-4 M nonzeros the representation difference compounds to a multi-GB
-peak gap.
+polar-high supports **warm starts** and **re-solves** off the same
+`Problem` (and via `WarmProblem` for incremental edits without
+rebuilding the matrix). That capability requires retaining the
+polars / numpy source-of-truth in memory through `solve()` and after
+it returns, *and* keeping the live `Highs` instance with its basis
+across calls. linopy and Pyomo don't retain a warm-restartable LP
+source either, so for an apples-to-apples comparison this benchmark
+calls
 
-Between the two columnar tools the comparison flips depending on the
-test:
+```python
+sol = model.solve(save_memory=True)
+```
 
-- **At full HiGHS solve** (the linopy-format replication figure
-  below): linopy's peak at N = 1000 is *below* polar-high's. xarray's
-  dense-broadcast representation is genuinely compact on this regular
-  `N × N` grid, and HiGHS's own working set then dominates everyone's
-  total.
-- **In the build-only headline above**: polar-high sits below linopy
-  at large N. Two factors contribute, in unknown proportion. First,
-  streaming constraint assembly (polar-high emits LP rows per family
-  and releases each family's intermediates before the next; linopy
-  materialises all coefficients at once). Second, the LP-file vs
-  direct handoff (the build-only test exercises linopy's
-  `io_api="lp"` path, the configuration where our `time_limit`
-  short-circuit reliably reaches HiGHS, which serializes the LP
-  through an intermediate text format; polar-high skips that step
-  via `highspy`).
+`save_memory=True` does two things, in order, right before the
+final `h.run()`:
 
-The take-away: which tool wins on memory depends on which
-phase of the build/solve cycle dominates your run. Re-run on your own
-model before assuming any of these ratios apply.
+1. **Drops polar's Python LP source.** Every term-side lazy plan,
+   every Param frame, the caller-side column-bound / cost arrays,
+   and the Python-side `col_names` / `row_names` lists are released
+   once HiGHS has copied them.
+2. **Disk-roundtrips HiGHS.** The model is written to a temporary
+   MPS file, the original `Highs` instance is cleared and disposed,
+   `malloc_trim(0)` is called to return glibc's freed arenas to the
+   OS, and a fresh `Highs` is created and `readModel`'d from the
+   file. This costs ~+90 s wall time at N=3000 dense but eliminates
+   the allocator slack `addRows` leaves behind when fed a model
+   incrementally — net ~5 GB lower peak in full-HiGHS-solve cells.
+
+After return, a subsequent `Problem.solve()` raises a clear
+`RuntimeError`. WarmProblem-style updates are also unavailable
+(the original `Highs` with its basis is gone). `Solution.col_names`
+/ `row_names` are empty (HiGHS still has the names internally,
+reachable via `Solution.highs` if `keep_solver=True`); name-based
+lookups like `Solution.constraint_dual("...")` won't resolve. None
+of this matters for cold-start rolling-horizon loops or scenario
+sweeps where each step rebuilds the `Problem` from scratch — that
+remains the supported one-shot pattern.
+
+In **regular mode** (`save_memory=False`, the default), polar-high
+keeps the source-of-truth around so a follow-up `Problem.solve()`
+or `WarmProblem`-based update can pick up where the last one left
+off without rebuilding the matrix. The cost is the visible RSS
+retention shown in the side-by-side table below; the gain is a
+free `h.run()` re-solve from the previous basis.
+
+**Side-by-side at the headline cells (polar-high only):**
+
+| cell | mode | total time | peak RSS | p50 | post-trim |
+|---|---|---:|---:|---:|---:|
+| dense build-only N=3000 | regular | 72 s | 16.3 GB | 10.6 GB | 8.9 GB |
+| dense build-only N=3000 | save_memory | 123 s | 13.4 GB | 10.4 GB | 5.5 GB |
+| dense full-solve N=3000 | regular | 121 s | 38.0 GB | 18.2 GB | 9.3 GB |
+| dense full-solve N=3000 | save_memory | 235 s | 27.8 GB | 12.7 GB | 5.5 GB |
+| network N=10000 build-only | regular | 50 s | 12.0 GB | 6.9 GB | 7.2 GB |
+| network N=10000 build-only | save_memory | 92 s | 11.0 GB | 7.0 GB | 5.4 GB |
+
+`save_memory=True` is consistently slower (~1.6×–1.8×) and lower
+peak (3–10 GB depending on cell). The full-solve gap is the biggest
+because the disk roundtrip resets HiGHS's allocator slack, which
+matters most when HiGHS is doing real work. Headline tables above
+use `save_memory=True` so the cross-tool comparison is between
+similar one-shot LP-handoff patterns (linopy uses its own file
+roundtrip via `io_api="lp"`).
+
+### Measuring memory
+
+The benchmark records four memory metrics per cell. Pick the column
+that matches the question you're asking:
+
+| column | what it measures | when it's the right number |
+|---|---|---|
+| `peak_rss_mb` | `ru_maxrss` over the whole process | how much RAM the machine must provision so the run doesn't OOM |
+| `rss_solve_p50_mb` | median RSS while `solve()` runs (sampled at 25 ms cadence by a sidecar thread) | steady-state working set during solve, transient setup spikes washed out |
+| `rss_solve_p95_mb` | 95th percentile of the same sampler | tail of solve-time distribution; sits between p50 and peak |
+| `rss_after_solve_trim_mb` | RSS right after `gc.collect()` + `malloc_trim(0)` once `solve()` returns | what the process actually held, with glibc's freed-but-cached arenas returned to the OS |
+
+`peak_rss_mb` is the unavoidable peak — at the moment of peak
+consumption every allocated page is in use, so `malloc_trim(0)` is a
+no-op there. Trim only helps after deallocation, exposing how much of
+the apparent "still used" memory was actually freed but stuck in
+glibc's per-thread arena cache. linopy is particularly heavy on
+arena churn: at N=3000 it shows ~21 GB resident immediately
+post-solve, dropping to ~6 GB after `malloc_trim(0)` — roughly 15 GB
+of glibc-retained pages that aren't really "in use" but `ru_maxrss`
+counts them anyway.
+
+**How this differs from earlier versions of this page.** Previous
+numbers reported a single "peak memory" column. We've since changed
+the measurement methodology to expose the breakdown above. The old
+headlines (12.7 GB for polar-high dense @ N=3000, 8.0 GB for
+network @ N=10000) tracked closer to the new `rss_solve_p50_mb`
+column than to `peak_rss_mb` — they captured steady-state during
+solve, not the unavoidable peak. The current tables use
+`peak_rss_mb` (the conservative provisioning figure) as the
+headline and report p50 / post-trim alongside so the comparison is
+explicit.
+
+### Why the memory comparison between tools depends on the column
+
+- **Peak RSS** captures any allocator-visible high-water mark,
+  including transient HiGHS-setup scratch. polar-high streams the
+  matrix family by family (each family's COO / CSR intermediates
+  are freed before the next family is built), so its peak comes in
+  below linopy's eager materialisation.
+- **p50 (steady-state during solve)** captures what's resident
+  during the bulk of HiGHS's time. Here linopy and polar-high (with
+  `save_memory=True`) are both low, because each tool serialises
+  the LP to a temp file before `h.run()` — linopy via `io_api="lp"`,
+  polar-high via the MPS roundtrip inside `save_memory`. The
+  Python-side polar residue is gone by the time HiGHS is in its
+  hot loop, and HiGHS's internal copy is what sits resident through
+  `h.run()`. polar-high's p50 is a couple of GB above linopy's
+  because polar-high keeps `Var.frame` metadata around for
+  `Solution.value()` lookups, while linopy retains nothing
+  Python-side after the LP file write.
+- **Post-trim** is roughly tied between the two columnar tools —
+  both tools' actual working set at end-of-solve is in the 5–6 GB
+  range at N=3000. The difference is *how much* allocator churn
+  each goes through to get there.
+
+Pyomo carries each LP coefficient as a small Python expression-tree
+node (a `VarData` reference plus a multiplier inside a
+`MonomialTermExpression`), roughly 100–200 bytes per coefficient
+once CPython overhead is accounted for. polar-high and linopy hold
+coefficients as contiguous Arrow / numpy buffers of ~16 bytes per
+nonzero. At 4 M nonzeros the representation difference compounds to
+the multi-GB gap that's visible against either columnar tool.
+
+The take-away: re-run on your own hardware and look at the column
+that matches your operational question. *Ratios* between tools are
+what's portable across machines — absolute peak numbers shift with
+glibc behaviour and free-memory pressure.
 
 ## Reproducing
 
@@ -126,14 +228,18 @@ threading does start paying as N grows, and grows steadily:
 
 | N | polar 1 thread | polar 32 threads | speedup |
 |---:|---:|---:|---:|
-| 100 | 0.30 s | 0.26 s | 1.16× |
-| 300 | 1.08 s | 0.84 s | 1.29× |
-| 1 000 | 4.08 s | 3.18 s | 1.28× |
-| 3 000 | 15.5 s | 10.8 s | 1.43× |
-| 10 000 | 60.0 s | 40.5 s | **1.48×** |
+| 100 | 0.52 s | 0.50 s | 1.04× |
+| 300 | 1.94 s | 1.85 s | 1.05× |
+| 1 000 | 7.31 s | 6.56 s | 1.11× |
+| 3 000 | 25.7 s | 21.7 s | 1.18× |
+| 10 000 | 91.5 s | 77.7 s | **1.18×** |
 
-At threads=32, polar uses ~25 % more memory than at threads=1
-(per-thread Rayon scratch). The takeaway:
+The speedup is more modest than it was with the previous benchmark
+configuration because `save_memory=True` adds a serial step (the
+MPS file write + read for the disk roundtrip) that doesn't benefit
+from threading — Amdahl's law in action. At threads=32, polar's
+peak RSS is ~6 % higher than at threads=1 (per-thread Rayon
+scratch). The takeaway:
 
 - **Default threads=1** is the right choice for typical workloads.
   Faster *and* leaner on small/medium LPs; only modestly slower than
@@ -179,17 +285,21 @@ natural to its tool.
 
 At N=10 000 (≈ 8.4 M variables, ≈ 10 M constraints):
 
-| | total time | peak memory |
-|---|---:|---:|
-| polar-high | 60 s | 8.0 GB |
-| linopy | 146 s | 13.7 GB |
-| Pyomo | timed out at N=3000 | — |
+| | total time | peak RSS | p50 during solve | post-trim |
+|---|---:|---:|---:|---:|
+| polar-high (save_memory=True) | 92 s | 11.0 GB | 7.0 GB | 5.4 GB |
+| linopy (io_api="lp") | 162 s | 13.2 GB | 1.6 GB | 4.0 GB |
+| Pyomo | timed out at N=3000 | — | — | — |
 
-polar wins all three columns and Pyomo can't finish at this scale
-inside our 10-minute timeout. Notably, **linopy's memory advantage on
-the dense LP doesn't carry over here**. The irregular `(e, t) →
-(n, t)` join breaks xarray's dense-broadcast pattern, while polar's
-join semantics map naturally onto the operation.
+polar wins on time (~1.8× faster) and on peak RSS (~17 % lower than
+linopy). The p50 column favours linopy because of its file-roundtrip
+trick — linopy serialises the LP to a temp file and HiGHS reads it
+back, so linopy's Python-side representation is gone by the time
+HiGHS is in its hot loop. polar-high does an analogous MPS
+roundtrip under `save_memory=True` but still keeps its `Var.frame`
+metadata for `Solution.value()` lookups — slightly more residual
+than linopy's pure file-handoff. Pyomo can't finish at this scale
+inside our 10-minute timeout.
 
 ## Replication: linopy's original benchmark format
 
