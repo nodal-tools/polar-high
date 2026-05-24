@@ -23,7 +23,11 @@ to ``over=`` at ``add_cstr`` time.
 
 from __future__ import annotations
 
+import ctypes
 import math
+import os
+import sys
+import tempfile
 from typing import Union
 
 import highspy
@@ -46,8 +50,17 @@ def _running_finite_nonzero_min_max(
     arr: np.ndarray,
     cur_lo: float,
     cur_hi: float,
+    *,
+    chunk: int = 1_048_576,
 ) -> tuple[float, float]:
     """Update ``(cur_lo, cur_hi)`` with the finite, non-zero ``|arr|``.
+
+    Scans ``arr`` in slices so the transient working set stays bounded at
+    ``chunk`` float64s (~16 MB at the default), regardless of how big the
+    family-level coefficient array gets.  The old single-pass version
+    materialised two full-size temporaries (``arr[finite]`` and
+    ``np.abs(...)``); on a 36 M-nonzero family that was ~576 MB peak per
+    call for what should be a streaming reduction.
 
     ``cur_lo`` is seeded with ``math.inf`` and ``cur_hi`` with ``0.0`` so
     that an entirely-empty category leaves the sentinels untouched and is
@@ -55,11 +68,16 @@ def _running_finite_nonzero_min_max(
     """
     if arr.size == 0:
         return cur_lo, cur_hi
-    finite = np.isfinite(arr) & (arr != 0)
-    if not finite.any():
-        return cur_lo, cur_hi
-    a = np.abs(arr[finite])
-    return (min(cur_lo, float(a.min())), max(cur_hi, float(a.max())))
+    lo, hi = cur_lo, cur_hi
+    for start in range(0, arr.size, chunk):
+        c = arr[start : start + chunk]
+        mask = np.isfinite(c) & (c != 0)
+        if not mask.any():
+            continue
+        a = np.abs(c[mask])
+        lo = min(lo, float(a.min()))
+        hi = max(hi, float(a.max()))
+    return (lo, hi)
 
 
 # HiGHS' own "excessively small / large bound" thresholds.  These are
@@ -958,6 +976,11 @@ class Problem:
         # An explicit ``options`` kwarg on ``solve()`` overrides this.
         self._solver_options: dict | None = None
         self._auto_user_bound_scale = bool(auto_user_bound_scale)
+        # ``save_memory=True`` on :meth:`solve` flips this flag once
+        # the Python-side LP source-of-truth has been dropped (see
+        # :meth:`_release_python_lp_inputs`).  Subsequent ``solve()``
+        # calls then raise — there is no LP left to re-emit.
+        self._released: bool = False
 
     def set_solver_options(self, options: dict | None) -> None:
         """Store HiGHS options to be applied in ``solve()``.  Pass ``None``
@@ -1106,6 +1129,54 @@ class Problem:
         existing-entity fixed cost."""
         self._obj_offset += float(value)
 
+    # -- release ---------------------------------------------------------
+
+    def _release_python_lp_inputs(self) -> None:
+        """Drop the Python-side LP source-of-truth.
+
+        Called from :meth:`_solve_streaming` after all columns + rows
+        have been emitted to HiGHS, when ``solve(save_memory=True)``
+        was requested.  Why this exists: ``HiGHS.run()`` no longer needs
+        any of the polars LazyFrames, numpy COO buffers, or rhs Param
+        frames that polar-high accumulated while building the model —
+        HiGHS owns its own copy.  Releasing the polar side here makes
+        steady-state RSS during ``run()`` comparable to solvers that
+        serialise the LP to disk and free their Python representation
+        (the comparison this exists to make fair).
+
+        What stays alive: ``self._vars`` and each :class:`Var.frame`
+        (its ``col_id`` column maps HiGHS column indices back to user-
+        space dim tuples, which :meth:`Solution.value` reads on demand).
+        ~288 MB at N=3000 dense — acceptable; without it the Solution
+        is unusable.
+
+        What goes: every ``_Term.lazy`` plan (objective and constraint
+        LHS), every ``_CstrProto.rhs`` reference (which may pin a Param
+        frame), and the constraint-family list itself.  Sets
+        :attr:`_released` so :meth:`solve` refuses to run again — the
+        Problem is no longer re-emittable.
+        """
+        # Objective terms: drop lazy plans first so any Param objects
+        # referenced via ``param_sources`` aren't extended past the
+        # constraint walk below.
+        for t in self._obj_terms:
+            t.lazy = None  # type: ignore[assignment]
+            t.param_sources = None
+        self._obj_terms = []
+
+        # Constraint families: clear each Expr's term list and drop the
+        # rhs reference (which may be a Param holding a sizeable eager
+        # frame).  We don't touch ``over`` — it's typically the row-
+        # index DataFrame, already small compared to the LHS plans we
+        # just dropped, and stripping it would complicate any future
+        # diagnostic that wants to report which family came last.
+        for _name, proto, _over in self._cstrs:
+            proto.expr.terms = []
+            proto.rhs = None
+        self._cstrs = []
+
+        self._released = True
+
     # -- solve -----------------------------------------------------------
 
     def solve(
@@ -1114,6 +1185,7 @@ class Problem:
         options: dict | None = None,
         keep_solver: bool = False,
         streaming: bool = True,
+        save_memory: bool = False,
     ) -> Solution:
         """Solve the LP and return a :class:`Solution`.
 
@@ -1137,71 +1209,79 @@ class Problem:
             :class:`highspy.HighsLp` and loaded via ``passModel`` —
             numerically identical results either way; ``False`` is mostly
             useful for benchmarking the legacy path.
+        save_memory
+            Single one-shot knob that trades wall time for peak RSS.  When
+            ``True``, two things happen right before ``HiGHS.run()``:
+
+            1. polar-high's polars/numpy LP source-of-truth (constraint
+               family ``Expr.terms`` lists, ``_CstrProto.rhs`` Param
+               frames, objective ``_Term.lazy`` plans, the caller-side
+               ``col_names`` / ``row_names`` lists) is dropped.  Only the
+               per-:class:`Var` ``col_id`` frames survive — they are
+               needed by :meth:`Solution.value` to map column indices
+               back to user-space dim tuples.
+            2. The HiGHS instance is round-tripped through disk: the LP
+               is written to a temp MPS file, the original ``Highs()`` is
+               cleared and discarded, ``malloc_trim(0)`` is called (best
+               effort, Linux only), a fresh ``Highs()`` is created, the
+               same solver options are re-applied, and the MPS file is
+               read back.  This resets the HiGHS allocator's high-water
+               mark — the C++ side accumulates ~5 GB of slack from the
+               incremental ``addRows`` loading path that ``readModel``
+               avoids by sizing once up front.
+
+            Cost: ~+90 s of MPS file I/O at N=3000 dense.  Benefit: peak
+            RSS drops by ~5 GB on the same problem.  Intended for one-
+            shot single-solve benchmarks where warm-start / re-solve
+            isn't needed.  After the call returns, the :class:`Problem`
+            is in a "released" state and any further :meth:`solve` call
+            raises ``RuntimeError`` (the polar-side source AND the
+            original HiGHS instance with its basis have both been
+            discarded, so neither a fresh re-solve nor a WarmProblem-
+            style update is possible).  Honoured only by the streaming
+            path; on ``streaming=False`` a warning is emitted and the
+            flag is ignored.  Default ``False``.
         """
-        n_cols = self._next_col
-        col_lb = np.zeros(n_cols, dtype=np.float64)
-        col_ub = np.full(n_cols, np.inf, dtype=np.float64)
-        col_obj = np.zeros(n_cols, dtype=np.float64)
-        col_int = np.zeros(n_cols, dtype=np.int8)  # 1 = integer column
-        col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
-        var_of_col: dict[int, str] = {}
-
-        for v in self._vars.values():
-            ids = v.frame["col_id"].to_numpy()
-            col_lb[ids] = float(v.lower)
-            col_ub[ids] = float(v.upper)
-            if v.integer:
-                col_int[ids] = 1
-            if v.dims:
-                # Build the formatted "name[tag]" strings inside polars in
-                # one expression, then a single .to_list() — avoids the
-                # per-row Python f-string formatting loop.
-                tagged = (
-                    v.frame.select(
-                        pl.format(
-                            "{}[{}]",
-                            pl.lit(v.name),
-                            pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in v.dims], separator=","
-                            ),
-                        ).alias("__name")
-                    )
-                )["__name"].to_list()
-                # ids is a 1-D int64 numpy array — Python int conversion is
-                # cheap; loop body has zero arithmetic now.
-                ids_list = ids.tolist()
-                vname = v.name
-                for cid, nm in zip(ids_list, tagged):
-                    col_names[cid] = nm
-                    var_of_col[cid] = vname
-            else:
-                cid0 = int(ids[0])
-                col_names[cid0] = v.name
-                var_of_col[cid0] = v.name
-
-        # objective — scatter-add via np.add.at (one numpy op per term,
-        # no per-nonzero Python iteration).  np.add.at handles the rare
-        # case where a term frame contains duplicate col_ids correctly.
-        # NOTE: materialize each term into a *local* DataFrame and let it
-        # drop at the end of the iteration — we deliberately do NOT
-        # populate any cache on _Term, so the eager frame is released
-        # once the COO contribution is built.  WarmProblem and any
-        # subsequent solve re-collect from the surviving lazy plan.
-        for t in self._obj_terms:
-            f = t.lazy.collect()
-            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
-            del f
+        # Guard against re-entry on a Problem whose LP source has
+        # already been dropped — see ``save_memory`` above.  We can
+        # neither rebuild the matrix from ``self._cstrs`` (cleared) nor
+        # recompute the objective from ``self._obj_terms`` (cleared);
+        # the caller must construct a fresh :class:`Problem`.
+        if getattr(self, "_released", False):
+            raise RuntimeError(
+                "Problem.solve(save_memory=True) was called previously; "
+                "the LP source has been released and the Problem cannot be "
+                "solved again.  Rebuild from scratch, or use the default "
+                "save_memory=False for re-solvable Problems."
+            )
 
         if streaming:
+            # Column arrays are built inside ``_solve_streaming`` so they
+            # die at the end of that frame rather than persisting through
+            # ``HiGHS.run()`` in this caller's locals.  The non-streaming
+            # path below recomputes its own column arrays inside the
+            # HiGHS adapter (``LpView.from_problem``), so we don't build
+            # them here either.
             return self._solve_streaming(
-                n_cols=n_cols,
-                col_lb=col_lb,
-                col_ub=col_ub,
-                col_obj=col_obj,
-                col_int=col_int,
-                col_names=col_names,
                 options=options,
                 keep_solver=keep_solver,
+                save_memory=save_memory,
+            )
+
+        if save_memory:
+            # The non-streaming path delegates to the HiGHS adapter,
+            # which builds a full :class:`HighsLp` via ``passModel``
+            # before ``h.run()`` — there is no in-tree hook where the
+            # polar-side source could be dropped or the HiGHS allocator
+            # round-tripped between matrix emission and solve.  Warn and
+            # proceed without releasing rather than hard-failing, so
+            # callers that pair the two flags don't get surprised when
+            # toggling ``streaming``.
+            import warnings
+            warnings.warn(
+                "Problem.solve(save_memory=True) is honoured only by "
+                "the streaming path; ignoring on streaming=False.",
+                stacklevel=2,
             )
 
         # Non-streaming path now delegates to the HiGHS adapter behind
@@ -1559,15 +1639,67 @@ class Problem:
     def _solve_streaming(
         self,
         *,
-        n_cols: int,
-        col_lb: np.ndarray,
-        col_ub: np.ndarray,
-        col_obj: np.ndarray,
-        col_int: np.ndarray,
-        col_names: list[str],
         options: dict | None,
         keep_solver: bool,
+        save_memory: bool = False,
     ) -> Solution:
+        # Build the per-column arrays inside this frame (rather than in
+        # the public ``solve`` caller) so they die at the end of the
+        # streaming solve rather than living through ``HiGHS.run()`` on
+        # the outer stack.  The contents are identical to what
+        # :class:`LpView` materialises for the non-streaming path; the
+        # two builders diverge only on which downstream sink they feed
+        # (``addCols`` vs ``HighsLp`` slots).
+        n_cols = self._next_col
+        col_lb = np.zeros(n_cols, dtype=np.float64)
+        col_ub = np.full(n_cols, np.inf, dtype=np.float64)
+        col_obj = np.zeros(n_cols, dtype=np.float64)
+        col_int = np.zeros(n_cols, dtype=np.int8)  # 1 = integer column
+        col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
+
+        for v in self._vars.values():
+            ids = v.frame["col_id"].to_numpy()
+            col_lb[ids] = float(v.lower)
+            col_ub[ids] = float(v.upper)
+            if v.integer:
+                col_int[ids] = 1
+            if v.dims:
+                # Build the formatted "name[tag]" strings inside polars in
+                # one expression, then a single .to_list() — avoids the
+                # per-row Python f-string formatting loop.
+                tagged = (
+                    v.frame.select(
+                        pl.format(
+                            "{}[{}]",
+                            pl.lit(v.name),
+                            pl.concat_str(
+                                [pl.col(d).cast(pl.String) for d in v.dims], separator=","
+                            ),
+                        ).alias("__name")
+                    )
+                )["__name"].to_list()
+                # ids is a 1-D int64 numpy array — Python int conversion is
+                # cheap; loop body has zero arithmetic now.
+                ids_list = ids.tolist()
+                for cid, nm in zip(ids_list, tagged):
+                    col_names[cid] = nm
+            else:
+                cid0 = int(ids[0])
+                col_names[cid0] = v.name
+
+        # objective — scatter-add via np.add.at (one numpy op per term,
+        # no per-nonzero Python iteration).  np.add.at handles the rare
+        # case where a term frame contains duplicate col_ids correctly.
+        # NOTE: materialize each term into a *local* DataFrame and let it
+        # drop at the end of the iteration — we deliberately do NOT
+        # populate any cache on _Term, so the eager frame is released
+        # once the COO contribution is built.  WarmProblem and any
+        # subsequent solve re-collect from the surviving lazy plan.
+        for t in self._obj_terms:
+            f = t.lazy.collect()
+            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            del f
+
         inf = highspy.kHighsInf
 
         # Translate +/-inf in the column bounds to HiGHS's sentinel.
@@ -1637,6 +1769,15 @@ class Problem:
             if nm is not None:
                 h.passColName(i, nm)
 
+        # Under save_memory, HiGHS now owns the canonical name
+        # storage, so we can drop the Python-side list.  At N=3000 dense
+        # this is 18 M PyUnicode objects (~1.1 GB).  Cost: the returned
+        # Solution.col_names becomes empty and Solution.constraint_dual()
+        # won't find named columns — same trade as releasing the LP
+        # source-of-truth.
+        if save_memory:
+            col_names = []
+
         # Stream-time LP-range accumulation.  Cost is a handful of O(n)
         # numpy scans on arrays we already build (per-family for matrix
         # / row_bound, once here for cost / col_bound), so peak memory
@@ -1648,15 +1789,29 @@ class Problem:
         _r_cost_lo, _r_cost_hi = _running_finite_nonzero_min_max(
             col_obj_h, math.inf, 0.0
         )
-        # Filter col bounds to "real" bounds: drop the HiGHS infinity
-        # sentinel as well as +/-inf and zeros (zeros aren't bounds in
-        # the scaling-decision sense).
-        _cb_arr = np.concatenate([col_lb_h, col_ub_h])
-        _cb_mask = (np.abs(_cb_arr) < inf)
+        # col bounds: drop the HiGHS infinity sentinel as well as zeros
+        # (zeros aren't bounds in the scaling-decision sense).  Process
+        # col_lb_h and col_ub_h separately — concatenating into a single
+        # 2·n_cols array doubles the transient working set for no reason.
         _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(
-            _cb_arr[_cb_mask], math.inf, 0.0
+            col_lb_h, math.inf, 0.0
         )
-        del _cb_arr, _cb_mask
+        _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(
+            col_ub_h, _r_cb_lo, _r_cb_hi
+        )
+
+        # HiGHS has its own internal copies of the column bound / cost
+        # arrays after addCols; we don't reference these locals again.
+        # Releasing them now (~6·n_cols·8 bytes = ~864 MB at N=3000
+        # dense for col_lb, col_ub, col_obj, col_lb_h, col_ub_h, col_obj_h
+        # combined; ``col_obj_h`` may alias ``col_obj`` and ``col_lb_h``
+        # / ``col_ub_h`` are fresh ``np.where`` outputs) lets the
+        # steady-state RSS during the family loop and ``h.run()`` come
+        # down accordingly.  Done now (rather than at the end of solve)
+        # because we no longer hold these arrays on the outer caller
+        # frame — the column build moved inside this method.
+        del col_lb_h, col_ub_h, col_obj_h
+        del col_lb, col_ub, col_obj, col_int
 
         # Walk the constraint families one at a time.  For each family
         # we collect that family's term plans, build local COO arrays,
@@ -1876,15 +2031,16 @@ class Problem:
             )
 
             # Update stream-time LP ranges from this family's arrays.
+            # Process row_lb / row_ub separately (no concat copy).
             _r_matrix_lo, _r_matrix_hi = _running_finite_nonzero_min_max(
                 val64, _r_matrix_lo, _r_matrix_hi,
             )
-            _rb_arr = np.concatenate([row_lb, row_ub])
-            _rb_mask = (np.abs(_rb_arr) < inf)
             _r_row_lo, _r_row_hi = _running_finite_nonzero_min_max(
-                _rb_arr[_rb_mask], _r_row_lo, _r_row_hi,
+                row_lb, _r_row_lo, _r_row_hi,
             )
-            del _rb_arr, _rb_mask
+            _r_row_lo, _r_row_hi = _running_finite_nonzero_min_max(
+                row_ub, _r_row_lo, _r_row_hi,
+            )
 
             # Track row range so dual lookup keeps working.  We don't
             # populate Problem-level metadata (Problem doesn't carry
@@ -1915,7 +2071,10 @@ class Problem:
         # Auto user_bound_scale: opt-in, gated on caller not having
         # already set the option explicitly.  Caller's explicit value
         # (via ``set_solver_options`` or per-call ``options=``) always
-        # wins.
+        # wins.  We stash whichever value we end up applying so the
+        # save_memory disk-roundtrip below can re-set it on the fresh
+        # Highs (options are stored on the C++ instance, not the MPS).
+        _n_rec_applied: int = 0
         if self._auto_user_bound_scale:
             already_set = False
             _opts_eff = options if options is not None else self._solver_options
@@ -1961,6 +2120,7 @@ class Problem:
                 )
                 if n_rec != 0:
                     h.setOptionValue("user_bound_scale", int(n_rec))
+                    _n_rec_applied = int(n_rec)
                     print(
                         f"polar-high set user_bound_scale={int(n_rec)}",
                         flush=True,
@@ -1977,6 +2137,111 @@ class Problem:
         # matches the row index inside HiGHS.
         for i, nm in enumerate(row_names):
             h.passRowName(i, nm)
+
+        # Same logic as col_names above — HiGHS now owns the row name
+        # storage; the Python list is ~1.1 GB of redundant strings at
+        # N=3000 dense.
+        if save_memory:
+            row_names = []
+
+        # Drop polar-high's polars/numpy LP source-of-truth before
+        # handing off to HiGHS.  HiGHS already holds its own copy of
+        # columns + rows; the lazy plans on ``_Term``, the rhs Param
+        # frames on ``_CstrProto``, and the constraint family lists are
+        # all redundant from here on.  Used to make peak RSS during
+        # ``h.run()`` comparable to solvers that serialise to disk and
+        # free their Python-side copy (e.g. linopy's ``io_api="lp"``).
+        # See :meth:`_release_python_lp_inputs` for the contract.
+        if save_memory:
+            self._release_python_lp_inputs()
+
+            # HiGHS allocator round-trip via disk.  Even after every
+            # polar-side reference is dropped, the C++ Highs instance
+            # holds ~5 GB of slack on a N=3000 dense LP: the streaming
+            # ``addRows`` path grows internal vectors incrementally, and
+            # the resulting allocator high-water mark sits ~5 GB above
+            # what ``readModel`` (which sizes everything once up front
+            # from the MPS header) ends up using.  Writing the LP out,
+            # tearing the original Highs down, asking glibc to release
+            # heap arenas back to the OS, and reading the LP back into a
+            # fresh Highs collapses that slack — at the cost of MPS file
+            # I/O (~+90 s at N=3000 dense).  The trade is the whole
+            # point of save_memory=True: lowest peak RSS, one shot.
+            mps_path = tempfile.NamedTemporaryFile(
+                suffix=".mps", delete=False
+            ).name
+            try:
+                # Silence HiGHS' own "Writing the model to ..." /
+                # "Reading the model from ..." chatter so benchmark
+                # stdout stays clean.  We restore output_flag on the
+                # fresh Highs from the caller's effective options dict
+                # (re-applied below), so the user's preference wins.
+                try:
+                    h.setOptionValue("output_flag", False)
+                except Exception:
+                    pass
+                h.writeModel(mps_path)
+                h.clearModel()
+                del h
+                # Best-effort allocator release: glibc's malloc holds
+                # freed arenas on its free-list by default; trim hands
+                # them back to the OS so RSS actually drops.  Linux-
+                # only (libc.so.6); skip silently elsewhere.
+                if sys.platform.startswith("linux"):
+                    try:
+                        ctypes.CDLL("libc.so.6").malloc_trim(0)
+                    except Exception:
+                        pass
+
+                h = highspy.Highs()
+                # Re-apply the same solver options that were set on the
+                # original Highs — they live on the C++ instance, not
+                # on the MPS file, so the fresh Highs would otherwise
+                # run with defaults.  ``opts`` is the effective dict
+                # (per-call ``options`` overrides ``self._solver_options``;
+                # see addCols-time block above).
+                if opts:
+                    import warnings as _warnings
+                    _ok = getattr(highspy.HighsStatus, "kOk", None)
+                    for _k, _v in opts.items():
+                        try:
+                            _st = h.setOptionValue(_k, _v)
+                        except Exception as _exc:
+                            _warnings.warn(
+                                f"HiGHS rejected option {_k}={_v!r} on "
+                                f"save_memory round-trip: {_exc}",
+                                stacklevel=2,
+                            )
+                            continue
+                        if _ok is not None and _st != _ok:
+                            _warnings.warn(
+                                f"HiGHS rejected option {_k}={_v!r} on "
+                                f"save_memory round-trip (status={_st!r})",
+                                stacklevel=2,
+                            )
+                # auto_user_bound_scale fires below on whichever Highs
+                # we end up running; if we set it on the original ``h``
+                # above, re-apply it to the new one here.
+                if self._auto_user_bound_scale and _n_rec_applied:
+                    h.setOptionValue("user_bound_scale", int(_n_rec_applied))
+                # Mute readModel chatter on the fresh Highs too — the
+                # caller's output_flag preference (if any) is already
+                # in ``opts`` and got re-applied above.
+                if not (opts and "output_flag" in opts):
+                    try:
+                        h.setOptionValue("output_flag", False)
+                    except Exception:
+                        pass
+                h.readModel(mps_path)
+                # Restore the user's requested output_flag for run().
+                if not (opts and "output_flag" in opts):
+                    try:
+                        h.setOptionValue("output_flag", True)
+                    except Exception:
+                        pass
+            finally:
+                if os.path.exists(mps_path):
+                    os.unlink(mps_path)
 
         h.run()
         sol = h.getSolution()
