@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [1.5.0] — 2026-05-24
+
+### Added
+
+- `Problem.solve(save_memory: bool = False)` opt-in one-shot mode for
+  benchmark-style single solves. When `True`, polar-high drops its
+  Python-side LP source-of-truth (term lazy plans, Param frames,
+  caller-side column-bound / cost arrays, and the `col_names` /
+  `row_names` lists) once HiGHS has copied them, and then writes the
+  model to a temp MPS file, clears the original `Highs` instance,
+  calls `malloc_trim(0)` to return glibc arenas to the OS, and
+  creates a fresh `Highs` that reads the model back before
+  `h.run()`. The disk roundtrip resets HiGHS' incremental-`addRows`
+  allocator slack — at N=3000 dense full-solve it drops peak RSS
+  from ~38 GB to ~28 GB at the cost of ~+90 s wall time (the MPS
+  write + read). A subsequent `Problem.solve()` on a Problem that
+  has been released raises a clear `RuntimeError`; WarmProblem-style
+  incremental updates and re-solves are unavailable after
+  `save_memory=True`. Cold-start rolling-horizon loops that rebuild
+  the `Problem` from scratch each iteration are unaffected and
+  benefit from the per-iteration memory drop. Default `False`
+  preserves the warm-restart-capable behaviour.
+
+### Changed
+
+- `_running_finite_nonzero_min_max` (used by the streaming
+  LP-range accumulator) now scans in chunks of 1 M float64s instead
+  of materialising `np.abs(arr[finite])` for the whole array. On a
+  36 M-nonzero constraint family that cuts the transient temp
+  allocation from ~576 MB to ~16 MB. Functionally identical output.
+- `_solve_streaming` no longer concatenates `col_lb_h` with
+  `col_ub_h` (or `row_lb` with `row_ub` per family) for range
+  accumulation — each is scanned in place. Eliminates a 2·n_cols
+  (and 2·n_rows-per-family) transient copy each.
+- `_solve_streaming` drops `col_lb_h` / `col_ub_h` / `col_obj_h`
+  immediately after the LP-range accumulation completes — HiGHS has
+  its own internal copies from `addCols`, so the originals are not
+  needed through the family loop and `h.run()`. ~432 MB at N=3000
+  dense.
+- Column-array construction (`col_lb` / `col_ub` / `col_obj` /
+  `col_int` / `col_names`) moved from `Problem.solve()` into
+  `_solve_streaming` so the caller's frame doesn't pin those arrays
+  through the entire family loop and `h.run()` call. Combined with
+  the drop above, this removes ~864 MB of caller-side residue at
+  N=3000 dense.
+- `benchmark/run_one.py` now starts a sidecar thread that samples
+  `VmRSS` from `/proc/self/status` at 25 ms cadence while `solve()`
+  runs, and calls `malloc_trim(0)` after `gc.collect()` at the
+  post-build and post-solve checkpoints. New CSV columns:
+  `rss_after_build_trim_mb`, `rss_after_solve_trim_mb`,
+  `rss_solve_min_mb`, `rss_solve_p50_mb`, `rss_solve_p95_mb`,
+  `rss_solve_max_mb`, `n_samples`. The `peak_rss_mb` column stays
+  as before (`ru_maxrss`, the unavoidable high-water mark including
+  transient HiGHS-setup scratch). Old 10-field CSV rows still parse
+  through `plot.py`.
+- `docs/compare/benchmark.md` rewritten: new memory-measurement
+  methodology section explains `peak_rss_mb` vs `rss_solve_p50_mb`
+  vs `rss_after_solve_trim_mb`; new section on the regular vs
+  `save_memory` modes with a side-by-side polar-high comparison;
+  headline tables updated to use `save_memory=True` for the
+  cross-tool comparison (matches linopy's `io_api="lp"` file-handoff
+  pattern). Threading-benefit numbers updated — speedup at N=10 000
+  is now 1.18× rather than 1.33× because the MPS roundtrip is a
+  serial step that doesn't scale with thread count.
+
 ## [1.4.0] — 2026-05-22
 
 ### Removed
