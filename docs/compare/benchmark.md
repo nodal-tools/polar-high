@@ -130,25 +130,14 @@ that matches the question you're asking:
 | `rss_after_solve_trim_mb` | RSS right after `gc.collect()` + `malloc_trim(0)` once `solve()` returns | what the process actually held, with glibc's freed-but-cached arenas returned to the OS |
 
 `peak_rss_mb` is the unavoidable peak — at the moment of peak
-consumption every allocated page is in use, so `malloc_trim(0)` is a
-no-op there. Trim only helps after deallocation, exposing how much of
+consumption every allocated page is in use, so `malloc_trim(0)` does not
+help there. Trim only helps after deallocation, exposing how much of
 the apparent "still used" memory was actually freed but stuck in
 glibc's per-thread arena cache. linopy is particularly heavy on
 arena churn: at N=3000 it shows ~21 GB resident immediately
 post-solve, dropping to ~6 GB after `malloc_trim(0)` — roughly 15 GB
 of glibc-retained pages that aren't really "in use" but `ru_maxrss`
 counts them anyway.
-
-**How this differs from earlier versions of this page.** Previous
-numbers reported a single "peak memory" column. We've since changed
-the measurement methodology to expose the breakdown above. The old
-headlines (12.7 GB for polar-high dense @ N=3000, 8.0 GB for
-network @ N=10000) tracked closer to the new `rss_solve_p50_mb`
-column than to `peak_rss_mb` — they captured steady-state during
-solve, not the unavoidable peak. The current tables use
-`peak_rss_mb` (the conservative provisioning figure) as the
-headline and report p50 / post-trim alongside so the comparison is
-explicit.
 
 ### Why the memory comparison between tools depends on the column
 
@@ -367,5 +356,4 @@ sparse matrix. linopy's numbers reproduce within run-to-run noise.
   that defeats "anyone can re-run from a clean `pip install`".
 
 If you'd like a different model class (block-angular, time-coupled,
-mixed-integer with branching) in the benchmark, open an issue. The
-runner is a small enough surface to extend.
+mixed-integer with branching) in the benchmark, open an issue.
