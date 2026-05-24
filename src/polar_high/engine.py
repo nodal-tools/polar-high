@@ -28,12 +28,10 @@ import math
 import os
 import sys
 import tempfile
-from typing import Union
 
 import highspy
 import numpy as np
 import polars as pl
-
 
 # ---------------------------------------------------------------------------
 # Stream-time LP-range helpers
@@ -83,8 +81,8 @@ def _running_finite_nonzero_min_max(
 # HiGHS' own "excessively small / large bound" thresholds.  These are
 # the constants HiGHS uses in its presolve to flag bound magnitudes as
 # numerically risky; see ``HConst.h:38-41`` in the HiGHS source.
-_HIGHS_SMALL_BOUND = 1e-4   # kExcessivelySmallBoundValue
-_HIGHS_LARGE_BOUND = 1e6    # kExcessivelyLargeBoundValue
+_HIGHS_SMALL_BOUND = 1e-4  # kExcessivelySmallBoundValue
+_HIGHS_LARGE_BOUND = 1e6  # kExcessivelyLargeBoundValue
 
 # HiGHS rejects ``user_bound_scale`` values outside ``[-30, 30]`` (see
 # the option's documented range).  We never expect to come close, but
@@ -164,6 +162,7 @@ def _recommend_user_bound_scale(
         n = _USER_BOUND_SCALE_CLAMP_HI
     return int(n)
 
+
 # ---------------------------------------------------------------------------
 # Enum-dtype-aware join helpers
 #
@@ -182,7 +181,7 @@ def _recommend_user_bound_scale(
 # ---------------------------------------------------------------------------
 
 
-_Frame = Union[pl.DataFrame, pl.LazyFrame]
+_Frame = pl.DataFrame | pl.LazyFrame
 
 
 def _column_dtype(frame: _Frame, name: str) -> pl.DataType | None:
@@ -822,9 +821,7 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
         lag_lf_a, lagged_a = _align_enum_join_keys(lag_lf, lagged, carry)
         lag_keyed = lag_lf_a.rename({lag_col: "__lag_join_key"})
         lagged_keyed = lagged_a.rename({"_lag_src": "__lag_join_key"})
-        lag_keyed, lagged_keyed = _align_enum_join_keys(
-            lag_keyed, lagged_keyed, ["__lag_join_key"]
-        )
+        lag_keyed, lagged_keyed = _align_enum_join_keys(lag_keyed, lagged_keyed, ["__lag_join_key"])
         lag_lf_a = lag_keyed.rename({"__lag_join_key": lag_col})
         lagged_a = lagged_keyed.rename({"__lag_join_key": "_lag_src"})
         j = lag_lf_a.join(
@@ -1278,6 +1275,7 @@ class Problem:
             # callers that pair the two flags don't get surprised when
             # toggling ``streaming``.
             import warnings
+
             warnings.warn(
                 "Problem.solve(save_memory=True) is honoured only by "
                 "the streaming path; ignoring on streaming=False.",
@@ -1444,7 +1442,9 @@ class Problem:
                     # the streaming engine bounds intermediate buffers
                     # while the upstream Param product runs.
                     ri_a, rf_a = _align_enum_join_keys(
-                        row_index.lazy(), rhs.lazy, on,
+                        row_index.lazy(),
+                        rhs.lazy,
+                        on,
                     )
                     # Build the semi-join key set from the ALIGNED row
                     # index so it shares the join-key dtypes with rf_a.
@@ -1517,9 +1517,7 @@ class Problem:
                         )
                     on = [d for d in term.dims if d in axis_cols]
                     rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    plan = rl_a.join(tl_a, on=on, how="inner").select(
-                        "_rid", "col_id", "coef"
-                    )
+                    plan = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
                     pending.append(("dim", base_row, plan))
                 else:
                     pending.append(
@@ -1786,19 +1784,13 @@ class Problem:
         # ``streamed_lp_ranges`` for caller diagnostics.
         _r_matrix_lo, _r_matrix_hi = math.inf, 0.0
         _r_row_lo, _r_row_hi = math.inf, 0.0
-        _r_cost_lo, _r_cost_hi = _running_finite_nonzero_min_max(
-            col_obj_h, math.inf, 0.0
-        )
+        _r_cost_lo, _r_cost_hi = _running_finite_nonzero_min_max(col_obj_h, math.inf, 0.0)
         # col bounds: drop the HiGHS infinity sentinel as well as zeros
         # (zeros aren't bounds in the scaling-decision sense).  Process
         # col_lb_h and col_ub_h separately — concatenating into a single
         # 2·n_cols array doubles the transient working set for no reason.
-        _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(
-            col_lb_h, math.inf, 0.0
-        )
-        _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(
-            col_ub_h, _r_cb_lo, _r_cb_hi
-        )
+        _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(col_lb_h, math.inf, 0.0)
+        _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(col_ub_h, _r_cb_lo, _r_cb_hi)
 
         # HiGHS has its own internal copies of the column bound / cost
         # arrays after addCols; we don't reference these locals again.
@@ -1865,7 +1857,9 @@ class Problem:
                     # the streaming engine bounds intermediate buffers
                     # while the upstream Param product runs.
                     ri_a, rf_a = _align_enum_join_keys(
-                        row_index.lazy(), rhs.lazy, on,
+                        row_index.lazy(),
+                        rhs.lazy,
+                        on,
                     )
                     # Build the semi-join key set from the ALIGNED row
                     # index so it shares the join-key dtypes with rf_a.
@@ -1943,9 +1937,7 @@ class Problem:
                         )
                     on = [d for d in term.dims if d in axis_cols]
                     rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    plan = rl_a.join(tl_a, on=on, how="inner").select(
-                        "_rid", "col_id", "coef"
-                    )
+                    plan = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
                     term_plans.append(("dim", plan))
                 else:
                     term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
@@ -2033,13 +2025,19 @@ class Problem:
             # Update stream-time LP ranges from this family's arrays.
             # Process row_lb / row_ub separately (no concat copy).
             _r_matrix_lo, _r_matrix_hi = _running_finite_nonzero_min_max(
-                val64, _r_matrix_lo, _r_matrix_hi,
+                val64,
+                _r_matrix_lo,
+                _r_matrix_hi,
             )
             _r_row_lo, _r_row_hi = _running_finite_nonzero_min_max(
-                row_lb, _r_row_lo, _r_row_hi,
+                row_lb,
+                _r_row_lo,
+                _r_row_hi,
             )
             _r_row_lo, _r_row_hi = _running_finite_nonzero_min_max(
-                row_ub, _r_row_lo, _r_row_hi,
+                row_ub,
+                _r_row_lo,
+                _r_row_hi,
             )
 
             # Track row range so dual lookup keeps working.  We don't
@@ -2062,10 +2060,10 @@ class Problem:
             return (lo, hi)
 
         streamed_lp_ranges: dict[str, tuple[float, float] | None] = {
-            "matrix":    _pack(_r_matrix_lo, _r_matrix_hi),
-            "cost":      _pack(_r_cost_lo,   _r_cost_hi),
-            "col_bound": _pack(_r_cb_lo,     _r_cb_hi),
-            "row_bound": _pack(_r_row_lo,    _r_row_hi),
+            "matrix": _pack(_r_matrix_lo, _r_matrix_hi),
+            "cost": _pack(_r_cost_lo, _r_cost_hi),
+            "col_bound": _pack(_r_cb_lo, _r_cb_hi),
+            "row_bound": _pack(_r_row_lo, _r_row_hi),
         }
 
         # Auto user_bound_scale: opt-in, gated on caller not having
@@ -2087,12 +2085,8 @@ class Problem:
                     _caller_n = None
             cb = streamed_lp_ranges.get("col_bound")
             rb = streamed_lp_ranges.get("row_bound")
-            cb_str = (
-                f"{cb[0]:.2e}..{cb[1]:.2e}" if cb is not None else "n/a"
-            )
-            rb_str = (
-                f"{rb[0]:.2e}..{rb[1]:.2e}" if rb is not None else "n/a"
-            )
+            cb_str = f"{cb[0]:.2e}..{cb[1]:.2e}" if cb is not None else "n/a"
+            rb_str = f"{rb[0]:.2e}..{rb[1]:.2e}" if rb is not None else "n/a"
             if already_set:
                 if _caller_n is not None:
                     print(
@@ -2127,8 +2121,7 @@ class Problem:
                     )
                 else:
                     print(
-                        "polar-high no scaling needed "
-                        "| within HiGHS' [1e-4, 1e+6] zone.",
+                        "polar-high no scaling needed | within HiGHS' [1e-4, 1e+6] zone.",
                         flush=True,
                     )
 
@@ -2167,9 +2160,7 @@ class Problem:
             # fresh Highs collapses that slack — at the cost of MPS file
             # I/O (~+90 s at N=3000 dense).  The trade is the whole
             # point of save_memory=True: lowest peak RSS, one shot.
-            mps_path = tempfile.NamedTemporaryFile(
-                suffix=".mps", delete=False
-            ).name
+            mps_path = tempfile.NamedTemporaryFile(suffix=".mps", delete=False).name
             try:
                 # Silence HiGHS' own "Writing the model to ..." /
                 # "Reading the model from ..." chatter so benchmark
@@ -2202,6 +2193,7 @@ class Problem:
                 # see addCols-time block above).
                 if opts:
                     import warnings as _warnings
+
                     _ok = getattr(highspy.HighsStatus, "kOk", None)
                     for _k, _v in opts.items():
                         try:
@@ -3148,7 +3140,9 @@ class WarmProblem:
                     # the streaming engine bounds intermediate buffers
                     # while the upstream Param product runs.
                     ri_a, rf_a = _align_enum_join_keys(
-                        row_index.lazy(), rhs.lazy, on,
+                        row_index.lazy(),
+                        rhs.lazy,
+                        on,
                     )
                     # Build the semi-join key set from the ALIGNED row
                     # index so it shares the join-key dtypes with rf_a.
@@ -3239,9 +3233,7 @@ class WarmProblem:
                             ("dim_track", base_row, plan, tracked_sources, tuple(term.dims))
                         )
                     else:
-                        plan = rl_a.join(tl_a, on=on, how="inner").select(
-                            "_rid", "col_id", "coef"
-                        )
+                        plan = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
                         pending.append(("dim", base_row, plan))
                 else:
                     if tracked_sources:
@@ -3316,13 +3308,8 @@ class WarmProblem:
                             keys_df = j.select(*pdims)
                             _kd_lhs = keys_df.with_row_index("__ridx")
                             _pdims_on = list(pdims)
-                            _kd_lhs, _pf_rhs = _align_enum_join_keys(
-                                _kd_lhs, pobj.frame, _pdims_on
-                            )
-                            joined = (
-                                _kd_lhs.join(_pf_rhs, on=_pdims_on, how="left")
-                                .sort("__ridx")
-                            )
+                            _kd_lhs, _pf_rhs = _align_enum_join_keys(_kd_lhs, pobj.frame, _pdims_on)
+                            joined = _kd_lhs.join(_pf_rhs, on=_pdims_on, how="left").sort("__ridx")
                             old_vals = (
                                 joined["value"]
                                 .fill_null(0.0)
