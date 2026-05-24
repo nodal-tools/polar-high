@@ -1,0 +1,2073 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Python library for building indexed linear and mixed-integer programs in polars.">
+      
+      
+      
+        <link rel="canonical" href="https://nodal-tools.github.io/polar-high/v1.5.0/compare/benchmark/">
+      
+      
+        <link rel="prev" href="../alternatives/">
+      
+      
+        <link rel="next" href="../../changelog/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Benchmark - polar-high</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#benchmark" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="polar-high" class="md-header__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            polar-high
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Benchmark
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="polar-high" class="md-nav__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    polar-high
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/vars-and-params/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vars and Params
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/expressions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Expressions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/problem-and-solve/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Problem and Solve
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/duals-and-bases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duals and Bases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/loading-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Loading data
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/solvers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/warm-starting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warm-starting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/lagrangian/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lagrangian
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compare
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Compare
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../alternatives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Alternatives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#headline-dense-lp-build-only-single-thread" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headline — dense LP, build-only, single-thread
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Headline — dense LP, build-only, single-thread">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#two-modes-regular-warm-restart-vs-save_memory-one-shot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two modes: regular (warm-restart) vs save_memory (one-shot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#measuring-memory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Measuring memory
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-the-memory-comparison-between-tools-depends-on-the-column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the memory comparison between tools depends on the column
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threading-defaults-and-where-it-matters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threading: defaults and where it matters
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Threading: defaults and where it matters">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#scaling-with-threads-at-small-n" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scaling with threads at small N
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scaling-with-threads-on-a-larger-lp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scaling with threads on a larger LP
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#network-lp-irregular-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network LP: irregular topology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#replication-linopys-original-benchmark-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication: linopy's original benchmark format
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fairness-caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fairness caveats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#whats-not-in-the-benchmark" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's not in the benchmark
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/about/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#headline-dense-lp-build-only-single-thread" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headline — dense LP, build-only, single-thread
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Headline — dense LP, build-only, single-thread">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#two-modes-regular-warm-restart-vs-save_memory-one-shot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two modes: regular (warm-restart) vs save_memory (one-shot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#measuring-memory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Measuring memory
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-the-memory-comparison-between-tools-depends-on-the-column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the memory comparison between tools depends on the column
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threading-defaults-and-where-it-matters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threading: defaults and where it matters
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Threading: defaults and where it matters">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#scaling-with-threads-at-small-n" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scaling with threads at small N
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scaling-with-threads-on-a-larger-lp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scaling with threads on a larger LP
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#network-lp-irregular-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network LP: irregular topology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#replication-linopys-original-benchmark-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication: linopy's original benchmark format
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fairness-caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fairness caveats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#whats-not-in-the-benchmark" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's not in the benchmark
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="benchmark">Benchmark<a class="headerlink" href="#benchmark" title="Permanent link">&para;</a></h1>
+<p>Reproducible build / solve / memory comparison between <strong>polar-high</strong>,
+<strong>linopy</strong>, and <strong>Pyomo</strong> on indexed linear programs, all using
+<strong>HiGHS</strong> as the solver. The dense-LP test follows
+<a href="https://linopy.readthedocs.io/en/latest/benchmark.html">linopy's benchmark</a>,
+restricted to the linear case so polar-high can run it directly.</p>
+<p>The benchmark is a manual artefact, not a CI workflow; runner
+variability would make CI numbers misleading. The model code, runner,
+and plot script live under
+<a href="https://github.com/nodal-tools/polar-high/tree/main/benchmark"><code>benchmark/</code></a>
+so anyone can re-run on their own hardware in a few minutes.</p>
+<h2 id="headline-dense-lp-build-only-single-thread">Headline — dense LP, build-only, single-thread<a class="headerlink" href="#headline-dense-lp-build-only-single-thread" title="Permanent link">&para;</a></h2>
+<p><img alt="dense LP build-only headline" loading="lazy" src="../../assets/benchmark.png" /></p>
+<p>Two panels: total time = <code>build()</code> + <code>solve()</code>, and peak memory.
+HiGHS is time-limited to 1 µs so the column reflects pure
+modelling-layer cost: what each tool spends turning Python into
+something HiGHS can chew on. polar-high and linopy run at
+<code>POLARS_MAX_THREADS=1</code> / <code>OMP_NUM_THREADS=1</code>. Pyomo is
+single-threaded by design.</p>
+<p>The dense LP that drives this figure (linopy's original model,
+restricted to LP):</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>min  Σ_{i,j} (2·x[i,j] + y[i,j])
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>s.t. x[i,j] - y[i,j] &gt;= i          for i,j ∈ {1,…,N}
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>     x[i,j] + y[i,j] &gt;= 0          for i,j ∈ {1,…,N}
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>     x, y &gt;= 0
+</span></code></pre></div>
+<p>Variables: <code>2·N²</code>. Constraints: <code>2·N²</code>. Closed-form optimum
+<code>obj = N²·(N+1)</code>, used as the cross-tool correctness anchor.</p>
+<p>At N=3000 (an 18 M-variable LP):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th style="text-align: right;">total time</th>
+<th style="text-align: right;">peak RSS</th>
+<th style="text-align: right;">p50 during solve</th>
+<th style="text-align: right;">post-trim</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>polar-high (save_memory=True)</td>
+<td style="text-align: right;">123 s</td>
+<td style="text-align: right;">13.4 GB</td>
+<td style="text-align: right;">10.4 GB</td>
+<td style="text-align: right;">5.5 GB</td>
+</tr>
+<tr>
+<td>linopy (io_api="lp")</td>
+<td style="text-align: right;">296 s</td>
+<td style="text-align: right;">22.4 GB</td>
+<td style="text-align: right;">2.0 GB</td>
+<td style="text-align: right;">5.9 GB</td>
+</tr>
+<tr>
+<td>Pyomo</td>
+<td style="text-align: right;">(caps at N=1000)</td>
+<td style="text-align: right;">4.6 GB at N=1000</td>
+<td style="text-align: right;">3.8 GB at N=1000</td>
+<td style="text-align: right;">1.8 GB at N=1000</td>
+</tr>
+</tbody>
+</table>
+<p>polar-high is roughly 2.4× faster than linopy and ~40 % lower peak
+RSS. The memory comparison depends on which column you read — see
+<em>Measuring memory</em> below for how to choose, and the <em>Two modes</em>
+section for the warm-restart trade-off this benchmark makes. Pyomo's
+per-coefficient Python overhead makes it unable to keep up past
+N≈1000 in our 10-minute timeout.</p>
+<h3 id="two-modes-regular-warm-restart-vs-save_memory-one-shot">Two modes: regular (warm-restart) vs <code>save_memory</code> (one-shot)<a class="headerlink" href="#two-modes-regular-warm-restart-vs-save_memory-one-shot" title="Permanent link">&para;</a></h3>
+<p>polar-high supports <strong>warm starts</strong> and <strong>re-solves</strong> off the same
+<code>Problem</code> (and via <code>WarmProblem</code> for incremental edits without
+rebuilding the matrix). That capability requires retaining the
+polars / numpy source-of-truth in memory through <code>solve()</code> and after
+it returns, <em>and</em> keeping the live <code>Highs</code> instance with its basis
+across calls. linopy and Pyomo don't retain a warm-restartable LP
+source either, so for an apples-to-apples comparison this benchmark
+calls</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">sol</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">save_memory</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span></code></pre></div>
+<p><code>save_memory=True</code> does two things, in order, right before the
+final <code>h.run()</code>:</p>
+<ol>
+<li><strong>Drops polar's Python LP source.</strong> Every term-side lazy plan,
+   every Param frame, the caller-side column-bound / cost arrays,
+   and the Python-side <code>col_names</code> / <code>row_names</code> lists are released
+   once HiGHS has copied them.</li>
+<li><strong>Disk-roundtrips HiGHS.</strong> The model is written to a temporary
+   MPS file, the original <code>Highs</code> instance is cleared and disposed,
+   <code>malloc_trim(0)</code> is called to return glibc's freed arenas to the
+   OS, and a fresh <code>Highs</code> is created and <code>readModel</code>'d from the
+   file. This costs ~+90 s wall time at N=3000 dense but eliminates
+   the allocator slack <code>addRows</code> leaves behind when fed a model
+   incrementally — net ~5 GB lower peak in full-HiGHS-solve cells.</li>
+</ol>
+<p>After return, a subsequent <code>Problem.solve()</code> raises a clear
+<code>RuntimeError</code>. WarmProblem-style updates are also unavailable
+(the original <code>Highs</code> with its basis is gone). <code>Solution.col_names</code>
+/ <code>row_names</code> are empty (HiGHS still has the names internally,
+reachable via <code>Solution.highs</code> if <code>keep_solver=True</code>); name-based
+lookups like <code>Solution.constraint_dual("...")</code> won't resolve. None
+of this matters for cold-start rolling-horizon loops or scenario
+sweeps where each step rebuilds the <code>Problem</code> from scratch — that
+remains the supported one-shot pattern.</p>
+<p>In <strong>regular mode</strong> (<code>save_memory=False</code>, the default), polar-high
+keeps the source-of-truth around so a follow-up <code>Problem.solve()</code>
+or <code>WarmProblem</code>-based update can pick up where the last one left
+off without rebuilding the matrix. The cost is the visible RSS
+retention shown in the side-by-side table below; the gain is a
+free <code>h.run()</code> re-solve from the previous basis.</p>
+<p><strong>Side-by-side at the headline cells (polar-high only):</strong></p>
+<table>
+<thead>
+<tr>
+<th>cell</th>
+<th>mode</th>
+<th style="text-align: right;">total time</th>
+<th style="text-align: right;">peak RSS</th>
+<th style="text-align: right;">p50</th>
+<th style="text-align: right;">post-trim</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>dense build-only N=3000</td>
+<td>regular</td>
+<td style="text-align: right;">72 s</td>
+<td style="text-align: right;">16.3 GB</td>
+<td style="text-align: right;">10.6 GB</td>
+<td style="text-align: right;">8.9 GB</td>
+</tr>
+<tr>
+<td>dense build-only N=3000</td>
+<td>save_memory</td>
+<td style="text-align: right;">123 s</td>
+<td style="text-align: right;">13.4 GB</td>
+<td style="text-align: right;">10.4 GB</td>
+<td style="text-align: right;">5.5 GB</td>
+</tr>
+<tr>
+<td>dense full-solve N=3000</td>
+<td>regular</td>
+<td style="text-align: right;">121 s</td>
+<td style="text-align: right;">38.0 GB</td>
+<td style="text-align: right;">18.2 GB</td>
+<td style="text-align: right;">9.3 GB</td>
+</tr>
+<tr>
+<td>dense full-solve N=3000</td>
+<td>save_memory</td>
+<td style="text-align: right;">235 s</td>
+<td style="text-align: right;">27.8 GB</td>
+<td style="text-align: right;">12.7 GB</td>
+<td style="text-align: right;">5.5 GB</td>
+</tr>
+<tr>
+<td>network N=10000 build-only</td>
+<td>regular</td>
+<td style="text-align: right;">50 s</td>
+<td style="text-align: right;">12.0 GB</td>
+<td style="text-align: right;">6.9 GB</td>
+<td style="text-align: right;">7.2 GB</td>
+</tr>
+<tr>
+<td>network N=10000 build-only</td>
+<td>save_memory</td>
+<td style="text-align: right;">92 s</td>
+<td style="text-align: right;">11.0 GB</td>
+<td style="text-align: right;">7.0 GB</td>
+<td style="text-align: right;">5.4 GB</td>
+</tr>
+</tbody>
+</table>
+<p><code>save_memory=True</code> is consistently slower (~1.6×–1.8×) and lower
+peak (3–10 GB depending on cell). The full-solve gap is the biggest
+because the disk roundtrip resets HiGHS's allocator slack, which
+matters most when HiGHS is doing real work. Headline tables above
+use <code>save_memory=True</code> so the cross-tool comparison is between
+similar one-shot LP-handoff patterns (linopy uses its own file
+roundtrip via <code>io_api="lp"</code>).</p>
+<h3 id="measuring-memory">Measuring memory<a class="headerlink" href="#measuring-memory" title="Permanent link">&para;</a></h3>
+<p>The benchmark records four memory metrics per cell. Pick the column
+that matches the question you're asking:</p>
+<table>
+<thead>
+<tr>
+<th>column</th>
+<th>what it measures</th>
+<th>when it's the right number</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>peak_rss_mb</code></td>
+<td><code>ru_maxrss</code> over the whole process</td>
+<td>how much RAM the machine must provision so the run doesn't OOM</td>
+</tr>
+<tr>
+<td><code>rss_solve_p50_mb</code></td>
+<td>median RSS while <code>solve()</code> runs (sampled at 25 ms cadence by a sidecar thread)</td>
+<td>steady-state working set during solve, transient setup spikes washed out</td>
+</tr>
+<tr>
+<td><code>rss_solve_p95_mb</code></td>
+<td>95th percentile of the same sampler</td>
+<td>tail of solve-time distribution; sits between p50 and peak</td>
+</tr>
+<tr>
+<td><code>rss_after_solve_trim_mb</code></td>
+<td>RSS right after <code>gc.collect()</code> + <code>malloc_trim(0)</code> once <code>solve()</code> returns</td>
+<td>what the process actually held, with glibc's freed-but-cached arenas returned to the OS</td>
+</tr>
+</tbody>
+</table>
+<p><code>peak_rss_mb</code> is the unavoidable peak — at the moment of peak
+consumption every allocated page is in use, so <code>malloc_trim(0)</code> is a
+no-op there. Trim only helps after deallocation, exposing how much of
+the apparent "still used" memory was actually freed but stuck in
+glibc's per-thread arena cache. linopy is particularly heavy on
+arena churn: at N=3000 it shows ~21 GB resident immediately
+post-solve, dropping to ~6 GB after <code>malloc_trim(0)</code> — roughly 15 GB
+of glibc-retained pages that aren't really "in use" but <code>ru_maxrss</code>
+counts them anyway.</p>
+<p><strong>How this differs from earlier versions of this page.</strong> Previous
+numbers reported a single "peak memory" column. We've since changed
+the measurement methodology to expose the breakdown above. The old
+headlines (12.7 GB for polar-high dense @ N=3000, 8.0 GB for
+network @ N=10000) tracked closer to the new <code>rss_solve_p50_mb</code>
+column than to <code>peak_rss_mb</code> — they captured steady-state during
+solve, not the unavoidable peak. The current tables use
+<code>peak_rss_mb</code> (the conservative provisioning figure) as the
+headline and report p50 / post-trim alongside so the comparison is
+explicit.</p>
+<h3 id="why-the-memory-comparison-between-tools-depends-on-the-column">Why the memory comparison between tools depends on the column<a class="headerlink" href="#why-the-memory-comparison-between-tools-depends-on-the-column" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Peak RSS</strong> captures any allocator-visible high-water mark,
+  including transient HiGHS-setup scratch. polar-high streams the
+  matrix family by family (each family's COO / CSR intermediates
+  are freed before the next family is built), so its peak comes in
+  below linopy's eager materialisation.</li>
+<li><strong>p50 (steady-state during solve)</strong> captures what's resident
+  during the bulk of HiGHS's time. Here linopy and polar-high (with
+  <code>save_memory=True</code>) are both low, because each tool serialises
+  the LP to a temp file before <code>h.run()</code> — linopy via <code>io_api="lp"</code>,
+  polar-high via the MPS roundtrip inside <code>save_memory</code>. The
+  Python-side polar residue is gone by the time HiGHS is in its
+  hot loop, and HiGHS's internal copy is what sits resident through
+  <code>h.run()</code>. polar-high's p50 is a couple of GB above linopy's
+  because polar-high keeps <code>Var.frame</code> metadata around for
+  <code>Solution.value()</code> lookups, while linopy retains nothing
+  Python-side after the LP file write.</li>
+<li><strong>Post-trim</strong> is roughly tied between the two columnar tools —
+  both tools' actual working set at end-of-solve is in the 5–6 GB
+  range at N=3000. The difference is <em>how much</em> allocator churn
+  each goes through to get there.</li>
+</ul>
+<p>Pyomo carries each LP coefficient as a small Python expression-tree
+node (a <code>VarData</code> reference plus a multiplier inside a
+<code>MonomialTermExpression</code>), roughly 100–200 bytes per coefficient
+once CPython overhead is accounted for. polar-high and linopy hold
+coefficients as contiguous Arrow / numpy buffers of ~16 bytes per
+nonzero. At 4 M nonzeros the representation difference compounds to
+the multi-GB gap that's visible against either columnar tool.</p>
+<p>The take-away: re-run on your own hardware and look at the column
+that matches your operational question. <em>Ratios</em> between tools are
+what's portable across machines — absolute peak numbers shift with
+glibc behaviour and free-memory pressure.</p>
+<h2 id="reproducing">Reproducing<a class="headerlink" href="#reproducing" title="Permanent link">&para;</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/nodal-tools/polar-high.git
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="nb">cd</span><span class="w"> </span>polar-high
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>benchmark/requirements.txt
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>python<span class="w"> </span>benchmark/run.py<span class="w">            </span><span class="c1"># ~10 min on a laptop</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>python<span class="w"> </span>benchmark/plot.py<span class="w">           </span><span class="c1"># writes docs/assets/benchmark*.png</span>
+</span></code></pre></div>
+<p><code>benchmark/run.py</code> accepts <code>--sizes</code>, <code>--tools</code>, <code>--threads</code>,
+<code>--repeats</code>, <code>--time-limit</code>. Each <code>(tool, N)</code> cell runs in a fresh
+subprocess so caches and Python state don't carry over. The plot
+takes the median across reps. See
+<a href="https://github.com/nodal-tools/polar-high/blob/main/benchmark/README.md"><code>benchmark/README.md</code></a>
+for the methodology details.</p>
+<h2 id="threading-defaults-and-where-it-matters">Threading: defaults and where it matters<a class="headerlink" href="#threading-defaults-and-where-it-matters" title="Permanent link">&para;</a></h2>
+<p>polar-high sets <code>POLARS_MAX_THREADS=1</code> at import. The data below
+shows why.</p>
+<h3 id="scaling-with-threads-at-small-n">Scaling with threads at small N<a class="headerlink" href="#scaling-with-threads-at-small-n" title="Permanent link">&para;</a></h3>
+<p><img alt="threads sweep at N=300, build-only" loading="lazy" src="../../assets/benchmark_threads.png" /></p>
+<p>At a small problem size (N=300) the build is too small to amortize
+Rayon's coordination overhead. <strong>All three tools are essentially
+flat</strong> across thread counts. polars's parallelism doesn't pay; linopy
+and Pyomo are single-threaded by design. polar-high's peak memory
+rises slightly with threads (per-thread scratch buffers, ~1.5 MB per
+thread on this LP) without a corresponding time win.</p>
+<h3 id="scaling-with-threads-on-a-larger-lp">Scaling with threads on a larger LP<a class="headerlink" href="#scaling-with-threads-on-a-larger-lp" title="Permanent link">&para;</a></h3>
+<p><img alt="threading benefit on the network LP" loading="lazy" src="../../assets/benchmark_threading_benefit.png" /></p>
+<p>On the network LP (irregular topology, T=168, see below), polar's
+threading does start paying as N grows, and grows steadily:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">N</th>
+<th style="text-align: right;">polar 1 thread</th>
+<th style="text-align: right;">polar 32 threads</th>
+<th style="text-align: right;">speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">100</td>
+<td style="text-align: right;">0.52 s</td>
+<td style="text-align: right;">0.50 s</td>
+<td style="text-align: right;">1.04×</td>
+</tr>
+<tr>
+<td style="text-align: right;">300</td>
+<td style="text-align: right;">1.94 s</td>
+<td style="text-align: right;">1.85 s</td>
+<td style="text-align: right;">1.05×</td>
+</tr>
+<tr>
+<td style="text-align: right;">1 000</td>
+<td style="text-align: right;">7.31 s</td>
+<td style="text-align: right;">6.56 s</td>
+<td style="text-align: right;">1.11×</td>
+</tr>
+<tr>
+<td style="text-align: right;">3 000</td>
+<td style="text-align: right;">25.7 s</td>
+<td style="text-align: right;">21.7 s</td>
+<td style="text-align: right;">1.18×</td>
+</tr>
+<tr>
+<td style="text-align: right;">10 000</td>
+<td style="text-align: right;">91.5 s</td>
+<td style="text-align: right;">77.7 s</td>
+<td style="text-align: right;"><strong>1.18×</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The speedup is more modest than it was with the previous benchmark
+configuration because <code>save_memory=True</code> adds a serial step (the
+MPS file write + read for the disk roundtrip) that doesn't benefit
+from threading — Amdahl's law in action. At threads=32, polar's
+peak RSS is ~6 % higher than at threads=1 (per-thread Rayon
+scratch). The takeaway:</p>
+<ul>
+<li><strong>Default threads=1</strong> is the right choice for typical workloads.
+  Faster <em>and</em> leaner on small/medium LPs; only modestly slower than
+  threads=32 even at large N.</li>
+<li><strong>Override to threads=N</strong> by setting <code>POLARS_MAX_THREADS</code> <em>before</em>
+  importing polar-high. Worth doing for genuinely large indexed LPs
+  where you've checked that the polars-side build is the bottleneck.</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nv">POLARS_MAX_THREADS</span><span class="o">=</span><span class="m">8</span><span class="w"> </span>python<span class="w"> </span>my_model.py
+</span></code></pre></div>
+<h2 id="network-lp-irregular-topology">Network LP: irregular topology<a class="headerlink" href="#network-lp-irregular-topology" title="Permanent link">&para;</a></h2>
+<p><img alt="network LP build-only at threads=1" loading="lazy" src="../../assets/benchmark_network.png" /></p>
+<p>The dense <code>N × N</code> headline above is the model linopy's benchmark
+uses, and it's flattering to xarray: every cell has the same shape,
+indexing is rectangular, and dense numpy arrays compress the
+coefficient matrix. Real indexed LPs (energy systems, supply chains)
+aren't shaped that way. They have <strong>irregular topology</strong>: flow
+variables on edges, balance constraints on nodes, with an edge→node
+lookup that varies per node.</p>
+<p>The network LP captures that:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>N nodes, E = 5·N edges drawn at random (Hamiltonian cycle + 4·N random),
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>T = 168 time steps (one week of hours)
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>vars     flow[e, t] &gt;= 0
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>cstr 1   flow[e, t] &lt;= cap[e, t]                                  ∀ (e, t)
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>cstr 2   Σ_{e: dst[e]=n} flow[e,t] − Σ_{e: src[e]=n} flow[e,t]
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>                                            == demand[n, t]       ∀ (n, t)
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>obj      min Σ cost[e] · flow[e, t]
+</span></code></pre></div>
+<p>The node-balance constraint requires an edge→node lookup. polar-high
+expresses this as a polars join (<code>Where(flow, edges_dst_n)</code>); linopy
+uses <code>flow.groupby(dst_array).sum()</code>; Pyomo precomputes
+<code>incoming[n]</code> adjacency dicts and iterates them. Each idiom is
+natural to its tool.</p>
+<p>At N=10 000 (≈ 8.4 M variables, ≈ 10 M constraints):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th style="text-align: right;">total time</th>
+<th style="text-align: right;">peak RSS</th>
+<th style="text-align: right;">p50 during solve</th>
+<th style="text-align: right;">post-trim</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>polar-high (save_memory=True)</td>
+<td style="text-align: right;">92 s</td>
+<td style="text-align: right;">11.0 GB</td>
+<td style="text-align: right;">7.0 GB</td>
+<td style="text-align: right;">5.4 GB</td>
+</tr>
+<tr>
+<td>linopy (io_api="lp")</td>
+<td style="text-align: right;">162 s</td>
+<td style="text-align: right;">13.2 GB</td>
+<td style="text-align: right;">1.6 GB</td>
+<td style="text-align: right;">4.0 GB</td>
+</tr>
+<tr>
+<td>Pyomo</td>
+<td style="text-align: right;">timed out at N=3000</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: right;">—</td>
+</tr>
+</tbody>
+</table>
+<p>polar wins on time (~1.8× faster) and on peak RSS (~17 % lower than
+linopy). The p50 column favours linopy because of its file-roundtrip
+trick — linopy serialises the LP to a temp file and HiGHS reads it
+back, so linopy's Python-side representation is gone by the time
+HiGHS is in its hot loop. polar-high does an analogous MPS
+roundtrip under <code>save_memory=True</code> but still keeps its <code>Var.frame</code>
+metadata for <code>Solution.value()</code> lookups — slightly more residual
+than linopy's pure file-handoff. Pyomo can't finish at this scale
+inside our 10-minute timeout.</p>
+<h2 id="replication-linopys-original-benchmark-format">Replication: linopy's original benchmark format<a class="headerlink" href="#replication-linopys-original-benchmark-format" title="Permanent link">&para;</a></h2>
+<p><img alt="linopy-format 3-panel replication" loading="lazy" src="../../assets/benchmark_replication.png" /></p>
+<p>This is the same dense LP at threads=1 in the linopy benchmark's
+original three-panel format: build / solve / memory shown
+separately, with the <strong>full HiGHS solve</strong> included (no time limit).
+We include it for direct visual comparison with linopy's published
+numbers and as the methodology footnote.</p>
+<p><strong>Caveat: read with care.</strong> The <code>build()</code> / <code>solve()</code> split is <em>not</em>
+an apples-to-apples decomposition across tools. Each library draws
+the boundary in a different place:</p>
+<ul>
+<li><strong>polar-high's <code>build()</code></strong> registers metadata only. The matrix
+  assembly happens inside <code>solve()</code> alongside the HiGHS call.</li>
+<li><strong>linopy's <code>build()</code></strong> materialises xarray coefficient arrays
+  eagerly; <code>solve()</code> writes them to an LP file and hands it to
+  HiGHS.</li>
+<li><strong>Pyomo's <code>build()</code></strong> instantiates <code>VarData</code> / <code>ConstraintData</code> /
+  <code>MonomialTermExpression</code> Python objects per coefficient. Most of
+  the work happens here; <code>solve()</code> walks the expression tree to
+  emit the LP.</li>
+</ul>
+<p>So when you compare the <em>build column</em> between tools, you're
+comparing what each tool <em>chose</em> to put in <code>build()</code>. The
+apples-to-apples cross-tool measurement is <code>build() + solve()</code>,
+which is the headline figure at the top of this page.</p>
+<p>That said, the replication is faithful: the closed-form objective is
+hit exactly, the model is the same LP, and HiGHS solves the same
+sparse matrix. linopy's numbers reproduce within run-to-run noise.</p>
+<h2 id="fairness-caveats">Fairness caveats<a class="headerlink" href="#fairness-caveats" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Each tool builds the LP in its own natural style; the closed-form
+  objective (or cross-tool agreement on the network LP) confirms
+  they're all solving the same problem.</li>
+<li>Pyomo's solve uses the <strong><code>appsi_highs</code></strong> persistent-solver
+  interface, the fastest Pyomo→HiGHS path. The file-based
+  <code>SolverFactory("highs")</code> route would inflate Pyomo's solve time
+  with LP-write/reread overhead.</li>
+<li>linopy uses <strong><code>io_api="lp"</code></strong> explicitly: the configuration where
+  our <code>time_limit</code> short-circuit reliably reaches HiGHS for the
+  build-only test. linopy's <code>io_api="direct"</code> is faster on full
+  solves but interacts awkwardly with the time-limit short-circuit.</li>
+<li>polar-high's solve calls into <code>highspy</code> directly with no
+  intermediate file in either configuration.</li>
+<li>HiGHS itself stays at 1 thread across all tools, so the solve
+  column remains apples-to-apples.</li>
+<li>Each <code>(tool, N)</code> cell runs in a fresh Python process, so caches
+  and memory don't carry over between cells. Python startup costs
+  ~50 ms per cell, negligible at our sizes.</li>
+<li>One machine, one Python version, one HiGHS version. Re-run on your
+  own hardware before reading too much into the absolute numbers;
+  the <em>ratios</em> between tools are what's portable.</li>
+</ul>
+<h2 id="whats-not-in-the-benchmark">What's not in the benchmark<a class="headerlink" href="#whats-not-in-the-benchmark" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>MIP</strong>, <strong>QP</strong>, <strong>warm starts</strong>, and <strong>Lagrangian decomposition</strong>.
+  The benchmark deliberately exercises the matrix-assembly path on
+  plain LPs.</li>
+<li><strong>JuMP</strong> and <strong>gurobipy</strong>. Both have toolchain or licence friction
+  that defeats "anyone can re-run from a clean <code>pip install</code>".</li>
+</ul>
+<p>If you'd like a different model class (block-angular, time-coupled,
+mixed-integer with branching) in the benchmark, open an issue. The
+runner is a small enough surface to extend.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.indexes", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
