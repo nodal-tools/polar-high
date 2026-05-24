@@ -155,6 +155,27 @@ def _recommend_user_bound_scale(
         dl = math.floor(math.log2(ratio))
     else:
         dl = math.ceil(math.log2(ratio))
+
+    # Min-floor guard: refuse to scale when the proposed delta would
+    # drive the smallest nonzero magnitude (column-bound or RHS) below
+    # ``kExcessivelySmallBoundValue``.  HiGHS' own suggestScaling formula
+    # looks only at the max and is happy to crush a wide-spread model's
+    # min below the threshold — but HiGHS' presolve then mis-handles
+    # those rows as numerically zero and can falsely flag the LP as
+    # infeasible.  Observed on the full-year Rivendell B0 LP
+    # (RHS=(1.84e-3, 2.02e+8) -> N=-8 -> scaled RHS min 7.2e-6, below
+    # 1e-4 -> presolve infeasibility, even though the LP solves cleanly
+    # at N=0 with presolve off).  HiGHS does not scale internally when
+    # we return 0; the warning is preferable to a false infeasibility.
+    if dl < 0:
+        bound_min = bound_range[0] if bound_range is not None else math.inf
+        rhs_min = rhs_range[0] if rhs_range is not None else math.inf
+        min_b = min(bound_min, rhs_min)
+        if math.isfinite(min_b) and min_b > 0:
+            scaled_min = min_b * (2.0 ** dl)
+            if scaled_min < _HIGHS_SMALL_BOUND:
+                return int(current_user_bound_scale)
+
     n = int(current_user_bound_scale) + int(dl)
     if n < _USER_BOUND_SCALE_CLAMP_LO:
         n = _USER_BOUND_SCALE_CLAMP_LO
