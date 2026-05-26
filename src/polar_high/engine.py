@@ -1393,6 +1393,25 @@ class Problem:
                     except TypeError:
                         # polars < 1.x used the streaming=True kwarg.
                         j = _plan.collect(streaming=True)
+                    if j.height != row_count:
+                        dup_rids = (
+                            j.group_by("_rid")
+                            .agg(pl.len().alias("__n"))
+                            .filter(pl.col("__n") > 1)
+                            .sort("_rid")
+                            .head(5)["_rid"]
+                            .to_list()
+                        )
+                        sample = (
+                            j.filter(pl.col("_rid").is_in(dup_rids))
+                            .select(*on, "_rid", "value")
+                            .head(10)
+                        )
+                        raise ValueError(
+                            f"constraint {name!r}: rhs Param has duplicate keys on "
+                            f"{on!r} — left join from row_index (rows={row_count}) "
+                            f"produced {j.height} rows. Sample duplicates:\n{sample}"
+                        )
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -1828,6 +1847,25 @@ class Problem:
                     except TypeError:
                         # polars < 1.x used the streaming=True kwarg.
                         j = _plan.collect(streaming=True)
+                    if j.height != row_count:
+                        dup_rids = (
+                            j.group_by("_rid")
+                            .agg(pl.len().alias("__n"))
+                            .filter(pl.col("__n") > 1)
+                            .sort("_rid")
+                            .head(5)["_rid"]
+                            .to_list()
+                        )
+                        sample = (
+                            j.filter(pl.col("_rid").is_in(dup_rids))
+                            .select(*on, "_rid", "value")
+                            .head(10)
+                        )
+                        raise ValueError(
+                            f"constraint {name!r}: rhs Param has duplicate keys on "
+                            f"{on!r} — left join from row_index (rows={row_count}) "
+                            f"produced {j.height} rows. Sample duplicates:\n{sample}"
+                        )
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -3055,6 +3093,25 @@ class WarmProblem:
                     except TypeError:
                         # polars < 1.x used the streaming=True kwarg.
                         j = _plan.collect(streaming=True)
+                    if j.height != row_count:
+                        dup_rids = (
+                            j.group_by("_rid")
+                            .agg(pl.len().alias("__n"))
+                            .filter(pl.col("__n") > 1)
+                            .sort("_rid")
+                            .head(5)["_rid"]
+                            .to_list()
+                        )
+                        sample = (
+                            j.filter(pl.col("_rid").is_in(dup_rids))
+                            .select(*on, "_rid", "value")
+                            .head(10)
+                        )
+                        raise ValueError(
+                            f"constraint {name!r}: rhs Param has duplicate keys on "
+                            f"{on!r} — left join from row_index (rows={row_count}) "
+                            f"produced {j.height} rows. Sample duplicates:\n{sample}"
+                        )
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
