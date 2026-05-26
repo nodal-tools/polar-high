@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.0.0] — 2026-05-26
+
+Headline: much-improved automatic LP scaling via a new
+`polar_high.autoscale` package. The previous one-shot
+`auto_user_bound_scale=True` constructor flag is **retired** and
+replaced by a richer caller-driven API that detects bound / cost /
+RHS / matrix ranges and recommends `user_bound_scale` and
+`user_objective_scale` exponents independently. The new path also
+adds a min-floor guard that catches a class of false-infeasibility
+results HiGHS' own `suggestScaling` can produce on wide-spread LPs.
+
+### Added — autoscale
+
+- `polar_high.autoscale` package with three pieces:
+  - `detect_ranges(problem_or_solution, config)` returns a
+    `RangeReport` with the four `(abs_min, abs_max)` tuples
+    (`matrix`, `cost`, `col_bound`, `row_bound`) plus per-category
+    samples of smallest / largest contributors, usable on a built
+    `Problem` *or* on a returned `Solution` (re-uses
+    `Solution.streamed_lp_ranges` when available).
+  - `recommend_scaling(ranges, config)` returns a `Layer3Plan` with
+    `user_bound_scale` and `user_objective_scale` integer exponents,
+    derived from HiGHS' own `suggestScaling` formula. Preserves the
+    geometric-centering escape branch for severe asymmetric-bound
+    LPs (the historical Rivendell-fix path), now guarded by a
+    min-floor check (see *Fixed*).
+  - `ScalingMode` enum (`OFF` / `SOLVER_ONLY` / `BASIC` / `FULL`)
+    with helper predicates so library callers can decide policy per
+    mode rather than per-call kwarg.
+- Precedence check: an axis whose `user_*_scale` is already set by
+  the caller (via `set_solver_options` or per-call `options=`) is
+  skipped by `recommend_scaling`. The caller's explicit value always
+  wins.
+- `Problem.set_solver_option(name, value)` and
+  `Problem.get_solver_option(name)` accessors as the clean surface
+  the precedence check reads from.
+
+### Removed (breaking)
+
+- `Problem(auto_user_bound_scale: bool = ...)` constructor option.
+  The flag's one-shot, col-bound-only heuristic is superseded by
+  `autoscale.recommend_scaling()`, which considers all four ranges
+  independently and is configurable per-mode. Callers should:
+  1. Build the `Problem` as before.
+  2. Call `detect_ranges(p, config)` and then `recommend_scaling(
+     ranges, config)` for the chosen `ScalingMode`.
+  3. Apply the returned `Layer3Plan` via `Problem.set_solver_option`.
+  See the autoscale package docstring for the migration pattern.
+- The internal `_recommend_user_bound_scale` helper that backed the
+  retired flag.
+
+### Fixed
+
+- **False-infeasibility from over-aggressive scaling.** When HiGHS'
+  own `suggestScaling` looks only at the *max* of `(bound_max,
+  rhs_max)`, it can pick a `user_bound_scale` exponent that crushes
+  the *min* below `kExcessivelySmallBoundValue` (1e-4). HiGHS'
+  presolve then mis-handles the near-zero rows and the LP comes
+  back infeasible. Observed on the full-year Rivendell B0 LP with
+  RHS=(1.84e-3, 2.02e+8): the formula picked N=-8 → scaled RHS min
+  7.2e-6 → spurious infeasibility. The new `recommend_scaling`
+  adds a min-floor guard: when the proposed delta would drag the
+  scaled min below the threshold, the current scale is returned
+  unchanged.
+- **Duplicate-key rhs Param fan-out.** The left-join from
+  `row_index` against an upstream Param with duplicate `(on=)` keys
+  used to surface as an opaque
+  `ValueError: operands could not be broadcast together with shapes
+  (X,) (Y,)` deep inside the solver adapter. `_build_lp_arrays`
+  (and the chunked / WarmProblem variants) now raise immediately
+  at the join boundary, naming the offending constraint plus a
+  sample of the duplicate keys.
+- **`--highs-threads N>1` silently ignored.** HiGHS'
+  `setOptionValue("threads", N)` is a no-op once the global Rayon
+  scheduler has been initialised (which happens at default
+  `threads=16`). We now call `Highs.resetGlobalScheduler(False)`
+  before applying the user's options so the requested thread count
+  actually takes effect.
+
+### Notes
+
+- The 1.5.x releases (sidecar RSS sampler, `save_memory=True`
+  one-shot mode, chunked LP-range accumulator) are subsumed under
+  2.0.0; their entries remain below as the detailed history.
+
 ## [1.5.1] — 2026-05-24
 
 ### Changed
