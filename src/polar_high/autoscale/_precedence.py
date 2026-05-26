@@ -13,12 +13,13 @@ The check operates on :meth:`polar_high.Problem.get_solver_option`
 ``Problem._solver_options`` directly for callers that wrap a duck-typed
 problem.  Either path yields the same answer.
 """
+
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
-def get_explicit_option(problem: Any, option_name: str) -> Optional[Any]:
+def get_explicit_option(problem: Any, option_name: str) -> Any | None:
     """Return the caller-set value for ``option_name`` on ``problem``.
 
     Priority:

@@ -23,16 +23,17 @@ The same magnitude reduction (``finite & non-zero & |val|``) is used
 across all three so the four ranges agree bit-for-bit with what HiGHS
 itself prints in its "Coefficient ranges" block — by construction.
 """
+
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any
 
 import numpy as np
 
 from ._config import ScalingConfig
-
 
 # Sentinel for "category has zero non-zero finite entries".  Reported as
 # ``(nan, nan)`` per the spec; downstream code that wants to treat the
@@ -78,7 +79,7 @@ class RangeReport:
 
 
 def _abs_finite_nonzero_min_max(
-    arrays: Iterable[Optional[np.ndarray]],
+    arrays: Iterable[np.ndarray | None],
 ) -> tuple[float, float]:
     """Reduce a sequence of arrays to ``(min |a|, max |a|)`` over their
     finite, non-zero entries.
@@ -149,9 +150,7 @@ def _build_report(
     threshold = 10.0 ** float(config.threshold_decades)
     per_group_max = max(_ratio(g) for g in groups)
     cross_for_trigger = 0.0 if math.isnan(cross) else cross
-    trigger = bool(
-        per_group_max > threshold or cross_for_trigger > threshold
-    )
+    trigger = bool(per_group_max > threshold or cross_for_trigger > threshold)
 
     return RangeReport(
         matrix=matrix,
@@ -165,12 +164,12 @@ def _build_report(
 
 def ranges_from_arrays(
     *,
-    matrix_values: Optional[np.ndarray],
-    cost: Optional[np.ndarray],
-    col_lower: Optional[np.ndarray],
-    col_upper: Optional[np.ndarray],
-    row_lower: Optional[np.ndarray],
-    row_upper: Optional[np.ndarray],
+    matrix_values: np.ndarray | None,
+    cost: np.ndarray | None,
+    col_lower: np.ndarray | None,
+    col_upper: np.ndarray | None,
+    row_lower: np.ndarray | None,
+    row_upper: np.ndarray | None,
     config: ScalingConfig,
 ) -> RangeReport:
     """Compute a :class:`RangeReport` directly from LP arrays.
@@ -198,7 +197,7 @@ def ranges_from_arrays(
 
 
 def ranges_from_streamed(
-    streamed: dict[str, Optional[tuple[float, float]]],
+    streamed: dict[str, tuple[float, float] | None],
     config: ScalingConfig,
 ) -> RangeReport:
     """Adapt a polar-high ``Solution.streamed_lp_ranges`` dict.
@@ -266,13 +265,16 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         _row_names,
         _n_rows,
     ) = problem._build_lp_arrays(
-        n_cols=n_cols, col_lb=col_lb, col_ub=col_ub,
+        n_cols=n_cols,
+        col_lb=col_lb,
+        col_ub=col_ub,
     )
 
     # The objective vector — built inline in ``_solve_passmodel`` /
     # ``_solve_streaming``; mirror that walk here.
     col_obj = np.zeros(n_cols, dtype=np.float64)
     import polars as pl  # local import — autoscale must not pull polars
+
     # at import time for environments that don't need this fallback.
     for t in problem._obj_terms:
         if t.lazy is None:
@@ -291,6 +293,7 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     # HiGHS uses 1e30 as the kHighsInf value; treat anything at that
     # magnitude as "unbounded" for range purposes.
     import highspy
+
     inf_sentinel = float(highspy.kHighsInf)
 
     def _strip_inf(a: np.ndarray) -> np.ndarray:

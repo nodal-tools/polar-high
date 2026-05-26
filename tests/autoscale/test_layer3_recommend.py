@@ -24,14 +24,12 @@ documented branches of :func:`recommend_scaling`:
 * **Clamp** — an input that would yield ``N=-50`` is clamped to
   ``-30`` (HiGHS' option-range floor).
 """
+
 from __future__ import annotations
 
 import math
 
-import pytest
-
 from polar_high.autoscale import (
-    Layer3Plan,
     RangeReport,
     ScalingConfig,
     recommend_scaling,

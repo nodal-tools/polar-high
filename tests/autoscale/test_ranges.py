@@ -16,6 +16,7 @@ The LP is built three ways to exercise every Layer 1 entry point:
 The three reports must agree bit-for-bit — same magnitude reduction,
 same trigger.
 """
+
 from __future__ import annotations
 
 import math

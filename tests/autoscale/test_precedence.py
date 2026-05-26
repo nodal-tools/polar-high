@@ -7,6 +7,7 @@ When the caller has already set ``user_bound_scale`` or
 respect that value and skip its own recommendation *for that axis only*.
 The other axis still auto-recommends.
 """
+
 from __future__ import annotations
 
 import math
@@ -14,7 +15,6 @@ import math
 import polars as pl
 
 from polar_high.autoscale import (
-    Layer3Plan,
     RangeReport,
     ScalingConfig,
     apply_scaling,

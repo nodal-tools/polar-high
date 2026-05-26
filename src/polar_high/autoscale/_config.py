@@ -14,15 +14,12 @@ in the FlexTool repo; polar-high knows nothing about it.  ``BASIC`` /
 library caller that doesn't model Layer 2 can still use ``BASIC`` to
 mean "Layer 1 + Layer 3 only".
 """
+
 from __future__ import annotations
 
-import math
-import os
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Optional
-
 
 # Default trigger threshold: any single-group or cross-group max/min
 # ratio greater than ``10 ** _DEFAULT_THRESHOLD_DECADES`` is considered
@@ -37,7 +34,7 @@ USER_SCALE_CLAMP_LO: int = -30
 USER_SCALE_CLAMP_HI: int = 30
 
 
-class ScalingMode(str, Enum):
+class ScalingMode(StrEnum):
     """Autoscaler policy modes.
 
     The library uses these as named buckets; specific callers decide
@@ -125,9 +122,9 @@ class ScalingConfig:
 
     mode: ScalingMode = ScalingMode.BASIC
     threshold_decades: float = _DEFAULT_THRESHOLD_DECADES
-    user_bound_scale: Optional[int] = None
-    user_objective_scale: Optional[int] = None
-    report_yaml_path: Optional[Path] = None
+    user_bound_scale: int | None = None
+    user_objective_scale: int | None = None
+    report_yaml_path: Path | None = None
 
 
 __all__ = [

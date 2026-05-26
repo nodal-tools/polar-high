@@ -32,6 +32,7 @@ crushing the small end below ``_HIGHS_SMALL_BOUND`` (presolve
 false-infeasibility risk), so we replace the refusal with geometric
 centering of the bound range over HiGHS' comfort zone.
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,7 +47,6 @@ from ._config import (
 )
 from ._precedence import get_explicit_option, has_explicit_option
 from ._ranges import RangeReport
-
 
 _logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ def _recommend_bound_scale(
     # Rivendell-safe behaviour) and the geometric-centering escape
     # (the H2_trade-safe behaviour).
     if dl < 0 and math.isfinite(min_b) and min_b > 0.0:
-        scaled_min = min_b * (2.0 ** dl)
+        scaled_min = min_b * (2.0**dl)
         if scaled_min < _HIGHS_SMALL_BOUND:
             if max_b >= _HIGHS_LARGE_BOUND * _SEVERE_LARGE_OVERSHOOT:
                 # D's escape: geometric centering over the comfort zone.
@@ -268,7 +268,8 @@ def recommend_scaling(
         else:
             obj_skipped_external = True
             _logger.info(
-                "respecting external user_objective_scale=%d", n_obj,
+                "respecting external user_objective_scale=%d",
+                n_obj,
             )
     elif config.user_objective_scale is not None:
         n_obj = _clamp(int(config.user_objective_scale))
@@ -294,7 +295,8 @@ def recommend_scaling(
             bnd_skipped_external = True
             reasoning_bnd_tag = "external"
             _logger.info(
-                "respecting external user_bound_scale=%d", n_bnd,
+                "respecting external user_bound_scale=%d",
+                n_bnd,
             )
     elif config.user_bound_scale is not None:
         n_bnd = _clamp(int(config.user_bound_scale))
@@ -324,16 +326,12 @@ def recommend_scaling(
         if n_obj == 0 and n_bnd == 0:
             reasoning = f"in-zone (bound={reasoning_bnd_tag})"
         else:
-            reasoning = (
-                f"auto (N_obj={n_obj}, N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})"
-            )
+            reasoning = f"auto (N_obj={n_obj}, N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})"
     else:
         # Mixed: at least one axis is external/manual.  Always surface
         # the auto value too, so the audit shows what the autoscaler
         # would have picked for the non-overridden axis.
-        parts.append(
-            f"auto (N_obj={n_obj}, N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})"
-        )
+        parts.append(f"auto (N_obj={n_obj}, N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})")
         reasoning = "; ".join(parts)
 
     return Layer3Plan(

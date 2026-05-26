@@ -21,6 +21,7 @@ The legacy ``polar_high.engine._recommend_user_bound_scale`` and the
 ``auto_user_bound_scale=True`` default path on :class:`Problem` have
 been retired in favour of this package.
 """
+
 from ._config import (
     USER_SCALE_CLAMP_HI,
     USER_SCALE_CLAMP_LO,

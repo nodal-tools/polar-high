@@ -1674,9 +1674,7 @@ class Problem:
         # tear the global down BEFORE the option loop so the new value
         # takes effect.  ``resetGlobalScheduler(False)`` is a safe no-op
         # when no scheduler is active.
-        _wants_threads = opts is not None and (
-            "threads" in opts or "parallel" in opts
-        )
+        _wants_threads = opts is not None and ("threads" in opts or "parallel" in opts)
         if _wants_threads:
             try:
                 h.resetGlobalScheduler(False)

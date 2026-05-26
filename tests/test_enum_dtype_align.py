@@ -17,7 +17,6 @@ import pytest
 from polar_high import Param, Problem
 from polar_high.engine import _align_enum_join_keys
 
-
 # -- helper: direct unit tests ------------------------------------------
 
 
@@ -104,9 +103,7 @@ def test_lazyframe_inputs_return_lazy():
     narrow = pl.Enum(["a", "b"])
     wide = pl.Enum(["a", "b", "c"])
     left = pl.DataFrame({"k": pl.Series(["a", "b"], dtype=narrow), "v": [1, 2]}).lazy()
-    right = pl.DataFrame(
-        {"k": pl.Series(["a", "b", "c"], dtype=wide), "w": [10, 20, 30]}
-    ).lazy()
+    right = pl.DataFrame({"k": pl.Series(["a", "b", "c"], dtype=wide), "w": [10, 20, 30]}).lazy()
     l2, r2 = _align_enum_join_keys(left, right, ["k"])
     assert isinstance(l2, pl.LazyFrame)
     assert isinstance(r2, pl.LazyFrame)
