@@ -1008,6 +1008,31 @@ class Problem:
         Unknown keys are tolerated (a warning is emitted at solve time)."""
         self._solver_options = dict(options) if options else None
 
+    def set_solver_option(self, name: str, value) -> None:
+        """Set a single HiGHS option, leaving the rest untouched.
+
+        Convenience for callers that want to add one knob without
+        re-passing the whole dict (e.g. ``user_bound_scale`` set by
+        the autoscaler).  Equivalent to a dict merge plus
+        :meth:`set_solver_options`.
+        """
+        opts = dict(self._solver_options) if self._solver_options else {}
+        opts[name] = value
+        self._solver_options = opts
+
+    def get_solver_option(self, name: str):
+        """Return the caller-set value of ``name`` (or ``None`` if unset).
+
+        Reads ``self._solver_options`` only — does NOT consult HiGHS
+        (the option may not have been pushed to a live ``Highs``
+        instance yet).  Returns ``None`` for unset options so callers
+        can use ``if get_solver_option(...) is not None`` to test
+        explicit setting.
+        """
+        if not self._solver_options:
+            return None
+        return self._solver_options.get(name)
+
     # -- variables -------------------------------------------------------
 
     def add_var(
