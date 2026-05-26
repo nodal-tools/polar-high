@@ -60,7 +60,10 @@ def _skip_if_copt_unreachable(solver_name: str) -> None:
     """
     if solver_name == "copt" and "highspy" in sys.modules and shutil.which("copt_cmd") is None:
         pytest.skip(
-            "COPT auto-routes to copt_cmd when highspy is loaded; binary not on PATH in this venv."
+            "COPT auto-routes to copt_cmd CLI when highspy is loaded (in-process "
+            "COPT/HiGHS conflict); copt_cmd not on PATH in this venv.  Having "
+            "the Python `coptpy` wrapper installed is insufficient for this "
+            "case — the full COPT installer ships `copt_cmd`."
         )
 
 
@@ -220,7 +223,12 @@ _MPS_PARITY = _mps_parity_candidates()
 
 @pytest.mark.skipif(
     not _MPS_PARITY,
-    reason="no solver has both its Python wrapper and CLI binary available",
+    reason=(
+        "no solver has BOTH the Python wrapper installed AND the corresponding "
+        "CLI binary on PATH — the parity check needs both to compare them on "
+        "the same machine.  Wrapper-only setups still get MPS-write coverage "
+        "via tests/test_mps_fallback_wrapper.py."
+    ),
 )
 @pytest.mark.parametrize("solver_name", _MPS_PARITY)
 def test_mps_fallback_matches_direct(solver_name: str) -> None:

@@ -111,7 +111,16 @@ def test_mps_lp_mode_not_implemented() -> None:
         solve(pb, io_api=IOMode.LP)
 
 
-@pytest.mark.skipif(shutil.which("gurobi_cl") is None, reason="gurobi_cl not on PATH")
+@pytest.mark.skipif(
+    shutil.which("gurobi_cl") is None,
+    reason=(
+        "gurobi_cl CLI binary not on PATH — this test exercises the shell-out "
+        "MPS path (writes MPS, invokes `gurobi_cl model.mps`).  The Python "
+        "wrapper `gurobipy` alone is insufficient; the full Gurobi installer "
+        "ships `gurobi_cl`.  Wrapper-driven coverage is in "
+        "tests/test_mps_fallback_wrapper.py."
+    ),
+)
 def test_gurobi_cl_mps_path() -> None:
     """Round-trip a tiny LP through ``gurobi_cl``.  Skipped on clean CI."""
     pb = _tiny_lp()
@@ -121,7 +130,16 @@ def test_gurobi_cl_mps_path() -> None:
     assert abs(result.objective - 3.0) < 1e-6
 
 
-@pytest.mark.skipif(shutil.which("cplex") is None, reason="cplex not on PATH")
+@pytest.mark.skipif(
+    shutil.which("cplex") is None,
+    reason=(
+        "cplex CLI binary (the interactive optimizer) not on PATH — this test "
+        "exercises the shell-out MPS path.  The Python wrapper `cplex` alone "
+        "is insufficient; the full IBM CPLEX Studio installer ships the "
+        "`cplex` binary.  Wrapper-driven coverage is in "
+        "tests/test_mps_fallback_wrapper.py."
+    ),
+)
 def test_cplex_cli_mps_path() -> None:
     """Round-trip a tiny LP through CPLEX's interactive optimizer."""
     pb = _tiny_lp()
@@ -131,7 +149,15 @@ def test_cplex_cli_mps_path() -> None:
     assert abs(result.objective - 3.0) < 1e-6
 
 
-@pytest.mark.skipif(shutil.which("optimizer") is None, reason="xpress 'optimizer' not on PATH")
+@pytest.mark.skipif(
+    shutil.which("optimizer") is None,
+    reason=(
+        "xpress `optimizer` CLI binary not on PATH — this test exercises the "
+        "shell-out MPS path.  The Python wrapper `xpress` alone is "
+        "insufficient; the full FICO Xpress installer ships `optimizer`.  "
+        "Wrapper-driven coverage is in tests/test_mps_fallback_wrapper.py."
+    ),
+)
 def test_xpress_optimizer_mps_path() -> None:
     """Round-trip a tiny LP through Xpress' ``optimizer`` console."""
     pb = _tiny_lp()
@@ -141,7 +167,17 @@ def test_xpress_optimizer_mps_path() -> None:
     assert abs(result.objective - 3.0) < 1e-6
 
 
-@pytest.mark.skipif(shutil.which("copt_cmd") is None, reason="copt_cmd not on PATH")
+@pytest.mark.skipif(
+    shutil.which("copt_cmd") is None,
+    reason=(
+        "copt_cmd CLI binary not on PATH — this test exercises the shell-out "
+        "MPS path.  COPT additionally *requires* copt_cmd (not just the "
+        "`coptpy` wrapper) whenever highspy is loaded, due to the COPT/HiGHS "
+        "in-process conflict documented in `solvers/_copt.py`.  Wrapper-only "
+        "COPT testing is in tests/test_mps_fallback_wrapper.py for the cases "
+        "where highspy is not co-resident."
+    ),
+)
 def test_copt_cmd_mps_path() -> None:
     """Round-trip a tiny LP through ``copt_cmd``."""
     pb = _tiny_lp()

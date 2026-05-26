@@ -32,8 +32,12 @@ pytest.importorskip("scipy")
 # an unhelpful message.
 if "highspy" in sys.modules and shutil.which("copt_cmd") is None:
     pytest.skip(
-        "copt_cmd not on PATH; required when highspy is loaded "
-        "(COPT/HiGHS in-process conflict — see solvers/_copt.py docstring).",
+        "copt_cmd CLI binary not on PATH.  When highspy is loaded alongside "
+        "coptpy (the normal polar_high test run), the COPT adapter cannot "
+        "use the in-process `coptpy` API due to a native-symbol conflict and "
+        "auto-routes through `copt_cmd` instead — so the CLI binary is "
+        "required even though the Python wrapper is installed.  Full COPT "
+        "installer ships `copt_cmd`.  See solvers/_copt.py docstring.",
         allow_module_level=True,
     )
 
