@@ -1732,6 +1732,25 @@ class Problem:
         # mirrors the non-streaming path (``presolve`` and friends must
         # be set before HiGHS sees the LP to take effect on run()).
         opts = options if options is not None else self._solver_options
+        # HiGHS lazily initialises a process-global thread scheduler on
+        # the first Highs construction with whatever ``threads`` default
+        # is in force (typically ``getRunningHardwareThreads()`` =
+        # however many cores the box has).  Setting ``threads`` to a
+        # different value AFTER that point fails with "global scheduler
+        # has already been initialized to use N threads".  If the
+        # caller has passed an explicit ``threads`` (or ``parallel`` —
+        # the same scheduler is consulted for parallel-on dispatch),
+        # tear the global down BEFORE the option loop so the new value
+        # takes effect.  ``resetGlobalScheduler(False)`` is a safe no-op
+        # when no scheduler is active.
+        _wants_threads = opts is not None and (
+            "threads" in opts or "parallel" in opts
+        )
+        if _wants_threads:
+            try:
+                h.resetGlobalScheduler(False)
+            except Exception:
+                pass
         if opts:
             import warnings
 
@@ -2206,6 +2225,14 @@ class Problem:
                         pass
 
                 h = highspy.Highs()
+                # See the addCols-time block above — same rationale:
+                # tear the global scheduler down before re-applying
+                # ``threads`` / ``parallel`` on the fresh Highs.
+                if opts and ("threads" in opts or "parallel" in opts):
+                    try:
+                        h.resetGlobalScheduler(False)
+                    except Exception:
+                        pass
                 # Re-apply the same solver options that were set on the
                 # original Highs — they live on the C++ instance, not
                 # on the MPS file, so the fresh Highs would otherwise
@@ -3502,6 +3529,14 @@ class WarmProblem:
 
         h = highspy.Highs()
         opts = options if options is not None else p._solver_options
+        # See the streaming-solve block — tear the global scheduler
+        # down before re-applying ``threads`` / ``parallel`` on the
+        # warm-built Highs.
+        if opts and ("threads" in opts or "parallel" in opts):
+            try:
+                h.resetGlobalScheduler(False)
+            except Exception:
+                pass
         if opts:
             import warnings
 
