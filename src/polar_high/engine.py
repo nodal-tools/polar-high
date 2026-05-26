@@ -1268,6 +1268,59 @@ class Problem:
             highs=sol_highs,
         )
 
+    def build_only(
+        self,
+        mps_path: str,
+        *,
+        options: dict | None = None,
+    ) -> None:
+        """Build the LP into HiGHS, write to ``mps_path``, release everything.
+
+        For callers that want to drive the actual solve out-of-process —
+        typically a subprocess HiGHS reading the MPS file in a clean
+        address space.  After this call:
+
+        * ``mps_path`` exists and contains the LP in MPS format.
+        * polar-side LP source-of-truth has been dropped
+          (:meth:`_release_python_lp_inputs`).
+        * The live :class:`highspy.Highs` instance has been torn down
+          and the glibc allocator trimmed (Linux best-effort).
+        * ``self._released`` is True — further calls to :meth:`solve`
+          will raise.
+
+        What stays alive: ``self._vars`` and each :class:`Var.frame`,
+        so the caller can later construct a :class:`Solution` from
+        externally-produced ``col_value`` / ``row_dual`` arrays via
+        ``Solution(..., vars=dict(self._vars), ...)``.
+
+        Honoured only on the streaming path; the non-streaming
+        (passModel) path is not supported here.  Raises
+        ``RuntimeError`` if called on an already-released Problem.
+
+        Parameters
+        ----------
+        mps_path
+            Where to write the MPS file.  Caller owns the file —
+            polar-high will not delete it.
+        options
+            HiGHS solver options to apply during the build (mainly
+            ``presolve`` / ``solver`` / ``simplex_scale_strategy`` —
+            options that affect what ``writeModel`` serialises).
+            ``None`` uses :attr:`_solver_options`.
+        """
+        if getattr(self, "_released", False):
+            raise RuntimeError(
+                "Problem.build_only() called on an already-released "
+                "Problem.  Construct a fresh Problem.",
+            )
+        self._solve_streaming(
+            options=options,
+            keep_solver=False,
+            save_memory=True,
+            _mps_out_path=mps_path,
+            _build_only=True,
+        )
+
     # ------------------------------------------------------------------
     # Shared non-streaming LP-array builder
     #
@@ -1592,7 +1645,9 @@ class Problem:
         options: dict | None,
         keep_solver: bool,
         save_memory: bool = False,
-    ) -> Solution:
+        _mps_out_path: str | None = None,
+        _build_only: bool = False,
+    ) -> "Solution | None":
         # Build the per-column arrays inside this frame (rather than in
         # the public ``solve`` caller) so they die at the end of the
         # streaming solve rather than living through ``HiGHS.run()`` on
@@ -2090,7 +2145,25 @@ class Problem:
             # fresh Highs collapses that slack — at the cost of MPS file
             # I/O (~+90 s at N=3000 dense).  The trade is the whole
             # point of save_memory=True: lowest peak RSS, one shot.
-            mps_path = tempfile.NamedTemporaryFile(suffix=".mps", delete=False).name
+            #
+            # ``_mps_out_path`` / ``_build_only`` (private, used by
+            # :meth:`build_only`): when ``_mps_out_path`` is set, write
+            # to the caller's path instead of a temp file, and after the
+            # drop+malloc_trim return ``None`` so the caller can drive
+            # an external solver (e.g. a subprocess HiGHS).  The Problem
+            # ends up in ``_released`` state — same contract as save_memory.
+            if _build_only and _mps_out_path is None:
+                raise ValueError(
+                    "_build_only=True requires _mps_out_path to be set",
+                )
+            _caller_owns_mps = _mps_out_path is not None
+            mps_path = (
+                _mps_out_path
+                if _mps_out_path is not None
+                else tempfile.NamedTemporaryFile(
+                    suffix=".mps", delete=False
+                ).name
+            )
             try:
                 # Silence HiGHS' own "Writing the model to ..." /
                 # "Reading the model from ..." chatter so benchmark
@@ -2113,6 +2186,15 @@ class Problem:
                         ctypes.CDLL("libc.so.6").malloc_trim(0)
                     except Exception:
                         pass
+
+                # External-solve handoff: the caller takes it from here
+                # (typically by spawning a subprocess HiGHS on
+                # ``_mps_out_path``).  Skip the in-process
+                # readModel + run + Solution-build steps below.  The
+                # caller is expected to construct its own Solution from
+                # the external solver's output arrays + ``self._vars``.
+                if _build_only:
+                    return None
 
                 h = highspy.Highs()
                 # See the addCols-time block above — same rationale:
@@ -2165,7 +2247,11 @@ class Problem:
                     except Exception:
                         pass
             finally:
-                if os.path.exists(mps_path):
+                # The caller-supplied MPS path (build_only / external
+                # solve) is the caller's responsibility — they need it
+                # to drive the subprocess.  Only sweep the temp file
+                # we allocated ourselves.
+                if not _caller_owns_mps and os.path.exists(mps_path):
                     os.unlink(mps_path)
 
         h.run()
