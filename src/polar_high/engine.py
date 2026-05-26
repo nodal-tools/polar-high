@@ -78,112 +78,6 @@ def _running_finite_nonzero_min_max(
     return (lo, hi)
 
 
-# HiGHS' own "excessively small / large bound" thresholds.  These are
-# the constants HiGHS uses in its presolve to flag bound magnitudes as
-# numerically risky; see ``HConst.h:38-41`` in the HiGHS source.
-_HIGHS_SMALL_BOUND = 1e-4  # kExcessivelySmallBoundValue
-_HIGHS_LARGE_BOUND = 1e6  # kExcessivelyLargeBoundValue
-
-# HiGHS rejects ``user_bound_scale`` values outside ``[-30, 30]`` (see
-# the option's documented range).  We never expect to come close, but
-# we clamp for defensive sanity.
-_USER_BOUND_SCALE_CLAMP_LO = -30
-_USER_BOUND_SCALE_CLAMP_HI = 30
-
-
-def _recommend_user_bound_scale(
-    bound_range: tuple[float, float] | None,
-    rhs_range: tuple[float, float] | None,
-    *,
-    current_user_bound_scale: int = 0,
-) -> int:
-    """HiGHS-anchored ``user_bound_scale`` recommendation.
-
-    Direct port of HiGHS' own ``suggestScaling`` lambda at
-    ``HighsSolve.cpp:570-607``.  Reproduces the integer that HiGHS prints
-    in its ``"Consider setting the user_bound_scale option to <N>"``
-    recommendation byte-for-byte.
-
-    Inputs are the running ``(abs_min, abs_max)`` ranges of column bounds
-    and row bounds (RHS), as accumulated during the streaming family
-    loop.  ``None`` on either side means "no finite entries observed";
-    HiGHS treats a missing range as 0.0 for the max comparison.
-
-    Returns ``current_user_bound_scale + delta`` where ``delta`` is the
-    integer that pulls ``max(bound_max, rhs_max)`` into HiGHS' comfort
-    zone ``[kExcessivelySmallBoundValue, kExcessivelyLargeBoundValue]``
-    = ``[1e-4, 1e+6]``.  Returns ``current_user_bound_scale`` unchanged
-    when the max is already inside the zone (this is the "no scaling
-    needed" branch HiGHS itself takes).
-
-    Design notes:
-
-    * Only the MAX of ``bound_max`` and ``rhs_max`` is considered;
-      ``min`` and the constraint matrix / objective ranges are
-      deliberately ignored.  HiGHS' own ``suggestScaling`` declares but
-      never reads its ``min_value`` argument, and ``user_bound_scale``
-      only affects column bounds + RHS (not matrix or cost — a separate
-      ``user_objective_scale`` would handle cost).
-    * Outer rounding (``floor`` when ratio<1, ``ceil`` when ratio>1)
-      picks the smaller-|N| value — the more conservative scaling.
-    * No 6-decade "gate" needed: HiGHS' formula naturally returns 0
-      whenever the model is already in ``[1e-4, 1e+6]``.
-
-    The previous heuristic (col_bound-only geometric midpoint with a
-    6-decade gate and ``[-10, 0]`` clamp) was driven by the
-    Rivendell-bug-1+5+6 episode where an earlier broken formula picked
-    ``N=-10`` and broke HiGHS presolve.  HiGHS' own formula picks
-    ``N=-2`` on the same Rivendell LP, which is conservative enough to
-    keep Rivendell solving — verified end-to-end before this change
-    landed.
-    """
-    # ``None`` -> treat as 0.0 for the max comparison (HiGHS' behaviour).
-    bound_max = bound_range[1] if bound_range is not None else 0.0
-    rhs_max = rhs_range[1] if rhs_range is not None else 0.0
-    max_b = max(bound_max, rhs_max)
-    if not math.isfinite(max_b) or max_b <= 0.0:
-        return int(current_user_bound_scale)
-    if max_b > _HIGHS_LARGE_BOUND:
-        ratio = _HIGHS_LARGE_BOUND / max_b
-    elif max_b < _HIGHS_SMALL_BOUND:
-        ratio = _HIGHS_SMALL_BOUND / max_b
-    else:
-        return int(current_user_bound_scale)
-    # Outer-rounded log2 — picks the more conservative (smaller-|delta|)
-    # value, matching HiGHS' ``suggestScaling``.
-    if ratio < 1:
-        dl = math.floor(math.log2(ratio))
-    else:
-        dl = math.ceil(math.log2(ratio))
-
-    # Min-floor guard: refuse to scale when the proposed delta would
-    # drive the smallest nonzero magnitude (column-bound or RHS) below
-    # ``kExcessivelySmallBoundValue``.  HiGHS' own suggestScaling formula
-    # looks only at the max and is happy to crush a wide-spread model's
-    # min below the threshold — but HiGHS' presolve then mis-handles
-    # those rows as numerically zero and can falsely flag the LP as
-    # infeasible.  Observed on the full-year Rivendell B0 LP
-    # (RHS=(1.84e-3, 2.02e+8) -> N=-8 -> scaled RHS min 7.2e-6, below
-    # 1e-4 -> presolve infeasibility, even though the LP solves cleanly
-    # at N=0 with presolve off).  HiGHS does not scale internally when
-    # we return 0; the warning is preferable to a false infeasibility.
-    if dl < 0:
-        bound_min = bound_range[0] if bound_range is not None else math.inf
-        rhs_min = rhs_range[0] if rhs_range is not None else math.inf
-        min_b = min(bound_min, rhs_min)
-        if math.isfinite(min_b) and min_b > 0:
-            scaled_min = min_b * (2.0 ** dl)
-            if scaled_min < _HIGHS_SMALL_BOUND:
-                return int(current_user_bound_scale)
-
-    n = int(current_user_bound_scale) + int(dl)
-    if n < _USER_BOUND_SCALE_CLAMP_LO:
-        n = _USER_BOUND_SCALE_CLAMP_LO
-    if n > _USER_BOUND_SCALE_CLAMP_HI:
-        n = _USER_BOUND_SCALE_CLAMP_HI
-    return int(n)
-
-
 # ---------------------------------------------------------------------------
 # Enum-dtype-aware join helpers
 #
@@ -967,20 +861,14 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
 class Problem:
     """LP container.  Generic — no flextool-specific knowledge."""
 
-    def __init__(self, auto_user_bound_scale: bool = False) -> None:
+    def __init__(self) -> None:
         """Construct an empty LP container.
 
-        Parameters
-        ----------
-        auto_user_bound_scale
-            When ``True`` and the caller has *not* set ``user_bound_scale``
-            explicitly via :meth:`set_solver_options` (or the ``options=``
-            kwarg on :meth:`solve`), the streaming solve path applies an
-            in-tree col_bound-only geo-midpoint recommendation (see
-            :func:`_recommend_user_bound_scale`) just before ``Highs.run()``.
-            Default ``False`` — pure ``polar_high`` is a generic LP kernel
-            and leaves scaling decisions to the caller; flextool opts in
-            on its own wrapper.
+        Pure polar-high is a generic LP kernel; scaling decisions are
+        left to the caller.  See :mod:`polar_high.autoscale` for the
+        opt-in autoscaler (Layer 1 detect + Layer 3 recommendation)
+        that callers (e.g. FlexTool) use to drive
+        ``user_bound_scale`` / ``user_objective_scale`` automatically.
         """
         self._vars: dict[str, Var] = {}
         self._cstrs: list[tuple[str, _CstrProto, pl.DataFrame | None]] = []
@@ -993,7 +881,6 @@ class Problem:
         # ``build_flextool`` when ``FlexData.solver_options`` is set).
         # An explicit ``options`` kwarg on ``solve()`` overrides this.
         self._solver_options: dict | None = None
-        self._auto_user_bound_scale = bool(auto_user_bound_scale)
         # ``save_memory=True`` on :meth:`solve` flips this flag once
         # the Python-side LP source-of-truth has been dropped (see
         # :meth:`_release_python_lp_inputs`).  Subsequent ``solve()``
@@ -1844,9 +1731,10 @@ class Problem:
         # Stream-time LP-range accumulation.  Cost is a handful of O(n)
         # numpy scans on arrays we already build (per-family for matrix
         # / row_bound, once here for cost / col_bound), so peak memory
-        # is unchanged.  Used by ``auto_user_bound_scale`` below and
-        # exposed on the returned :class:`Solution` as
-        # ``streamed_lp_ranges`` for caller diagnostics.
+        # is unchanged.  Exposed on the returned :class:`Solution` as
+        # ``streamed_lp_ranges`` for caller diagnostics — and consumed
+        # by :mod:`polar_high.autoscale` to drive Layer 1 detection and
+        # Layer 3 ``user_*_scale`` recommendation.
         _r_matrix_lo, _r_matrix_hi = math.inf, 0.0
         _r_row_lo, _r_row_hi = math.inf, 0.0
         _r_cost_lo, _r_cost_hi = _running_finite_nonzero_min_max(col_obj_h, math.inf, 0.0)
@@ -2131,65 +2019,6 @@ class Problem:
             "row_bound": _pack(_r_row_lo, _r_row_hi),
         }
 
-        # Auto user_bound_scale: opt-in, gated on caller not having
-        # already set the option explicitly.  Caller's explicit value
-        # (via ``set_solver_options`` or per-call ``options=``) always
-        # wins.  We stash whichever value we end up applying so the
-        # save_memory disk-roundtrip below can re-set it on the fresh
-        # Highs (options are stored on the C++ instance, not the MPS).
-        _n_rec_applied: int = 0
-        if self._auto_user_bound_scale:
-            already_set = False
-            _opts_eff = options if options is not None else self._solver_options
-            _caller_n: int | None = None
-            if _opts_eff and "user_bound_scale" in _opts_eff:
-                already_set = True
-                try:
-                    _caller_n = int(_opts_eff["user_bound_scale"])
-                except (TypeError, ValueError):
-                    _caller_n = None
-            cb = streamed_lp_ranges.get("col_bound")
-            rb = streamed_lp_ranges.get("row_bound")
-            cb_str = f"{cb[0]:.2e}..{cb[1]:.2e}" if cb is not None else "n/a"
-            rb_str = f"{rb[0]:.2e}..{rb[1]:.2e}" if rb is not None else "n/a"
-            if already_set:
-                if _caller_n is not None:
-                    print(
-                        f"polar-high caller override user_bound_scale={_caller_n}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        "polar-high caller override user_bound_scale (value not introspectable)",
-                        flush=True,
-                    )
-            elif cb is None and rb is None:
-                print(
-                    "polar-high no scaling | no finite bound or RHS entries",
-                    flush=True,
-                )
-            else:
-                n_rec = _recommend_user_bound_scale(cb, rb)
-                # Report ORIGINAL (pre-scale) ranges; HiGHS prints the
-                # post-scale ranges itself in its "Coefficient ranges"
-                # block right after, so we don't duplicate that.
-                print(
-                    f"Original bounds {cb_str}, rhs {rb_str}",
-                    flush=True,
-                )
-                if n_rec != 0:
-                    h.setOptionValue("user_bound_scale", int(n_rec))
-                    _n_rec_applied = int(n_rec)
-                    print(
-                        f"polar-high set user_bound_scale={int(n_rec)}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        "polar-high no scaling needed | within HiGHS' [1e-4, 1e+6] zone.",
-                        flush=True,
-                    )
-
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here
         # matches the row index inside HiGHS.
@@ -2284,11 +2113,6 @@ class Problem:
                                 f"save_memory round-trip (status={_st!r})",
                                 stacklevel=2,
                             )
-                # auto_user_bound_scale fires below on whichever Highs
-                # we end up running; if we set it on the original ``h``
-                # above, re-apply it to the new one here.
-                if self._auto_user_bound_scale and _n_rec_applied:
-                    h.setOptionValue("user_bound_scale", int(_n_rec_applied))
                 # Mute readModel chatter on the fresh Highs too — the
                 # caller's output_flag preference (if any) is already
                 # in ``opts`` and got re-applied above.
