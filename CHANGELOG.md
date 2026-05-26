@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.0.1] — 2026-05-26
+
+### Fixed
+
+- CI `ruff check` and `ruff format --check` failures inherited from
+  the v2.0.0 commits.  Sorted / removed unused imports, ran ruff
+  format, and migrated `ScalingMode(str, Enum)` → `ScalingMode(
+  enum.StrEnum)` to clear the UP042 hint.  Behaviour difference:
+  `str(ScalingMode.OFF)` now returns `"off"` instead of
+  `"ScalingMode.OFF"`; no code in `src/` or `tests/` stringifies the
+  enum, so this is invisible at the API boundary.
+
+### Changed
+
+- Cross-solver MPS-fallback tests now have sharpened skip strings
+  that distinguish *"wrapper-installed-but-CLI-binary-missing"* from
+  *"solver wholly absent"*, and point at the new wrapper-driven test
+  file for parallel coverage when only the Python wrapper is present.
+
+### Added
+
+- `tests/test_mps_fallback_wrapper.py`: for each commercial solver
+  whose Python wrapper is installed (Gurobi, CPLEX, Xpress), writes
+  the polar-high MPS file, reads it back into the wrapper, solves,
+  and asserts the objective matches a direct in-memory HiGHS solve.
+  Catches MPS-format issues end-to-end without needing the
+  standalone CLI binary.  COPT is intentionally out of scope here
+  due to the in-process COPT/HiGHS native-symbol conflict
+  documented in `solvers/_copt.py`.
+
 ## [2.0.0] — 2026-05-26
 
 Headline: much-improved automatic LP scaling via a new
