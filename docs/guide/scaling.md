@@ -8,7 +8,7 @@ This guide is for callers who:
 - see HiGHS warnings about "excessively small" or "excessively large" bound values, or
 - have hit a falsely-infeasible result and suspect HiGHS' built-in scaling is the culprit.
 
-If your LP's coefficients all sit within a few decades of 1.0, you don't need this — HiGHS' own `simplex_scale_strategy` will handle it.
+If your LP's coefficients all sit within a few decades of 1.0, you don't need this — HiGHS' own `simplex_scale_strategy` will handle it - and polar-high will not change anything.
 
 ## Quick example
 
@@ -164,9 +164,9 @@ p.set_solver_option("simplex_scale_strategy", plan.simplex_scale_strategy)
 
 HiGHS' built-in recommendation looks at `max(bound_max, rhs_max)` and picks a delta that pulls that single value into `[1e-4, 1e+6]`. On wide-spread LPs the consequence can be brutal:
 
-- **Rivendell B0 (full-year)** has `RHS = (1.84e-3, 2.02e+8)`. HiGHS' formula picks `N=-8`, scaled RHS min becomes `7.2e-6`, which is below `_HIGHS_SMALL_BOUND` (`1e-4`). Presolve then mis-handles those near-zero rows and the LP comes back **infeasible** — even though solving with `N=0` and presolve off finds the optimum cleanly. **Min-floor guard**: when the proposed `N` would drag the scaled min below `1e-4`, `recommend_scaling` refuses to recommend that `N` and returns the current scale unchanged (reasoning tag `"refuse"`).
+- **Example 1 model from FlexTool** has `RHS = (1.84e-3, 2.02e+8)`. HiGHS' formula picks `N=-8`, scaled RHS min becomes `7.2e-6`, which is below `_HIGHS_SMALL_BOUND` (`1e-4`). Presolve then mis-handles those near-zero rows and the LP comes back **infeasible** — even though solving with `N=0` and presolve off finds the optimum cleanly. **Min-floor guard**: when the proposed `N` would drag the scaled min below `1e-4`, `recommend_scaling` refuses to recommend that `N` and returns the current scale unchanged (reasoning tag `"refuse"`).
 
-- **H2_trade scenario** has bounds spanning so many decades that *every* power-of-two clamp crushes one end. For those — when `max_b >= 1e+9` (a "severe overshoot") — the recommender pivots to a **geometric-centring escape** (reasoning tag `"escape"`): pick `N` such that the geometric mean of the scaled range lands at the geometric mean of HiGHS' comfort band (`sqrt(1e-4 × 1e+6) ≈ 31.6`). Worse on max, better on min, optimal on neither — but lets the LP solve.
+- **Example 2 model from FlexTool** has bounds spanning so many decades that *every* power-of-two clamp crushes one end. For those — when `max_b >= 1e+9` (a "severe overshoot") — the recommender pivots to a **geometric-centring escape** (reasoning tag `"escape"`): pick `N` such that the geometric mean of the scaled range lands at the geometric mean of HiGHS' comfort band (`sqrt(1e-4 × 1e+6) ≈ 31.6`). Worse on max, better on min, optimal on neither — but lets the LP solve.
 
 Both behaviours are baked into `_recommend_bound_scale`. The `Layer3Plan.reasoning` string surfaces which branch fired:
 

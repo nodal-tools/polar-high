@@ -61,14 +61,14 @@ _HIGHS_LARGE_BOUND = 1e6
 _HIGHS_SMALL_BOUND = 1e-4
 _HIGHS_LARGE_COST = 1e4
 
-# Severe-overshoot trigger for the two-sided escape (D's branch).  When
+# Severe-overshoot trigger for the two-sided escape branch.  When
 # ``max_b >= _HIGHS_LARGE_BOUND * _SEVERE_LARGE_OVERSHOOT`` (~1e+9) the
 # post-detect LP is so skewed that one-sided clamping crushes the small
 # end below the HiGHS warning threshold.  Geometric-centering distributes
-# the (unavoidable) violation symmetrically.  Threshold tuned empirically:
-# H2_trade (rhs_max ≈ 1.08e+10) needs the escape under
-# ``--highs-threads 2``; Rivendell B0 (rhs_max ≈ 2.02e+8) and DES
-# (rhs_max ≈ 4e+7) do not — both solve at N=0 with serial dual simplex.
+# the (unavoidable) violation symmetrically.  Threshold tuned empirically
+# against operational LPs: models with ``rhs_max ≥ ~1e+10`` need the
+# escape under parallel simplex, while ``rhs_max ≤ ~2e+8`` LPs solve
+# cleanly at N=0 with the serial dual simplex.
 _SEVERE_LARGE_OVERSHOOT = 1e3
 
 # HiGHS ``simplex_scale_strategy`` value: 2 = ADVANCED equilibration
@@ -191,13 +191,16 @@ def _recommend_bound_scale(
 
     # Min-floor guard: when scaling down would drive the small end
     # below ``_HIGHS_SMALL_BOUND``, decide between refusing (the
-    # Rivendell-safe behaviour) and the geometric-centering escape
-    # (the H2_trade-safe behaviour).
+    # refuse-safe behaviour for moderate overshoots) and the
+    # geometric-centering escape (the refuse-unsafe behaviour for
+    # severe overshoots).
     if dl < 0 and math.isfinite(min_b) and min_b > 0.0:
         scaled_min = min_b * (2.0**dl)
         if scaled_min < _HIGHS_SMALL_BOUND:
             if max_b >= _HIGHS_LARGE_BOUND * _SEVERE_LARGE_OVERSHOOT:
-                # D's escape: geometric centering over the comfort zone.
+                # Severe overshoot: geometric centering over the comfort
+                # zone, distributing the unavoidable violation across
+                # both ends.
                 geo_range = math.sqrt(min_b * max_b)
                 geo_band = math.sqrt(_HIGHS_SMALL_BOUND * _HIGHS_LARGE_BOUND)
                 if (
@@ -211,10 +214,9 @@ def _recommend_bound_scale(
                 else:
                     return 0, "refuse"
             else:
-                # Moderate overshoot — Rivendell-shaped LPs land here
-                # because their col bounds are tightly clustered.
-                # Refusing keeps N=0 and lets HiGHS' own default
-                # scaling handle the row spread.
+                # Moderate overshoot — LPs with tightly-clustered col
+                # bounds land here.  Refusing keeps N=0 and lets HiGHS'
+                # own default scaling handle the row spread.
                 return 0, "refuse"
 
     return int(dl), tag

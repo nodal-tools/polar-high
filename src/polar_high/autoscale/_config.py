@@ -24,7 +24,8 @@ from pathlib import Path
 # Default trigger threshold: any single-group or cross-group max/min
 # ratio greater than ``10 ** _DEFAULT_THRESHOLD_DECADES`` is considered
 # worth triggering autoscaling.  Nine decades is the conservative
-# operational pain point identified in the H2_trade handoff.
+# operational pain point identified empirically — wider spreads
+# routinely trip HiGHS' presolve scaling warnings.
 _DEFAULT_THRESHOLD_DECADES = 9.0
 
 

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.0.2] — 2026-05-26
+
+### Added
+
+- `docs/guide/scaling.md` — user-facing guide for the
+  `polar_high.autoscale` package: when to use it, the typical
+  `detect_ranges → recommend_scaling → apply_scaling` pattern,
+  `ScalingMode` / `ScalingConfig` knobs, the precedence rules, the
+  min-floor guard + geometric-centring escape branch, and migration
+  from the retired `auto_user_bound_scale=True` flag.  Wired into
+  `mkdocs.yml`'s Guide section between Solvers and Warm-starting.
+
+### Changed
+
+- Stripped proper-name callouts of specific caller-side LPs from
+  source comments and CHANGELOG entries.  Replaced with generic
+  scenario descriptions ("a full-year LP with RHS=(1.84e-3,
+  2.02e+8)" etc.) so the technical narrative survives without
+  leaking caller-side LP names.
+
 ## [2.0.1] — 2026-05-26
 
 ### Fixed
@@ -47,6 +67,8 @@ RHS / matrix ranges and recommends `user_bound_scale` and
 `user_objective_scale` exponents independently. The new path also
 adds a min-floor guard that catches a class of false-infeasibility
 results HiGHS' own `suggestScaling` can produce on wide-spread LPs.
+See the [Scaling guide](https://nodal-tools.github.io/polar-high/guide/scaling/)
+for the full caller story.
 
 ### Added — autoscale
 
@@ -61,8 +83,7 @@ results HiGHS' own `suggestScaling` can produce on wide-spread LPs.
     `user_bound_scale` and `user_objective_scale` integer exponents,
     derived from HiGHS' own `suggestScaling` formula. Preserves the
     geometric-centering escape branch for severe asymmetric-bound
-    LPs (the historical Rivendell-fix path), now guarded by a
-    min-floor check (see *Fixed*).
+    LPs, now guarded by a min-floor check (see *Fixed*).
   - `ScalingMode` enum (`OFF` / `SOLVER_ONLY` / `BASIC` / `FULL`)
     with helper predicates so library callers can decide policy per
     mode rather than per-call kwarg.
@@ -95,7 +116,7 @@ results HiGHS' own `suggestScaling` can produce on wide-spread LPs.
   rhs_max)`, it can pick a `user_bound_scale` exponent that crushes
   the *min* below `kExcessivelySmallBoundValue` (1e-4). HiGHS'
   presolve then mis-handles the near-zero rows and the LP comes
-  back infeasible. Observed on the full-year Rivendell B0 LP with
+  back infeasible. Observed on a full-year LP with
   RHS=(1.84e-3, 2.02e+8): the formula picked N=-8 → scaled RHS min
   7.2e-6 → spurious infeasibility. The new `recommend_scaling`
   adds a min-floor guard: when the proposed delta would drag the
@@ -223,9 +244,7 @@ results HiGHS' own `suggestScaling` can produce on wide-spread LPs.
   HiGHS' `[kExcessivelySmallBoundValue, kExcessivelyLargeBoundValue]`
   = `[1e-4, 1e+6]` comfort zone using outer-rounded log2, and
   reproduces the integer HiGHS prints in its `"Consider setting the
-  user_bound_scale option to <N>"` recommendation byte-for-byte (e.g.
-  `N=-6` on the DES scenario, `N=-2` on the historical Rivendell-fix
-  LP).
+  user_bound_scale option to <N>"` recommendation byte-for-byte.
 - `Solution.streamed_lp_ranges: dict | None` field. Populated by every
   solve that flows through `_solve_streaming` (which is the default
   path) with the four `(abs_min, abs_max) | None` range tuples. `None`
