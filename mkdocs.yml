@@ -94,6 +94,7 @@ nav:
   - Guide:
       - Loading data: guide/loading-data.md
       - Solvers: guide/solvers.md
+      - Scaling: guide/scaling.md
       - Warm-starting: guide/warm-starting.md
       - Lagrangian: guide/lagrangian.md
       - Performance: guide/performance.md
