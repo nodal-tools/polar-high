@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.1.2] — 2026-05-27
+
+### Fixed
+
+- `Problem.write_mps` per-term collect on LHS Param-chain terms
+  (e.g. `Var * Param₁ * Param₂ * ...`) used to materialise the join
+  chain's wide intermediate before the final row alignment.  On a
+  9.9 M-row LP a single such family allocated +26 GB during one
+  `term.lazy.collect()`, pushing `write_mps` peak to ~43 GB despite
+  the spec target of 2-3 GB.  Retrofitted the same anti-explosion
+  pattern the RHS path has used since v2.0.0
+  (`_align_enum_join_keys` → semi-join against the row-index key
+  set → `collect(engine="streaming")` with `streaming=True` and
+  plain-`.collect()` fallbacks).  Synthetic 100 k-row test:
+  527 MB peak → 178 MB after the fix.  Coefficients byte-identical
+  with the pre-fix path; HiGHS objective unchanged.
+
 ## [2.1.1] — 2026-05-27
 
 ### Added
