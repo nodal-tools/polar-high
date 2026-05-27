@@ -958,6 +958,12 @@ class Problem:
         upper: float = float("inf"),
         integer: bool = False,
     ) -> Var:
+        if self._layer2_locked:
+            raise RuntimeError(
+                "Problem.add_var called after apply_layer2 — adding "
+                "variables after Layer 2 is not supported (would need "
+                "to extend the col_factor side vector)."
+            )
         if isinstance(dims, str):
             dims = (dims,)
         dims = tuple(dims)
