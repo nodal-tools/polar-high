@@ -327,3 +327,89 @@ def test_detect_ranges_param_chain_does_not_explode() -> None:
     # Sanity: the readout itself returned something coherent.
     assert report is not None
     assert report.matrix is not None
+
+
+# ----------------------------------------------------------------------
+# Layer 2 side-vector readout — focused unit test for
+# ``_ranges_via_streaming``
+# ----------------------------------------------------------------------
+
+
+def test_ranges_via_streaming_honors_side_vectors() -> None:
+    """Verify that :func:`_ranges_via_streaming` multiplies the
+    aggregated magnitudes by ``_layer2_row_factor`` /
+    ``_layer2_col_factor`` when they are present on the Problem.
+
+    Background.  Before commit ``d4171fb`` the streaming readout
+    walked ``problem._cstrs`` directly without honoring the side
+    vectors — that produced a tiny ULP-level drift between
+    ``scaling=full`` and ``scaling=solver_only`` on the h2_trade
+    end-to-end test (Layer 3 picked different ``user_*_scale``
+    exponents because it saw pre-Layer-2 magnitudes).  The patch
+    threads the side vectors through the per-emit-site reduce.
+
+    This test exercises that wiring in isolation: build a Problem
+    whose unscaled matrix / cost entries are all 1.0, run the
+    streaming readout, install constant side vectors, and confirm the
+    re-readout produces magnitudes scaled by exactly
+    ``|row_factor| * |col_factor|`` (matrix) and ``|col_factor|``
+    (objective).
+    """
+    from polar_high.autoscale._ranges import _ranges_via_streaming
+    from polar_high.engine import Problem
+
+    pb = Problem()
+    idx = pl.DataFrame({"i": [0, 1, 2]})
+    x = pb.add_var("x", "i", idx, lower=0.0, upper=10.0)
+    # All LHS coefficients are 1.0 (literal-coefficient term over the
+    # row axis); rhs is 1.0; obj coefficient is 1.0.
+    pb.add_cstr(
+        "c", over=idx, sense="<=", lhs_terms={"x": x}, rhs_terms={"r": 1.0}
+    )
+    pb.set_objective(x, sense="min")
+
+    n_cols = int(pb._next_col)
+    # Three constraint rows; no objective row in the side vector.
+    n_rows = 3
+
+    cfg = _config()
+
+    # Baseline: no side vectors.
+    base = _ranges_via_streaming(pb, cfg)
+    assert base.matrix == pytest.approx((1.0, 1.0))
+    assert base.cost == pytest.approx((1.0, 1.0))
+
+    # Install constant side vectors.  Convention (STATE.md):
+    # ``_layer2_col_factor`` stores ``1 / cf_math`` (inverse forward);
+    # the magnitude effect on |coef * _l2_cf| is just |_l2_cf|, so the
+    # readout scales by |_l2_cf| directly regardless of which side of
+    # the convention you call "forward".  Pick distinct power-of-two
+    # constants per side vector so a missing multiplication is visible.
+    rf = 8.0
+    cf_inv = 4.0  # this is the stored side vector; readout scales by |this|
+    pb._layer2_row_factor = np.full(n_rows, rf, dtype=np.float64)
+    pb._layer2_col_factor = np.full(n_cols, cf_inv, dtype=np.float64)
+
+    scaled = _ranges_via_streaming(pb, cfg)
+
+    # Matrix entries: raw 1.0 * rf * cf_inv = 32.0 (constant) → range
+    # collapses to (32.0, 32.0).
+    assert scaled.matrix == pytest.approx((rf * cf_inv, rf * cf_inv)), (
+        f"matrix range expected to scale by row_factor * col_factor = "
+        f"{rf * cf_inv}; got {scaled.matrix}"
+    )
+    # RHS entries: raw 1.0 * rf = 8.0.
+    assert scaled.rhs == pytest.approx((rf, rf)), (
+        f"rhs range expected to scale by row_factor = {rf}; "
+        f"got {scaled.rhs}"
+    )
+    # Objective: raw 1.0 * cf_inv = 4.0 (no row factor on the cost row,
+    # per GLPK convention).
+    assert scaled.cost == pytest.approx((cf_inv, cf_inv)), (
+        f"cost range expected to scale by col_factor = {cf_inv} only "
+        f"(no row factor on objective); got {scaled.cost}"
+    )
+    # Bounds are not affected by the side vectors in this readout
+    # (apply_layer2 mutates Var.lower/upper directly; the side vectors
+    # don't enter the bound reduce path).  Unchanged from baseline.
+    assert scaled.bound == pytest.approx(base.bound)
