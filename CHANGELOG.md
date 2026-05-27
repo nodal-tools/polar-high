@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.1.1] — 2026-05-27
+
+### Added
+
+- `docs/guide/performance.md` — new section "Writing MPS without HiGHS"
+  covering `Problem.write_mps`: API, the ~20× peak-memory advantage
+  over `Highs.writeModel`, `release=True` semantics, cross-solver
+  roundtrip coverage, and the `POLAR_HIGH_WRITE_MPS_PROFILE=1`
+  diagnostic env var.  Cross-linked from `docs/guide/scaling.md` and
+  `docs/guide/solvers.md`.
+
+### Fixed
+
+- Replaced a stale reference to a fictional `Problem.solve(write_mps=...)`
+  kwarg in `docs/guide/solvers.md` with the real `Problem.write_mps`
+  link.
+- Ruff lint warnings in `tests/_bench_write_mps_parallel.py` (intentional
+  late polars import) and in the `RHS` section of `Problem.write_mps`
+  (unused tuple element renamed `_row_count`).
+
+## [2.1.0] — 2026-05-27
+
+### Added
+
+- `Problem.write_mps(path, *, free_format=True, column_order_strict=True,
+  emit_names=True, release=False, name="POLAR_HIGH")` — direct
+  polars→MPS writer that bypasses `highspy.Highs.writeModel`.  Mirrors
+  the per-family streaming pattern from `_solve_streaming`, performs
+  one streaming sort by `(col_id, row_id)`, and chunked-streams the
+  COLUMNS section with `INTORG`/`INTEND` integer markers.  Target peak
+  is ~2–3 GB on a 10 M-row / 5 M-col / 20 M-nz LP — about 20× lower
+  than `Highs.writeModel`'s transient.  `release=True` reuses the same
+  `_release_python_lp_inputs` teardown as `solve(save_memory=True)` so
+  callers driving an out-of-process solver can drop the polar-side LP
+  source immediately after the write.
+- `POLAR_HIGH_WRITE_MPS_PROFILE=1` env var — when set, `Problem.write_mps`
+  emits per-phase and per-constraint-family `psutil` RSS deltas to
+  stderr for diagnosing memory hot spots.  Zero overhead when unset
+  (no `psutil` import, no closure call sites entered).
+- `tests/_bench_write_mps_parallel.py` — synthetic-LP bench for
+  `write_mps` peak memory across single-family / multi-family
+  topologies and polars thread counts.
+
+### Changed
+
+- Wrapper-driven MPS roundtrip harness (`tests/test_mps_fallback_wrapper.py`)
+  is now parametrized over both the legacy `LpView`-based writer and the
+  new `Problem.write_mps` direct writer, so the HiGHS / Gurobi / CPLEX /
+  Xpress readback tests exercise both code paths.
+
 ## [2.0.2] — 2026-05-26
 
 ### Added
