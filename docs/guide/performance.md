@@ -80,6 +80,51 @@ beyond that, HiGHS run time dominates and build cost is noise.
   so if you need zero-fill, do the `left_join`/`fill_null(0)` once
   before constructing the Param.
 
+## Writing MPS without HiGHS
+
+For very large LPs the canonical "write the model to disk and shell
+out to another solver" pattern goes through HiGHS' own
+`Highs.writeModel(path)` — which serialises the in-memory LP into MPS
+form. On models in the ~10 M-row / 5 M-col / 20 M-nz range, that
+serialiser allocates **~20×** the steady-state LP footprint in
+transient buffers (~45 GB on the LP just cited), and a workstation
+that comfortably runs the actual solve out-of-process can OOM on the
+MPS write step alone.
+
+`Problem.write_mps` is a direct polars→MPS writer that never
+constructs a `highspy.Highs` instance. It walks the same per-family
+streaming pattern the kernel uses internally, then performs one
+streaming sort by `(col_id, row_id)` and emits the COLUMNS section
+in chunks. Peak transient memory is **~2–3 GB** on the LP above:
+
+```python
+p = Problem()
+# … add vars, params, objective, constraints …
+
+p.write_mps("model.mps")                 # default: free format, named
+p.write_mps("model.mps", emit_names=False)   # smaller file, no names
+p.write_mps("model.mps", release=True)   # drops polar-side LP source
+```
+
+`release=True` calls the same internal teardown as
+`Problem.solve(save_memory=True)`: every `_Term.lazy` plan and
+constraint RHS reference is dropped before `write_mps` returns. The
+per-`Var` `col_id` frames stay alive so a caller can later reconstruct
+a `Solution` from externally-produced `col_value` / `row_dual` arrays
+(via `Solution(..., vars=dict(problem._vars), ...)`). After
+`release=True` the `Problem` is in `_released` state and further
+`solve()` calls raise.
+
+Intended use: drive a subprocess HiGHS (or any external solver) from
+the written MPS file when the parent process must stay under a peak
+RSS ceiling. The MPS is spec-compliant free-format and reads back
+into HiGHS, Gurobi, CPLEX, and Xpress in the wrapper-driven roundtrip
+tests under `tests/test_mps_fallback_wrapper.py`.
+
+For diagnosing memory hot spots in `write_mps` itself, set
+`POLAR_HIGH_WRITE_MPS_PROFILE=1`: per-phase and per-constraint-family
+RSS deltas are emitted to stderr. Zero overhead when unset.
+
 ## Profiling
 
 `Problem.solve()` is straightforward to profile with `cProfile` or

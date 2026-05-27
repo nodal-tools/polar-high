@@ -213,7 +213,7 @@ If you don't want the geometric-centring escape branch or the min-floor guard �
 
 - **Coefficients are within a few decades of 1.0.** HiGHS' own `simplex_scale_strategy` handles this fine; the autoscaler would correctly recommend `N=0` everywhere and add bookkeeping noise.
 - **You're tuning HiGHS by hand.** Set `user_bound_scale` / `user_objective_scale` via `Problem.set_solver_option(...)` directly. The autoscaler's precedence check will skip your axes when you ask it for a recommendation.
-- **You need scaling to survive a temp-MPS roundtrip.** `save_memory=True` (see *Performance*) writes the LP via `writeModel` after scaling options are applied — HiGHS preserves the option settings across the roundtrip, so this just works, but be aware that the scaling exponents have already been baked into HiGHS' internal LP by then.
+- **You need scaling to survive a temp-MPS roundtrip.** `save_memory=True` (see *Performance*) writes the LP via `writeModel` after scaling options are applied — HiGHS preserves the option settings across the roundtrip, so this just works, but be aware that the scaling exponents have already been baked into HiGHS' internal LP by then. The same applies to [`Problem.write_mps`](performance.md#writing-mps-without-highs), which emits MPS directly from the polars frames after any Layer-2 rewrites have been applied.
 
 ## Reference
 

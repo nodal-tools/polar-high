@@ -139,8 +139,8 @@ Vendor docs:
     `copt_cmd` is missing the adapter raises `SolverNotAvailableError`
     with a pointer to this section. As an alternative, invoke COPT
     from a Python process that does not import `polar_high` — for
-    example, write the MPS via `Problem.solve(write_mps=...)` (or any
-    other route) and call `coptpy` directly.
+    example, write the MPS via [`Problem.write_mps`](performance.md#writing-mps-without-highs)
+    and call `coptpy` directly.
 
     No other commercial solver exhibits this conflict — Gurobi,
     CPLEX, and Xpress coexist with HiGHS in-process without issue.
