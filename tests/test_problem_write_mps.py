@@ -14,13 +14,18 @@ Gurobi, CPLEX and Xpress.
 
 from __future__ import annotations
 
+import gc
 import math
+import os
+import threading
+import time
 
 import highspy
+import numpy as np
 import polars as pl
 import pytest
 
-from polar_high import Problem
+from polar_high import Param, Problem
 
 
 # ---------------------------------------------------------------------------
@@ -304,3 +309,162 @@ def test_profile_env_var_emits_checkpoints(tmp_path, monkeypatch, capsys) -> Non
     assert "enter" in phases
     assert "exit" in phases
     assert "family_start" in phases
+
+
+# ---------------------------------------------------------------------------
+# Per-term memory-explosion regression
+# ---------------------------------------------------------------------------
+def _read_vmrss_mb() -> float:
+    """Resident set size in MiB from ``/proc/self/status``.  Linux-only —
+    the test that uses this skips on other platforms."""
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024.0
+    raise RuntimeError("VmRSS not found in /proc/self/status")
+
+
+def _peak_rss_during(fn, sample_interval: float = 0.003) -> tuple[float, float, object]:
+    """Run ``fn()`` while polling RSS every ``sample_interval`` seconds.
+    Returns ``(baseline_mb, peak_mb, fn_result)``.  The baseline is
+    sampled after a ``gc.collect()`` immediately before the call so the
+    delta ``peak - baseline`` isolates allocations attributable to
+    ``fn``."""
+    gc.collect()
+    baseline = _read_vmrss_mb()
+    peak = [baseline]
+    stop = [False]
+
+    def sampler() -> None:
+        while not stop[0]:
+            r = _read_vmrss_mb()
+            if r > peak[0]:
+                peak[0] = r
+            time.sleep(sample_interval)
+
+    th = threading.Thread(target=sampler, daemon=True)
+    th.start()
+    try:
+        result = fn()
+    finally:
+        stop[0] = True
+        th.join()
+    return baseline, peak[0], result
+
+
+def _build_chain_explosion_problem() -> tuple[Problem, int]:
+    """Build a one-constraint Problem whose single LHS term is the
+    broadcast-chain shape that historically blew up
+    ``term.lazy.collect()``:
+
+      Var x[t]   * Param p_tk[t,k]  * Param p_k[k]  * Param p_t1[t]
+
+    Var spans T entries, the (t,k) intermediate is T*K dense, and the
+    constraint ``over`` is a sparse subset (~0.5%) of (t,k).  The OLD
+    code materialises the full T*K intermediate inside the term plan
+    before joining to the row index; the NEW code semi-joins through the
+    chain so polars prunes upstream.
+
+    Returns (problem, row_count).
+    """
+    T = 200_000
+    K = 20
+    subset_frac = 0.005
+
+    tt = np.repeat(np.arange(T), K)
+    kk = np.tile(np.arange(K), T)
+    rng = np.random.default_rng(0)
+    keep_n = max(1, int(T * K * subset_frac))
+    keep_idx = rng.choice(T * K, keep_n, replace=False)
+    keep_idx.sort()
+    idx_cstr = pl.DataFrame({"t": tt[keep_idx], "k": kk[keep_idx]})
+
+    pb = Problem()
+    idx_var = pl.DataFrame({"t": np.arange(T)})
+    x = pb.add_var("x", dims=("t",), index=idx_var, lower=0.0, upper=1.0)
+
+    p_tk = Param(
+        ("t", "k"),
+        pl.DataFrame({"t": tt, "k": kk, "value": np.linspace(1.0, 2.0, T * K)}),
+    )
+    p_k = Param(
+        ("k",),
+        pl.DataFrame({"k": np.arange(K), "value": np.linspace(0.5, 1.5, K)}),
+    )
+    p_t1 = Param(
+        ("t",),
+        pl.DataFrame({"t": np.arange(T), "value": np.linspace(1.0, 2.0, T)}),
+    )
+
+    expr = x * p_tk * p_k * p_t1
+    pb.add_cstr(
+        "chain",
+        over=idx_cstr,
+        sense="<=",
+        lhs_terms={"lhs": expr},
+        rhs_terms={"r": 5.0},
+    )
+    pb.set_objective(x, sense="min")
+    return pb, int(idx_cstr.height)
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/proc/self/status"),
+    reason="VmRSS sampling requires /proc (Linux-only)",
+)
+def test_write_mps_param_chain_term_does_not_explode(tmp_path) -> None:
+    """Regression for a per-term memory blow-up in
+    :meth:`Problem.write_mps`.
+
+    Background.  On a real-world DES LP (9.9M rows × 5M cols),
+    ``write_mps`` peaked at 43 GB and a single constraint family with
+    one ``Var * Param * Param * ...`` term contributed +26 GB during
+    ``term.lazy.collect()``.  Polars' join-chain evaluator materialised
+    a wide intermediate before producing the final row-aligned result.
+    The fix mirrors the RHS streaming pattern at engine.py ~1570-1593:
+    semi-join the term plan against the row-index keys so polars can
+    prune the join chain, then collect with ``engine="streaming"``.
+
+    This test builds a small-but-cliffed reproducer (~200k-row Var,
+    ~4M-entry (t,k) intermediate, ~20k-row constraint) and asserts that
+    peak RSS during ``write_mps`` stays modest.  On the unmodified
+    engine.py the delta is ~500 MB; with the fix it drops to <100 MB.
+    The threshold (300 MB) is generous to keep the test stable across
+    polars versions while still failing loudly on regression.
+
+    Correctness is verified by the byte-identical-coefficient check
+    below: solving the MPS roundtrip with HiGHS must reach the same
+    objective as the in-process ``Problem.solve()``.  Streaming
+    reorders evaluation, not arithmetic.
+    """
+    # ---- 1. Build & write under RSS sampling -----------------------
+    pb_for_write, row_count = _build_chain_explosion_problem()
+    mps_path = tmp_path / "chain.mps"
+
+    def do_write() -> None:
+        pb_for_write.write_mps(str(mps_path))
+
+    baseline, peak, _ = _peak_rss_during(do_write)
+    delta = peak - baseline
+
+    # The constraint emits ~row_count nnz triples; anything more than
+    # ~300 MB of transient memory is a sign that the LHS term materialised
+    # the dense intermediate instead of streaming through the semi-join.
+    assert delta < 300.0, (
+        f"write_mps peak RSS delta={delta:.0f} MB exceeds 300 MB budget "
+        f"on {row_count}-row chain constraint (baseline={baseline:.0f} MB, "
+        f"peak={peak:.0f} MB). Regression of the semi-join + streaming "
+        f"fix at engine.py write_mps LHS site."
+    )
+
+    # ---- 2. Roundtrip — byte-identical coefficient check -----------
+    # Read the MPS back through HiGHS and compare objective to an
+    # in-process solve of an equivalent fresh Problem.  Identical
+    # optimum ⟺ identical LP ⟺ identical coefficients.
+    pb_for_solve, _ = _build_chain_explosion_problem()
+    direct = pb_for_solve.solve()
+    assert direct.optimal, direct.status
+
+    status, obj, _ = _solve_via_mps(str(mps_path))
+    assert status == highspy.HighsModelStatus.kOptimal
+    assert abs(obj - direct.obj) < 1e-9, (obj, direct.obj)

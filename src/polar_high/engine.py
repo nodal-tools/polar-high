@@ -1642,6 +1642,16 @@ class Problem:
             # (tiled across row_count rows).  Mirrors the per-family loop
             # in :meth:`_solve_streaming` (lines ~1965-2034) but feeds the
             # resulting triples to a global polars frame instead of HiGHS.
+            #
+            # The "dim" branch uses the same anti-explosion pattern as the
+            # RHS Param join above (lines ~1570-1593): align Enum keys,
+            # semi-join the term plan against the row-index key set so
+            # polars can prune the upstream join chain, then left-join to
+            # the row index and collect with the streaming engine.  Without
+            # the semi-join, a term shaped ``Var * Param₁ * Param₂ * ...``
+            # materialises a wide intermediate before the final row
+            # alignment — observed at +26 GB / 1.5M-row family on the DES
+            # LP.  With it, peak per-term is bounded by ``row_count``.
             row_index_lf = row_index.lazy()
             term_plans: list[tuple] = []
             for term in expr.terms:
@@ -1658,8 +1668,10 @@ class Problem:
                     rl_a, tl_a = _align_enum_join_keys(
                         row_index_lf, term.lazy, on
                     )
+                    keys_lazy = rl_a.select(on).unique()
+                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
                     plan = (
-                        rl_a.join(tl_a, on=on, how="inner")
+                        rl_a.join(tl_pruned, on=on, how="inner")
                         .select("_rid", "col_id", "coef")
                     )
                     term_plans.append(("dim", plan))
@@ -1670,10 +1682,24 @@ class Problem:
             fam_cols_list: list[np.ndarray] = []
             fam_vals_list: list[np.ndarray] = []
             if term_plans:
-                if row_count > 50_000:
-                    collected = [p.collect() for _, p in term_plans]
-                else:
-                    collected = pl.collect_all([p for _, p in term_plans])
+                # Collect each term plan one-at-a-time with the streaming
+                # engine to bound peak memory; the per-term semi-join above
+                # is the prerequisite that lets streaming actually prune.
+                # On older polars (no ``engine=`` kwarg) fall back to
+                # ``streaming=True``; if streaming is unsupported for the
+                # plan shape, fall back silently to a plain ``.collect()``.
+                def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
+                    try:
+                        return p.collect(engine="streaming")
+                    except TypeError:
+                        try:
+                            return p.collect(streaming=True)
+                        except TypeError:
+                            return p.collect()
+                    except Exception:
+                        return p.collect()
+
+                collected = [_collect_one(p) for _, p in term_plans]
                 for (kind, _), j in zip(term_plans, collected):
                     if kind == "dim":
                         if j.height == 0:
