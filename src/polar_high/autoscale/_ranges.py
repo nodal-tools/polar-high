@@ -304,6 +304,15 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     bound_lo, bound_hi = inf, 0.0
     rhs_lo, rhs_hi = inf, 0.0
 
+    # Layer 2 side vectors (off when both are None — pre-Layer-2 caller).
+    # Layer 2 stores ``_layer2_col_factor`` as ``1 / cf_math`` (inverse
+    # forward factor) and ``_layer2_row_factor`` as ``rf_math`` (forward).
+    # Consumers multiply collected ``coef`` by these to get post-Layer-2
+    # magnitudes; this readout does the same so Layer 3's user_*_scale
+    # decision agrees bit-for-bit with what the consumers will emit.
+    _l2_rf = getattr(problem, "_layer2_row_factor", None)
+    _l2_cf = getattr(problem, "_layer2_col_factor", None)
+
     def _agg(lazy_frame: _pl.LazyFrame, col: str) -> tuple[float | None, float | None]:
         """Min/max(abs(``col``)) over finite non-zero rows.
 
@@ -336,6 +345,26 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             return None, None
         arr = df["__abs"].to_numpy()
         return float(arr.min()), float(arr.max())
+
+    def _collect_streaming(plan: _pl.LazyFrame) -> _pl.DataFrame:
+        try:
+            return plan.collect(engine="streaming")
+        except TypeError:
+            try:
+                return plan.collect(streaming=True)
+            except TypeError:
+                return plan.collect()
+        except Exception:
+            return plan.collect()
+
+    def _reduce_abs(vals: np.ndarray) -> tuple[float | None, float | None]:
+        if vals.size == 0:
+            return None, None
+        mask = np.isfinite(vals) & (vals != 0)
+        if not mask.any():
+            return None, None
+        a = np.abs(vals[mask])
+        return float(a.min()), float(a.max())
 
     def _update_matrix(lo: float | None, hi: float | None) -> None:
         nonlocal matrix_lo, matrix_hi
@@ -377,11 +406,24 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     if _profile:
         _emit("bounds_done")
 
-    # Cost — stream-aggregate each objective term.
+    # Cost — stream-aggregate each objective term.  Apply Layer 2 col
+    # factor (objective row is NOT in the row-factor vector — GLPK
+    # convention).  No-op when ``_l2_cf`` is None.
     for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
-        lo, hi = _agg(t.lazy, "coef")
+        if _l2_cf is None:
+            lo, hi = _agg(t.lazy, "coef")
+        else:
+            plan = t.lazy.select("col_id", "coef")
+            df = _collect_streaming(plan)
+            if df.height == 0:
+                lo, hi = None, None
+            else:
+                cids = df["col_id"].to_numpy().astype(np.int64)
+                vals = df["coef"].to_numpy().astype(np.float64)
+                vals = vals * np.abs(_l2_cf[cids])
+                lo, hi = _reduce_abs(vals)
         _update_cost(lo, hi)
         if _profile:
             _emit("obj_term_done", term_idx=ti)
@@ -410,9 +452,17 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     except (ValueError, TypeError):
         _max_family_rows = 1_000_000
 
-    # Matrix + RHS — per constraint family.
+    # Matrix + RHS — per constraint family.  ``base_row`` is the 0-based
+    # absolute constraint row id (same indexing space as
+    # ``_layer2_row_factor`` — apply_layer2 walks ``_cstrs`` in this same
+    # order, so ``base_row + local_rid`` lines up with the side vector).
+    next_row = 0
     for cname, proto, over in problem._cstrs:
-        row_count = 0 if over is None else int(over.height)
+        # Scalar (no ``over``) families still occupy one row in the side
+        # vector — mirror apply_layer2's ``row_count = 1 if over is None``.
+        row_count = 1 if over is None else int(over.height)
+        base_row = next_row
+        next_row += row_count
         if _profile:
             _emit(
                 "family_start", family=cname,
@@ -442,44 +492,77 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # ``min`` / ``max`` adds ~12 MB per Mrow (the column itself)
         # on top of polars' own collect-time peak.
         if isinstance(rhs, (int, float)):
-            _update_rhs_scalar(float(rhs))
+            # Scalar rhs is broadcast across all family rows.  Layer 2
+            # multiplies each emitted row by its own row_factor, so the
+            # magnitude bound is ``|rhs| * (min/max of |rf_slice|)``.
+            if _l2_rf is None or row_count == 0:
+                _update_rhs_scalar(float(rhs))
+            else:
+                rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
+                vals = float(rhs) * rf_slice
+                lo, hi = _reduce_abs(vals)
+                if lo is not None:
+                    if lo < rhs_lo:
+                        rhs_lo = lo
+                    if hi > rhs_hi:
+                        rhs_hi = hi
         elif isinstance(rhs, _Param):
             if over is not None and rhs.dims:
                 on = list(rhs.dims)
-                ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
-                keys = ri_a.select(on).unique()
-                rf_pruned = rf_a.join(keys, on=on, how="semi")
-                plan = ri_a.join(rf_pruned, on=on, how="left").select("value")
-                try:
-                    j = plan.collect(engine="streaming")
-                except TypeError:
-                    try:
-                        j = plan.collect(streaming=True)
-                    except TypeError:
-                        j = plan.collect()
-                except Exception:
-                    j = plan.collect()
-                if j.height > 0:
-                    vals = j["value"].fill_null(0.0).to_numpy()
-                    mask = np.isfinite(vals) & (vals != 0)
-                    if mask.any():
-                        abs_vals = np.abs(vals[mask])
-                        lo = float(abs_vals.min())
-                        hi = float(abs_vals.max())
-                        if lo < rhs_lo:
-                            rhs_lo = lo
-                        if hi > rhs_hi:
-                            rhs_hi = hi
+                # When row_factor is on, we need per-row alignment with
+                # ``_rid`` so we can multiply ``value`` by
+                # ``row_factor[base_row + _rid]`` before reducing.  Mirror
+                # ``_build_lp_arrays``'s rhs build (line ~2245-2321):
+                # carry an ``_rid`` column on the row index.
+                if _l2_rf is None:
+                    ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
+                    keys = ri_a.select(on).unique()
+                    rf_pruned = rf_a.join(keys, on=on, how="semi")
+                    plan = ri_a.join(rf_pruned, on=on, how="left").select("value")
+                    j = _collect_streaming(plan)
+                    if j.height > 0:
+                        vals = j["value"].fill_null(0.0).to_numpy()
+                        lo, hi = _reduce_abs(vals)
+                        if lo is not None:
+                            if lo < rhs_lo:
+                                rhs_lo = lo
+                            if hi > rhs_hi:
+                                rhs_hi = hi
+                else:
+                    over_rid = over.with_columns(
+                        _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
+                    )
+                    ri_a, rf_a = _align(over_rid.lazy(), rhs.lazy, on)
+                    keys = ri_a.select(on).unique()
+                    rf_pruned = rf_a.join(keys, on=on, how="semi")
+                    plan = ri_a.join(rf_pruned, on=on, how="left").select("_rid", "value")
+                    j = _collect_streaming(plan)
+                    if j.height > 0:
+                        rids = j["_rid"].to_numpy().astype(np.int64)
+                        vals = j["value"].fill_null(0.0).to_numpy().astype(np.float64)
+                        vals = vals * np.abs(_l2_rf[base_row + rids])
+                        lo, hi = _reduce_abs(vals)
+                        if lo is not None:
+                            if lo < rhs_lo:
+                                rhs_lo = lo
+                            if hi > rhs_hi:
+                                rhs_hi = hi
             else:
-                # Dimless Param: tiny, collect directly.
+                # Dimless Param: a single scalar value broadcast across
+                # the family rows.  Apply row_factor slice same as the
+                # numeric scalar branch above.
                 f = rhs.frame
                 if "value" in f.columns and f.height > 0:
-                    vals = f["value"].to_numpy()
-                    mask = np.isfinite(vals) & (vals != 0)
-                    if mask.any():
-                        abs_vals = np.abs(vals[mask])
-                        lo = float(abs_vals.min())
-                        hi = float(abs_vals.max())
+                    vals = f["value"].to_numpy().astype(np.float64)
+                    if _l2_rf is None or row_count == 0:
+                        lo, hi = _reduce_abs(vals)
+                    else:
+                        # Each (broadcast) rhs value is multiplied by
+                        # every row's row_factor; expand explicitly.
+                        rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
+                        vals = np.outer(vals, rf_slice).ravel()
+                        lo, hi = _reduce_abs(vals)
+                    if lo is not None:
                         if lo < rhs_lo:
                             rhs_lo = lo
                         if hi > rhs_hi:
@@ -500,18 +583,85 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             axis_cols = list(over.columns)
             row_index_lf = over.lazy()
 
+        # If side vectors are off, use the existing minimal path (just
+        # the abs-only collect).  If on, we need ``_rid`` + ``col_id``
+        # in the collected frame so we can index ``_l2_rf[base_row +
+        # _rid]`` and ``_l2_cf[col_id]`` before the magnitude reduce.
+        # Mirror ``_build_lp_arrays``'s LHS join (engine.py ~2386-2404).
+        if row_index_lf is not None and (_l2_rf is not None):
+            row_index_lf_rid = over.with_columns(
+                _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
+            ).lazy()
+        else:
+            row_index_lf_rid = None
+
         for ti, term in enumerate(proto.expr.terms):
             if not term.dims or row_index_lf is None:
-                # Scalar (no row binding) — aggregate directly.  Same
-                # rationale as the scalar branch in ``_build_lp_arrays``:
-                # already-collapsed terms are small.
-                lo, hi = _agg(term.lazy, "coef")
+                # Scalar (no row binding) — broadcast across the family
+                # rows.  ``_agg`` reduces |coef| only; when side vectors
+                # are on, expand to per-(row,col) magnitudes so the row/
+                # col factors apply.
+                if _l2_rf is None and _l2_cf is None:
+                    lo, hi = _agg(term.lazy, "coef")
+                else:
+                    df = _collect_streaming(term.lazy.select("col_id", "coef"))
+                    if df.height == 0:
+                        lo, hi = None, None
+                    else:
+                        cids = df["col_id"].to_numpy().astype(np.int64)
+                        vals = df["coef"].to_numpy().astype(np.float64)
+                        if _l2_cf is not None:
+                            vals = vals * np.abs(_l2_cf[cids])
+                        if _l2_rf is None or row_count == 0:
+                            lo, hi = _reduce_abs(vals)
+                        else:
+                            rf_slice = np.abs(
+                                _l2_rf[base_row : base_row + row_count]
+                            )
+                            # Per-row broadcast: row_count × len(cids).
+                            tiled_vals = np.outer(rf_slice, vals).ravel()
+                            lo, hi = _reduce_abs(tiled_vals)
             else:
                 on = [d for d in term.dims if d in axis_cols]
-                rl_a, tl_a = _align(row_index_lf, term.lazy, on)
-                keys = rl_a.select(on).unique()
-                pruned = tl_a.join(keys, on=on, how="semi")
-                lo, hi = _agg(pruned, "coef")
+                if _l2_rf is None:
+                    rl_a, tl_a = _align(row_index_lf, term.lazy, on)
+                    keys = rl_a.select(on).unique()
+                    pruned = tl_a.join(keys, on=on, how="semi")
+                    if _l2_cf is None:
+                        lo, hi = _agg(pruned, "coef")
+                    else:
+                        df = _collect_streaming(
+                            pruned.select("col_id", "coef")
+                        )
+                        if df.height == 0:
+                            lo, hi = None, None
+                        else:
+                            cids = df["col_id"].to_numpy().astype(np.int64)
+                            vals = df["coef"].to_numpy().astype(np.float64)
+                            vals = vals * np.abs(_l2_cf[cids])
+                            lo, hi = _reduce_abs(vals)
+                else:
+                    # Side vectors on — left-join with ``_rid`` so the
+                    # collected frame carries the absolute row id needed
+                    # to index ``_l2_rf``.
+                    rl_a, tl_a = _align(row_index_lf_rid, term.lazy, on)
+                    keys = rl_a.select(on).unique()
+                    pruned = tl_a.join(keys, on=on, how="semi")
+                    plan = (
+                        rl_a.join(pruned, on=on, how="inner")
+                        .select("_rid", "col_id", "coef")
+                    )
+                    df = _collect_streaming(plan)
+                    if df.height == 0:
+                        lo, hi = None, None
+                    else:
+                        rids = df["_rid"].to_numpy().astype(np.int64)
+                        cids = df["col_id"].to_numpy().astype(np.int64)
+                        vals = df["coef"].to_numpy().astype(np.float64)
+                        vals = vals * np.abs(_l2_rf[base_row + rids])
+                        if _l2_cf is not None:
+                            vals = vals * np.abs(_l2_cf[cids])
+                        lo, hi = _reduce_abs(vals)
             _update_matrix(lo, hi)
             if _profile:
                 _emit(
