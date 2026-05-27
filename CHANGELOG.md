@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.1.3] — 2026-05-27
+
+### Fixed
+
+- `Problem._build_lp_arrays`, `Problem._solve_streaming`, and
+  `WarmProblem._initial_build` now use the same semi-join + per-term
+  streaming-collect pattern that v2.1.2 added to `Problem.write_mps`.
+  Plain-inner-join + `pl.collect_all` previously materialised deep
+  multi-Param LHS chains and multiplied the peak via parallel
+  collect.  Per-term peak is now bounded by `row_count × cols-per-row`
+  instead of the upstream Param-product cardinality.
+
+- `polar_high.autoscale.detect_ranges` on a pre-solve `Problem` now
+  bypasses `Problem._build_lp_arrays` entirely.  New
+  `_ranges_via_streaming` walks objective + constraint terms one at
+  a time with a semi-join + per-row `abs(coef)` collect (the shape
+  `write_mps` proves on the same chains) and numpy-reduces to
+  min/max.  Avoids materialising the full COO triple list +
+  global dedup that the legacy `_ranges_via_passmodel` ran for the
+  same readout.  Legacy code stays for back-compat but is no longer
+  reached from production callers.
+
+### Added
+
+- `POLAR_HIGH_RANGES_MAX_FAMILY_ROWS` env var (default `1000000`,
+  `0` to disable) — skips constraint families above the threshold
+  in `_ranges_via_streaming`'s RHS + matrix readout.  Background:
+  polars' streaming engine intermittently fails to push the row-key
+  semi-join into deep multi-Param product chains on very large
+  families, so a single term collect can allocate >30 GB before
+  failing on workloads like FlexTool's DES LP
+  (`profile_flow_upper_limit` at 1.5 M rows × multi-Param rhs).
+  Skipping means the range report rides on the families it could
+  read.
+
+- `POLAR_HIGH_BUILD_LP_PROFILE=1` and `POLAR_HIGH_RANGES_PROFILE=1`
+  diagnostic env vars — per-family / per-phase `psutil` RSS deltas
+  to stderr from `Problem._build_lp_arrays` and from the autoscale
+  range detectors respectively.  Zero overhead when unset.
+
+- Regression test
+  `test_detect_ranges_param_chain_does_not_explode` — synthetic
+  200k-row Var × 3-Param chain.  Pre-fix peak 515 MB on this shape;
+  post-fix under 300 MB (test asserts <300 MB).
+
 ## [2.1.2] — 2026-05-27
 
 ### Fixed
