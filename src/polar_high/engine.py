@@ -1322,6 +1322,729 @@ class Problem:
         )
 
     # ------------------------------------------------------------------
+    # Direct polars → MPS writer
+    #
+    # Independent of the HiGHS-backed ``build_only`` path: walks the
+    # polar-side LP source-of-truth (``_vars``, ``_cstrs``, ``_obj_terms``)
+    # and streams an MPS file out without ever instantiating
+    # :class:`highspy.Highs` or :class:`LpView`.  Intended for the very
+    # large LPs where HiGHS' own ``writeModel`` serialiser hits its memory
+    # ceiling (see ``specs/`` for the motivating profile).
+    # ------------------------------------------------------------------
+    def write_mps(
+        self,
+        path: "str | os.PathLike",
+        *,
+        free_format: bool = True,
+        column_order_strict: bool = True,
+        emit_names: bool = True,
+        release: bool = False,
+        name: str = "POLAR_HIGH",
+    ) -> None:
+        """Stream the LP/MIP to ``path`` as a free-format MPS file.
+
+        This is an in-house writer that consumes the polar-side LP
+        source-of-truth (``_vars``, ``_cstrs``, ``_obj_terms``) directly
+        and emits MPS without ever instantiating :class:`highspy.Highs`
+        or building an :class:`LpView`.  The motivation is peak-memory:
+        HiGHS' own ``writeModel`` serialiser materialises ~20× more
+        transient state than the in-process LP itself, which OOMs on
+        very large LPs (~10 M rows × 5 M cols × 20 M nonzeros).  This
+        writer targets ~2-3 GB peak on that same LP.
+
+        Parameters
+        ----------
+        path
+            Output MPS file path.  Caller owns the file; this writer
+            does not delete on failure.
+        free_format
+            Reserved for future use.  Currently always free-format MPS
+            (the modern default — HiGHS, Gurobi, CPLEX, Xpress all
+            accept it).  Fixed 8-char-column MPS is not yet implemented.
+        column_order_strict
+            When ``True`` (default), all nonzeros for a single column
+            are emitted contiguously in the COLUMNS section, sorted by
+            ``(col_id, row_id)``.  This is the spec-compliant ordering
+            every MPS reader accepts.  ``False`` is currently not
+            implemented — see :ref:`Open follow-ups` in the module docs.
+        emit_names
+            When ``True`` (default), row and column names come from the
+            variable family name + dim tuple and the constraint family
+            name + dim tuple (matching the format used by
+            :meth:`Problem.solve` for ``Solution.col_names`` /
+            ``Solution.row_names``).  When ``False``, generic
+            ``C0000001`` / ``R0000001`` names are emitted instead —
+            saves ~30-50% file size at the cost of losing the
+            dim-tuple → column mapping in the MPS itself.  Callers
+            using ``emit_names=False`` must use index-based solution
+            readback (column 0 in the MPS is column 0 in the polars
+            ``Var.frame`` ordering, etc.).  The objective row name is
+            always ``cost`` regardless — it's a reserved unique name.
+        release
+            When ``True``, calls :meth:`_release_python_lp_inputs`
+            after the write completes.  Mirrors the
+            ``solve(save_memory=True)`` semantics — drops the polars
+            LazyFrames, constraint family list, and rhs Param frames
+            while keeping ``self._vars`` (so solutions read back from an
+            external solver can still be mapped to user-space dim
+            tuples via the surviving ``Var.frame["col_id"]`` columns).
+            After release the :class:`Problem` is no longer solvable —
+            :meth:`solve` will raise.
+        name
+            MPS ``NAME`` header; default ``"POLAR_HIGH"``.
+
+        Raises
+        ------
+        RuntimeError
+            If called on a :class:`Problem` whose source has already
+            been released (by an earlier ``solve(save_memory=True)``,
+            ``build_only(...)``, or ``write_mps(..., release=True)``).
+        ValueError
+            If any coefficient is NaN or infinite (silent filtering
+            would hide model bugs).  The error message identifies at
+            least one offending ``(col_id, row_id)`` pair.
+        OSError
+            File I/O failures (passed through from ``open()``).
+
+        Notes
+        -----
+        - The MPS format has no portable encoding for an objective
+          constant offset.  If ``self._obj_offset != 0.0`` this method
+          emits a :class:`UserWarning` and writes the LP without the
+          offset.  Solutions from any downstream solver will then be
+          off by ``self._obj_offset`` — the caller must add it back
+          manually if needed.
+        - Integer columns are bracketed with ``MARKER 'INTORG'`` /
+          ``MARKER 'INTEND'`` in the COLUMNS section, per MPS
+          convention.
+        - The writer is single-pass per family and uses one global
+          polars sort to put the COLUMNS section into column-major
+          order.  Streaming-engine fallback to disk activates
+          automatically for triple counts that don't fit in RAM.
+        """
+        import warnings
+
+        if getattr(self, "_released", False):
+            raise RuntimeError(
+                "Problem.write_mps() called on an already-released "
+                "Problem.  Construct a fresh Problem.",
+            )
+
+        # ------------------------------------------------------------------
+        # Optional memory-profiling instrumentation.
+        #
+        # Activated by ``POLAR_HIGH_WRITE_MPS_PROFILE=1``.  When inactive
+        # (the default) this entire block adds one env-var read and
+        # leaves ``profile`` False — no psutil import, no time.monotonic
+        # calls inside the hot loop, no stderr output.  Call sites below
+        # are guarded by ``if profile:`` so the closure is never invoked
+        # in the off-path.
+        # ------------------------------------------------------------------
+        profile = os.environ.get("POLAR_HIGH_WRITE_MPS_PROFILE") == "1"
+        _emit = None  # type: ignore[assignment]
+        if profile:
+            try:
+                import time as _time
+                import psutil as _psutil
+            except ImportError:
+                sys.stderr.write(
+                    "[write_mps profile] psutil not installed — "
+                    "profiling disabled (install psutil to enable).\n"
+                )
+                sys.stderr.flush()
+                profile = False
+            else:
+                _proc = _psutil.Process()
+                _t0 = _time.monotonic()
+                _state = {"prev_rss_gb": _proc.memory_info().rss / (1024**3)}
+
+                def _emit(  # noqa: E306 — closure local to write_mps
+                    phase: str,
+                    *,
+                    family: str = "-",
+                    family_idx: object = "-",
+                    **extra: object,
+                ) -> None:
+                    rss_gb = _proc.memory_info().rss / (1024**3)
+                    delta_gb = rss_gb - _state["prev_rss_gb"]
+                    _state["prev_rss_gb"] = rss_gb
+                    wall_s = _time.monotonic() - _t0
+                    parts = [
+                        "[write_mps profile]",
+                        f"phase={phase}",
+                        f"family={family}",
+                        f"family_idx={family_idx}",
+                        f"rss_gb={rss_gb:.2f}",
+                        f"delta_gb={delta_gb:+.2f}",
+                        f"wall_s={wall_s:.2f}",
+                    ]
+                    for k, v in extra.items():
+                        parts.append(f"{k}={v}")
+                    sys.stderr.write("\t".join(parts) + "\n")
+                    sys.stderr.flush()
+
+                # Reset wall clock & rss baseline so the enter checkpoint
+                # reports wall_s=0.0 and delta_gb=+0.00.
+                _state["prev_rss_gb"] = _proc.memory_info().rss / (1024**3)
+                _t0 = _time.monotonic()
+                _emit("enter")
+
+        if not column_order_strict:
+            # The user-doc kwarg is kept on the signature so a future
+            # implementation doesn't break callers; for now strict order
+            # is the only supported mode (HiGHS' own writer also emits
+            # strict order, so portability matches the existing path).
+            raise NotImplementedError(
+                "write_mps(column_order_strict=False) is not implemented; "
+                "use the default strict ordering.",
+            )
+
+        if self._obj_offset:
+            warnings.warn(
+                f"Problem.write_mps: dropping non-zero objective offset "
+                f"{self._obj_offset!r} — MPS has no portable encoding for "
+                f"the offset.  Solutions from the downstream solver will be "
+                f"off by this amount; add it back manually if needed.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        n_cols = int(self._next_col)
+
+        # ------------------------------------------------------------------
+        # Phase 1 — walk constraint families to build:
+        #   - row_names list (index 0 = "cost", indices 1.. = constraints)
+        #   - per-family (sense, base_row, row_count, rhs_vec)
+        #   - per-family deduplicated COO triples for the LHS, shifted by
+        #     base_row so row_id matches the final emit order
+        # ------------------------------------------------------------------
+        row_names: list[str] = ["cost"]
+        # families: list of (base_row, row_count, sense_char, rhs_vec)
+        families: list[tuple[int, int, str, np.ndarray]] = []
+        triple_frames: list[pl.DataFrame] = []
+
+        next_row = 1  # row 0 reserved for the objective ("cost")
+        # Cumulative nonzero count across families, for profile reporting.
+        _triples_nnz_so_far = 0
+
+        for _fam_idx, (cname, proto, over) in enumerate(self._cstrs):
+            expr, sense, rhs = proto.expr, proto.sense, proto.rhs
+
+            if over is None:
+                row_count = 1
+                row_index = pl.DataFrame({"_rid": [0]})
+                axis_cols: list[str] = []
+            else:
+                row_count = int(over.height)
+                axis_cols = list(over.columns)
+                row_index = over.with_columns(
+                    _rid=pl.int_range(0, over.height, dtype=pl.Int64)
+                )
+
+            if profile:
+                _emit(
+                    "family_start",
+                    family=cname,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    term_count=len(expr.terms),
+                )
+
+            base_row = next_row
+            next_row += row_count
+
+            # rhs vector — Expr/Var rhs gets moved to lhs as -terms.
+            rhs_vec = np.zeros(row_count, dtype=np.float64)
+            if isinstance(rhs, (int, float)):
+                rhs_vec[:] = float(rhs)
+            elif isinstance(rhs, Param):
+                missing = [d for d in rhs.dims if d not in axis_cols]
+                if missing:
+                    raise ValueError(
+                        f"constraint {cname!r}: rhs Param has dim {missing} "
+                        f"not in over={axis_cols}"
+                    )
+                on = list(rhs.dims)
+                if on:
+                    ri_a, rf_a = _align_enum_join_keys(
+                        row_index.lazy(),
+                        rhs.lazy,
+                        on,
+                    )
+                    keys_lazy = ri_a.select(on).unique()
+                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
+                    _plan = ri_a.join(rf_pruned, on=on, how="left")
+                    try:
+                        j = _plan.collect(engine="streaming")
+                    except TypeError:
+                        j = _plan.collect(streaming=True)
+                    if j.height != row_count:
+                        raise ValueError(
+                            f"constraint {cname!r}: rhs Param has duplicate "
+                            f"keys on {on!r} — left join from row_index "
+                            f"(rows={row_count}) produced {j.height} rows."
+                        )
+                    rhs_vec = (
+                        j.sort("_rid")["value"]
+                        .fill_null(0.0)
+                        .to_numpy()
+                        .astype(np.float64)
+                    )
+                else:
+                    rhs_vec[:] = float(rhs.frame["value"][0])
+            elif isinstance(rhs, (Var, Expr)):
+                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
+                neg = [
+                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
+                    for t in rhs_expr.terms
+                ]
+                expr = Expr(expr.terms + neg)
+            else:
+                raise TypeError(
+                    f"constraint {cname!r}: unsupported rhs type "
+                    f"{type(rhs).__name__}"
+                )
+
+            if sense == "<=":
+                sense_char = "L"
+            elif sense == ">=":
+                sense_char = "G"
+            elif sense == "==":
+                sense_char = "E"
+            else:
+                raise ValueError(
+                    f"constraint {cname!r}: sense must be '<=', '>=' or "
+                    f"'=='; got {sense!r}"
+                )
+
+            families.append((base_row, row_count, sense_char, rhs_vec))
+
+            # Row names for this family.
+            if over is None:
+                row_names.append(cname)
+            else:
+                row_names.extend(
+                    over.select(
+                        pl.format(
+                            "{}[{}]",
+                            pl.lit(cname),
+                            pl.concat_str(
+                                [pl.col(d).cast(pl.String) for d in axis_cols],
+                                separator=",",
+                            ),
+                        ).alias("__rn")
+                    )["__rn"].to_list()
+                )
+
+            # Build this family's COO contribution.  Each term yields
+            # either a "dim" plan (joined to row_index) or a "scalar" plan
+            # (tiled across row_count rows).  Mirrors the per-family loop
+            # in :meth:`_solve_streaming` (lines ~1965-2034) but feeds the
+            # resulting triples to a global polars frame instead of HiGHS.
+            row_index_lf = row_index.lazy()
+            term_plans: list[tuple] = []
+            for term in expr.terms:
+                if term.dims:
+                    missing = [d for d in term.dims if d not in axis_cols]
+                    if missing:
+                        raise ValueError(
+                            f"constraint {cname!r}: term has open dims "
+                            f"{term.dims}, but constraint axes are "
+                            f"{axis_cols}; aggregate {missing} via Sum() "
+                            f"before adding."
+                        )
+                    on = [d for d in term.dims if d in axis_cols]
+                    rl_a, tl_a = _align_enum_join_keys(
+                        row_index_lf, term.lazy, on
+                    )
+                    plan = (
+                        rl_a.join(tl_a, on=on, how="inner")
+                        .select("_rid", "col_id", "coef")
+                    )
+                    term_plans.append(("dim", plan))
+                else:
+                    term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
+
+            fam_rows_list: list[np.ndarray] = []
+            fam_cols_list: list[np.ndarray] = []
+            fam_vals_list: list[np.ndarray] = []
+            if term_plans:
+                if row_count > 50_000:
+                    collected = [p.collect() for _, p in term_plans]
+                else:
+                    collected = pl.collect_all([p for _, p in term_plans])
+                for (kind, _), j in zip(term_plans, collected):
+                    if kind == "dim":
+                        if j.height == 0:
+                            continue
+                        fam_rows_list.append(
+                            j["_rid"].to_numpy().astype(np.int64)
+                        )
+                        fam_cols_list.append(
+                            j["col_id"].to_numpy().astype(np.int64)
+                        )
+                        fam_vals_list.append(
+                            j["coef"].to_numpy().astype(np.float64)
+                        )
+                    else:
+                        cids = j["col_id"].to_numpy().astype(np.int64)
+                        vals = j["coef"].to_numpy().astype(np.float64)
+                        if cids.size == 0:
+                            continue
+                        fam_rows_list.append(
+                            np.repeat(
+                                np.arange(row_count, dtype=np.int64), cids.size
+                            )
+                        )
+                        fam_cols_list.append(np.tile(cids, row_count))
+                        fam_vals_list.append(np.tile(vals, row_count))
+                del collected
+
+            if profile:
+                _fam_collected_nnz = sum(int(a.size) for a in fam_rows_list)
+                _triples_nnz_so_far += _fam_collected_nnz
+                _emit(
+                    "family_collected",
+                    family=cname,
+                    family_idx=_fam_idx,
+                    fam_nnz=_fam_collected_nnz,
+                    triples_so_far=_triples_nnz_so_far,
+                )
+
+            if fam_rows_list:
+                fr = np.concatenate(fam_rows_list)
+                fc = np.concatenate(fam_cols_list)
+                fv = np.concatenate(fam_vals_list)
+                # Per-family dedup-sum, then shift _rid by base_row so the
+                # global frame uses absolute row ids.
+                dedup = (
+                    pl.DataFrame({"r": fr, "c": fc, "v": fv})
+                    .group_by(["r", "c"])
+                    .agg(pl.col("v").sum())
+                )
+                if profile:
+                    _emit(
+                        "family_deduped",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        dedup_nnz=int(dedup.height),
+                    )
+                triple_frames.append(
+                    dedup.select(
+                        col_id=pl.col("c").cast(pl.Int64),
+                        row_id=(pl.col("r").cast(pl.Int64) + base_row),
+                        coef=pl.col("v").cast(pl.Float64),
+                    )
+                )
+                if profile:
+                    _emit(
+                        "family_appended",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        n_frames=len(triple_frames),
+                    )
+                del dedup, fr, fc, fv
+            else:
+                if profile:
+                    _emit(
+                        "family_appended",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        n_frames=len(triple_frames),
+                        empty=1,
+                    )
+            del fam_rows_list, fam_cols_list, fam_vals_list, term_plans
+
+        # ------------------------------------------------------------------
+        # Phase 2 — objective triples (row_id = 0, the "cost" row).
+        # ------------------------------------------------------------------
+        if self._obj_terms:
+            obj_cids: list[np.ndarray] = []
+            obj_vals: list[np.ndarray] = []
+            for t in self._obj_terms:
+                f = t.lazy.collect()
+                if f.height == 0:
+                    del f
+                    continue
+                obj_cids.append(f["col_id"].to_numpy().astype(np.int64))
+                obj_vals.append(f["coef"].to_numpy().astype(np.float64))
+                del f
+            if obj_cids:
+                oc = np.concatenate(obj_cids)
+                ov = np.concatenate(obj_vals)
+                obj_df = (
+                    pl.DataFrame({"c": oc, "v": ov})
+                    .group_by("c")
+                    .agg(pl.col("v").sum())
+                    .select(
+                        col_id=pl.col("c").cast(pl.Int64),
+                        row_id=pl.lit(0, dtype=pl.Int64),
+                        coef=pl.col("v").cast(pl.Float64),
+                    )
+                )
+                triple_frames.append(obj_df)
+                del obj_df, oc, ov
+            del obj_cids, obj_vals
+
+        if profile:
+            _emit("obj_collected", n_frames=len(triple_frames))
+
+        # ------------------------------------------------------------------
+        # Phase 3 — concat + global sort by (col_id, row_id).
+        # ------------------------------------------------------------------
+        if triple_frames:
+            all_triples = pl.concat(triple_frames, how="vertical_relaxed")
+        else:
+            all_triples = pl.DataFrame(
+                schema={"col_id": pl.Int64, "row_id": pl.Int64, "coef": pl.Float64}
+            )
+        del triple_frames
+
+        if profile:
+            _emit("triples_concat", nnz=int(all_triples.height))
+
+        # Hard-error on NaN / inf coefficients.  Silent filtering would
+        # hide real model bugs; the MPS spec has no representation for
+        # NaN coefficients anyway.
+        if all_triples.height:
+            bad = all_triples.filter(
+                pl.col("coef").is_nan() | pl.col("coef").is_infinite()
+            )
+            if bad.height:
+                sample = bad.head(3)
+                raise ValueError(
+                    f"Problem.write_mps: {bad.height} coefficient(s) are "
+                    f"NaN or infinite — refusing to write a corrupt MPS. "
+                    f"First offenders (col_id, row_id, coef): "
+                    f"{sample.rows()}"
+                )
+
+        # Streaming sort — falls back to disk if the triples don't fit.
+        try:
+            sorted_triples = (
+                all_triples.lazy()
+                .sort(["col_id", "row_id"])
+                .collect(engine="streaming")
+            )
+        except TypeError:
+            sorted_triples = (
+                all_triples.lazy()
+                .sort(["col_id", "row_id"])
+                .collect(streaming=True)
+            )
+        del all_triples
+
+        if profile:
+            _emit("triples_sorted", nnz=int(sorted_triples.height))
+
+        # ------------------------------------------------------------------
+        # Phase 4 — build col_id → name lookup and integer-col set.
+        # ------------------------------------------------------------------
+        col_names: list[str] = [""] * n_cols
+        integer_cols: set[int] = set()
+        if emit_names:
+            for v in self._vars.values():
+                ids = v.frame["col_id"].to_numpy()
+                if v.integer:
+                    integer_cols.update(int(c) for c in ids.tolist())
+                if v.dims:
+                    tagged = (
+                        v.frame.select(
+                            pl.format(
+                                "{}[{}]",
+                                pl.lit(v.name),
+                                pl.concat_str(
+                                    [pl.col(d).cast(pl.String) for d in v.dims],
+                                    separator=",",
+                                ),
+                            ).alias("__name")
+                        )
+                    )["__name"].to_list()
+                    for cid, nm in zip(ids.tolist(), tagged):
+                        col_names[cid] = nm
+                else:
+                    col_names[int(ids[0])] = v.name
+        else:
+            # Generic stable names: column 0 → C0000001, etc.
+            for j in range(n_cols):
+                col_names[j] = f"C{j + 1:07d}"
+            for v in self._vars.values():
+                if v.integer:
+                    integer_cols.update(
+                        int(c) for c in v.frame["col_id"].to_numpy().tolist()
+                    )
+
+        # row_names for the constraint section.  Row 0 is always "cost"
+        # (a reserved name — keep it literal even when emit_names=False).
+        if not emit_names:
+            # Replace constraint rows with generic R-names; keep "cost".
+            row_names = ["cost"] + [
+                f"R{i + 1:07d}" for i in range(1, len(row_names))
+            ]
+            # Note: the cost row externally appears as "cost"; constraint
+            # rows are R0000002, R0000003, ... so the generic numbering
+            # gives 1-indexed sequential row ids that match how a user
+            # would count rows in the file.
+
+        # ------------------------------------------------------------------
+        # Phase 5 — stream the MPS file out.
+        # ------------------------------------------------------------------
+        # MPS coefficient formatting: %.17g preserves round-trip for
+        # float64 across solvers (HiGHS uses ~16 digits; CPLEX, Gurobi
+        # all parse %.17g without trouble).  Names emit verbatim — the
+        # caller is responsible for whitespace-free names (the formatting
+        # used by :class:`Var` / constraint families never produces
+        # whitespace inside a name).
+        def _fmt(v: float) -> str:
+            return f"{float(v):.17g}"
+
+        # Open in text mode with utf-8; a moderately large buffer cuts
+        # syscall overhead on the very-large LP target.
+        with open(path, "w", encoding="utf-8", buffering=1 << 20) as f:
+            # NAME header.
+            f.write(f"NAME          {name}\n")
+
+            # OBJSENSE.
+            f.write("OBJSENSE\n")
+            f.write("    MAX\n" if self._obj_sense == "max" else "    MIN\n")
+
+            # ROWS section.
+            f.write("ROWS\n")
+            f.write(" N  cost\n")
+            row_offset = 1  # index into row_names for the first constraint row
+            for base_row, row_count, sense_char, _ in families:
+                end_row = base_row + row_count
+                for rid in range(base_row, end_row):
+                    f.write(f" {sense_char}  {row_names[rid]}\n")
+            del row_offset
+
+            # COLUMNS section — stream the sorted triples in chunks.
+            f.write("COLUMNS\n")
+            in_integer = False
+            int_marker_id = 0  # bumped each INTORG to give unique marker labels
+
+            n_triples = sorted_triples.height
+            CHUNK = 250_000
+            # Track the current column across chunk boundaries so we know
+            # when to flip integer markers.  None == no column emitted yet.
+            cur_col: int | None = None
+            for start in range(0, n_triples, CHUNK):
+                blk = sorted_triples.slice(start, CHUNK)
+                cs = blk["col_id"].to_numpy()
+                rs = blk["row_id"].to_numpy()
+                vs = blk["coef"].to_numpy()
+                for k in range(cs.shape[0]):
+                    c = int(cs[k])
+                    r = int(rs[k])
+                    v = float(vs[k])
+                    if c != cur_col:
+                        # Flip integer markers if needed at column-boundary.
+                        is_int = c in integer_cols
+                        if is_int and not in_integer:
+                            int_marker_id += 1
+                            f.write(
+                                f"    MARKER                 'MARKER'"
+                                f"                 'INTORG'\n"
+                            )
+                            in_integer = True
+                        elif (not is_int) and in_integer:
+                            f.write(
+                                f"    MARKER                 'MARKER'"
+                                f"                 'INTEND'\n"
+                            )
+                            in_integer = False
+                        cur_col = c
+                    f.write(
+                        f"    {col_names[c]}  {row_names[r]}  {_fmt(v)}\n"
+                    )
+                del cs, rs, vs, blk
+            if in_integer:
+                f.write(
+                    f"    MARKER                 'MARKER'"
+                    f"                 'INTEND'\n"
+                )
+                in_integer = False
+
+            if profile:
+                _emit("columns_emitted")
+
+            # RHS section — emit only non-zero entries (MPS convention).
+            f.write("RHS\n")
+            for base_row, row_count, _, rhs_vec in families:
+                # numpy mask of non-zero entries; finite check too — an
+                # ``inf`` rhs would mean an unbounded sense, which we emit
+                # as no entry (HiGHS treats absent rhs as 0 in MPS, but
+                # for L/G the row bound is +/-inf anyway so it cancels).
+                if rhs_vec.size == 0:
+                    continue
+                nz_idx = np.nonzero(np.isfinite(rhs_vec) & (rhs_vec != 0.0))[0]
+                if nz_idx.size == 0:
+                    continue
+                for local_i in nz_idx.tolist():
+                    rid = base_row + int(local_i)
+                    f.write(
+                        f"    rhs  {row_names[rid]}  {_fmt(rhs_vec[local_i])}\n"
+                    )
+
+            if profile:
+                _emit("rhs_emitted")
+
+            # BOUNDS section — per-variable-family scalar bounds.  Emit
+            # only when the column deviates from the MPS default
+            # ``[0, +inf]``.
+            f.write("BOUNDS\n")
+            for v in self._vars.values():
+                lo = float(v.lower)
+                hi = float(v.upper)
+                # Classify the family's bound shape once.
+                if math.isfinite(lo) and lo == 0.0 and math.isinf(hi) and hi > 0:
+                    # Default — emit nothing for the whole family.
+                    continue
+                ids = v.frame["col_id"].to_numpy()
+                if math.isinf(lo) and lo < 0 and math.isinf(hi) and hi > 0:
+                    # Free variable.
+                    for cid in ids.tolist():
+                        f.write(f" FR bnd  {col_names[int(cid)]}\n")
+                elif math.isinf(lo) and lo < 0 and math.isfinite(hi):
+                    for cid in ids.tolist():
+                        nm = col_names[int(cid)]
+                        f.write(f" MI bnd  {nm}\n")
+                        f.write(f" UP bnd  {nm}  {_fmt(hi)}\n")
+                elif math.isfinite(lo) and math.isinf(hi) and hi > 0:
+                    if lo != 0.0:
+                        for cid in ids.tolist():
+                            f.write(
+                                f" LO bnd  {col_names[int(cid)]}  {_fmt(lo)}\n"
+                            )
+                elif math.isfinite(lo) and math.isfinite(hi):
+                    for cid in ids.tolist():
+                        nm = col_names[int(cid)]
+                        f.write(f" LO bnd  {nm}  {_fmt(lo)}\n")
+                        f.write(f" UP bnd  {nm}  {_fmt(hi)}\n")
+                else:
+                    # E.g. lower=+inf or upper=-inf — pathological; let
+                    # MPS readers complain rather than silently filter.
+                    for cid in ids.tolist():
+                        nm = col_names[int(cid)]
+                        if math.isfinite(lo):
+                            f.write(f" LO bnd  {nm}  {_fmt(lo)}\n")
+                        if math.isfinite(hi):
+                            f.write(f" UP bnd  {nm}  {_fmt(hi)}\n")
+
+            f.write("ENDATA\n")
+
+        if profile:
+            _emit("bounds_emitted")
+
+        del sorted_triples
+
+        if release:
+            self._release_python_lp_inputs()
+
+        if profile:
+            _emit("exit")
+
+    # ------------------------------------------------------------------
     # Shared non-streaming LP-array builder
     #
     # Historically also fed :meth:`peek_lp_ranges` (removed in 1.3.0;
