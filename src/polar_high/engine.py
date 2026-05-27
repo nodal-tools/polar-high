@@ -28,6 +28,7 @@ import math
 import os
 import sys
 import tempfile
+import time
 
 import highspy
 import numpy as np
@@ -2120,6 +2121,33 @@ class Problem:
         triple_vals: list[np.ndarray] = []
         next_row = 0
 
+        # Inner profile gate — set ``POLAR_HIGH_BUILD_LP_PROFILE=1`` to
+        # get per-family + per-phase RSS snapshots from this function
+        # (cheap; one stderr line per family/phase, zero overhead when
+        # off).  Useful for localising OOMs inside the LP build that
+        # the outer ``_ranges`` / ``_orchestration`` profilers can't
+        # see into.
+        _blp_profile = os.environ.get("POLAR_HIGH_BUILD_LP_PROFILE") == "1"
+        if _blp_profile:
+            try:
+                import psutil as _ps_blp
+                _blp_proc = _ps_blp.Process()
+                _blp_t0 = time.monotonic()
+
+                def _blp_emit(phase: str, **extras) -> None:
+                    rss = _blp_proc.memory_info().rss / (1024 ** 3)
+                    wall = time.monotonic() - _blp_t0
+                    extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
+                    print(
+                        f"[build_lp profile]\tphase={phase}\trss_gb={rss:.2f}"
+                        f"\twall_s={wall:.2f}"
+                        + (f"\t{extras_str}" if extras_str else ""),
+                        file=sys.stderr, flush=True,
+                    )
+                _blp_emit("enter", n_cstrs=len(self._cstrs))
+            except ImportError:
+                _blp_profile = False
+
         # Pass 1: walk the constraint families, fold rhs Var/Expr into
         # lhs, build row_lb/row_ub, row_names, and stage every term's
         # final LazyFrame (post row-index join).  We don't collect yet —
@@ -2149,6 +2177,12 @@ class Problem:
 
             base_row = next_row
             next_row += row_count
+
+            if _blp_profile:
+                _blp_emit(
+                    "family_start", family=name,
+                    row_count=row_count, term_count=len(expr.terms),
+                )
 
             # rhs vector — Expr/Var on rhs gets moved to lhs as -terms
             rhs_vec = np.zeros(row_count, dtype=np.float64)
@@ -2272,21 +2306,71 @@ class Problem:
                         )
                     on = [d for d in term.dims if d in axis_cols]
                     rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    plan = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
+                    # Same anti-explosion pattern as ``write_mps`` (and
+                    # the RHS Param path at ~line 1814): semi-join the
+                    # term plan against the row-index key set so polars
+                    # can prune the upstream Param-product join chain
+                    # rather than materialising a wide intermediate.
+                    # Without it, a term shaped ``Var * Param₁ * Param₂``
+                    # on a 1.5M-row family allocates +26 GB during one
+                    # collect; with it, peak per-term is bounded by
+                    # ``row_count``.  Notably, this function is called
+                    # from ``autoscale._ranges._ranges_via_passmodel``
+                    # for pre-solve range detection, so the explosion
+                    # hits Layer 1 BEFORE write_mps even runs.
+                    keys_lazy = rl_a.select(on).unique()
+                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                    plan = (
+                        rl_a.join(tl_pruned, on=on, how="inner")
+                        .select("_rid", "col_id", "coef")
+                    )
                     pending.append(("dim", base_row, plan))
                 else:
                     pending.append(
                         ("scalar", base_row, row_count, term.lazy.select("col_id", "coef"))
                     )
 
-        # Pass 2: collect every staged LazyFrame in one shot.  polars'
-        # ``collect_all`` runs the plans in parallel (one thread per
-        # plan, bounded by the number of cores) and shares any common
-        # subplans — much cheaper than serial ``.collect()`` per term.
+        # Pass 2: collect each staged LazyFrame one at a time with the
+        # streaming engine.  Was ``pl.collect_all`` for parallel + shared
+        # subplan execution, but parallel collect of Param-product terms
+        # multiplied peak RSS by core-count on flextool-size LPs (the
+        # plans aren't sharing subplans anyway — each is rooted at a
+        # different family's lazy chain).  Streaming + serial bounds
+        # peak per-term; triple-fallback (``engine="streaming"`` →
+        # ``streaming=True`` → plain ``.collect()``) handles polars
+        # versions or plan shapes that don't yet support streaming.
+        def _collect_one(plan: pl.LazyFrame) -> pl.DataFrame:
+            try:
+                return plan.collect(engine="streaming")
+            except TypeError:
+                try:
+                    return plan.collect(streaming=True)
+                except TypeError:
+                    if _blp_profile:
+                        _blp_emit("collect_fallback", reason="typeerror_both")
+                    return plan.collect()
+            except Exception as exc:
+                if _blp_profile:
+                    _blp_emit(
+                        "collect_fallback", reason="exception",
+                        exc=type(exc).__name__,
+                    )
+                return plan.collect()
+
+        if _blp_profile:
+            _blp_emit("pass1_done", n_pending=len(pending))
+
         if pending:
             plans = [p[-1] for p in pending]
-            collected = pl.collect_all(plans)
-            for p, j in zip(pending, collected):
+            collected_chunks: list = []
+            for idx, p in enumerate(plans):
+                j = _collect_one(p)
+                collected_chunks.append(j)
+                if _blp_profile:
+                    _blp_emit(
+                        "pass2_collected", plan_idx=idx, height=int(j.height),
+                    )
+            for p, j in zip(pending, collected_chunks):
                 kind = p[0]
                 if kind == "dim":
                     _, base_row, _ = p
@@ -2305,11 +2389,17 @@ class Problem:
                     triple_rows.append(rs)
                     triple_cols.append(np.tile(cids, row_count))
                     triple_vals.append(np.tile(vals, row_count))
+            del collected_chunks
+
+        if _blp_profile:
+            _blp_emit("pass2_done")
 
         if triple_rows:
             tr = np.concatenate(triple_rows)
             tc = np.concatenate(triple_cols)
             tv = np.concatenate(triple_vals)
+            if _blp_profile:
+                _blp_emit("triples_concat", nnz=int(tr.size))
             # Sum coefs for duplicate (row, col) pairs.
             dedup = (
                 pl.DataFrame({"r": tr, "c": tc, "v": tv})
@@ -2319,6 +2409,8 @@ class Problem:
             tr = dedup["r"].to_numpy().astype(np.int64)
             tc = dedup["c"].to_numpy().astype(np.int64)
             tv = dedup["v"].to_numpy().astype(np.float64)
+            if _blp_profile:
+                _blp_emit("triples_deduped", nnz=int(tr.size))
         else:
             tr = np.zeros(0, dtype=np.int64)
             tc = np.zeros(0, dtype=np.int64)
@@ -2731,7 +2823,17 @@ class Problem:
                         )
                     on = [d for d in term.dims if d in axis_cols]
                     rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    plan = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
+                    # Semi-join + streaming pattern, mirroring write_mps
+                    # and _build_lp_arrays: prune the term plan against
+                    # the row-index key set so polars can prune Param-
+                    # product join chains rather than materialise a wide
+                    # intermediate.  Same bug class on the LHS as RHS.
+                    keys_lazy = rl_a.select(on).unique()
+                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                    plan = (
+                        rl_a.join(tl_pruned, on=on, how="inner")
+                        .select("_rid", "col_id", "coef")
+                    )
                     term_plans.append(("dim", plan))
                 else:
                     term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
@@ -2740,12 +2842,22 @@ class Problem:
             fam_cols: list[np.ndarray] = []
             fam_vals: list[np.ndarray] = []
             if term_plans:
-                # For large families collect one term at a time so peak
-                # memory stays O(one_frame) rather than O(n_terms × frame).
-                if row_count > 50_000:
-                    collected = [p.collect() for _, p in term_plans]
-                else:
-                    collected = pl.collect_all([p for _, p in term_plans])
+                # Collect one term at a time with the streaming engine
+                # to bound peak memory; per-term semi-join above is the
+                # prerequisite that lets streaming actually prune.
+                # Triple fallback for older polars / unsupported plans.
+                def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
+                    try:
+                        return p.collect(engine="streaming")
+                    except TypeError:
+                        try:
+                            return p.collect(streaming=True)
+                        except TypeError:
+                            return p.collect()
+                    except Exception:
+                        return p.collect()
+
+                collected = [_collect_one(p) for _, p in term_plans]
                 for (kind, _), j in zip(term_plans, collected):
                     if kind == "dim":
                         if j.height == 0:
@@ -4011,17 +4123,23 @@ class WarmProblem:
                         )
                     on = [d for d in term.dims if d in axis_cols]
                     rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
+                    # Semi-join + streaming, same as write_mps /
+                    # _build_lp_arrays / _solve_streaming — prunes the
+                    # term plan against the row-index key set so polars
+                    # can prune Param-product join chains.
+                    keys_lazy = rl_a.select(on).unique()
+                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
                     if tracked_sources:
                         # Keep the term's open dims so we can recover
                         # source-Param dim tuples per cell.
-                        plan = rl_a.join(tl_a, on=on, how="inner").select(
+                        plan = rl_a.join(tl_pruned, on=on, how="inner").select(
                             "_rid", "col_id", "coef", *term.dims
                         )
                         pending.append(
                             ("dim_track", base_row, plan, tracked_sources, tuple(term.dims))
                         )
                     else:
-                        plan = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
+                        plan = rl_a.join(tl_pruned, on=on, how="inner").select("_rid", "col_id", "coef")
                         pending.append(("dim", base_row, plan))
                 else:
                     if tracked_sources:
@@ -4059,7 +4177,23 @@ class WarmProblem:
                 raise AssertionError(f"unknown pending kind {k!r}")
 
             plans = [_plan(pe) for pe in pending]
-            collected = pl.collect_all(plans)
+            # Serial streaming collect, same pattern as the other
+            # term-collect sites in this module — bounds per-term peak
+            # via the streaming engine on top of the per-term semi-join
+            # added above.  Triple fallback for older polars / plans
+            # that don't yet stream.
+            def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
+                try:
+                    return p.collect(engine="streaming")
+                except TypeError:
+                    try:
+                        return p.collect(streaming=True)
+                    except TypeError:
+                        return p.collect()
+                except Exception:
+                    return p.collect()
+
+            collected = [_collect_one(p) for p in plans]
             for pe, j in zip(pending, collected):
                 kind = pe[0]
                 if kind == "dim":

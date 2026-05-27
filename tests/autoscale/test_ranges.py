@@ -197,3 +197,133 @@ def test_detect_ranges_rejects_unrecognised_input() -> None:
     raise — silently degrading would hide wiring bugs."""
     with pytest.raises(TypeError):
         detect_ranges(object(), _config())
+
+
+# ----------------------------------------------------------------------
+# Memory regression — Param-chain LHS term must not explode inside the
+# pre-solve range detection path
+# ----------------------------------------------------------------------
+
+
+import os as _os
+import threading as _threading
+import time as _time
+
+from polar_high.engine import Param, Problem
+
+
+def _read_vmrss_mb() -> float:
+    """VmRSS in MB from /proc/self/status — Linux only."""
+    with open("/proc/self/status", "r") as f:
+        for line in f:
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                return float(parts[1]) / 1024.0
+    raise RuntimeError("VmRSS line not in /proc/self/status")
+
+
+def _peak_rss_during(fn, sample_interval: float = 0.003) -> tuple[float, float, object]:
+    stop = _threading.Event()
+    peak = _read_vmrss_mb()
+    baseline = peak
+
+    def sampler() -> None:
+        nonlocal peak
+        while not stop.is_set():
+            r = _read_vmrss_mb()
+            if r > peak:
+                peak = r
+            _time.sleep(sample_interval)
+
+    t = _threading.Thread(target=sampler, daemon=True)
+    t.start()
+    try:
+        result = fn()
+    finally:
+        stop.set()
+        t.join(timeout=1.0)
+    return baseline, peak, result
+
+
+@pytest.mark.skipif(
+    not _os.path.exists("/proc/self/status"),
+    reason="VmRSS sampling requires /proc (Linux-only)",
+)
+def test_detect_ranges_param_chain_does_not_explode() -> None:
+    """Regression for a per-term blow-up in
+    :func:`_ranges_via_passmodel` → ``Problem._build_lp_arrays``.
+
+    Background.  ``_ranges_via_passmodel`` is the pre-solve range
+    detector reached when the autoscaler is enabled and the caller
+    hands :func:`detect_ranges` a :class:`Problem` (FlexTool's Layer 1
+    pre-solve path).  Internally it calls ``Problem._build_lp_arrays``
+    which used to bind each LHS term to its row-index via a plain
+    ``inner join`` (no semi-join pruning) and then collect every
+    family's term plan in parallel via ``pl.collect_all``.  On a real
+    9.9M-row LP with Param-product LHS terms shaped
+    ``Var * Param₁ * Param₂``, this exploded above 50 GB inside
+    Layer 1 detection — *before* the solve / ``write_mps`` ran at
+    all.  The fix mirrors the same semi-join + streaming retrofit
+    applied to ``write_mps`` in v2.1.2 and to the RHS path in v2.0.
+
+    Reproducer mirrors the ``write_mps`` chain-explosion shape at
+    smaller scale (T=200k, K=20, ~0.5% sparse constraint subset).
+    Without the fix, ``_build_lp_arrays`` peaks ~500 MB+; with the
+    fix, well under 300 MB.
+    """
+    T = 200_000
+    K = 20
+    subset_frac = 0.005
+
+    tt = np.repeat(np.arange(T), K)
+    kk = np.tile(np.arange(K), T)
+    rng = np.random.default_rng(0)
+    keep_n = max(1, int(T * K * subset_frac))
+    keep_idx = rng.choice(T * K, keep_n, replace=False)
+    keep_idx.sort()
+    idx_cstr = pl.DataFrame({"t": tt[keep_idx], "k": kk[keep_idx]})
+
+    pb = Problem()
+    idx_var = pl.DataFrame({"t": np.arange(T)})
+    x = pb.add_var("x", dims=("t",), index=idx_var, lower=0.0, upper=1.0)
+
+    p_tk = Param(
+        ("t", "k"),
+        pl.DataFrame(
+            {"t": tt, "k": kk, "value": np.linspace(1.0, 2.0, T * K)}
+        ),
+    )
+    p_k = Param(
+        ("k",),
+        pl.DataFrame({"k": np.arange(K), "value": np.linspace(0.5, 1.5, K)}),
+    )
+    p_t1 = Param(
+        ("t",),
+        pl.DataFrame({"t": np.arange(T), "value": np.linspace(1.0, 2.0, T)}),
+    )
+
+    expr = x * p_tk * p_k * p_t1
+    pb.add_cstr(
+        "chain", over=idx_cstr, sense="<=",
+        lhs_terms={"lhs": expr}, rhs_terms={"r": 5.0},
+    )
+    pb.set_objective(x, sense="min")
+
+    def do_detect():
+        return detect_ranges(pb, _config())
+
+    baseline, peak, report = _peak_rss_during(do_detect)
+    delta = peak - baseline
+    # Generous ceiling so the test isn't fragile across polars
+    # versions / allocator quirks.  Pre-fix peak ~500-700 MB on this
+    # shape; post-fix typically <250 MB.  300 MB is the line.
+    assert delta < 300.0, (
+        f"_build_lp_arrays allocated {delta:.1f} MB during "
+        f"detect_ranges on a Var*Param*Param*Param chain.  "
+        f"Pre-fix this exceeded 500 MB and on the real DES LP "
+        f"(8× this scale) crossed 50 GB.  Did the semi-join + "
+        f"streaming retrofit at engine.py:_build_lp_arrays regress?"
+    )
+    # Sanity: the readout itself returned something coherent.
+    assert report is not None
+    assert report.matrix is not None

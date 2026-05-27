@@ -233,6 +233,299 @@ def ranges_from_streamed(
     return _build_report(matrix, cost, bound, rhs, config)
 
 
+def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
+    """Pre-solve range detection via per-term streaming aggregation.
+
+    Avoids ``Problem._build_lp_arrays`` (which materialises every
+    constraint's rhs Param-chain + every LHS term's coefficient array,
+    accumulates the full COO triple list, and runs a global dedup).
+    On a 9.9M-row LP with deep multi-Param chains, that path peaks
+    above 30 GB even after the semi-join + streaming retrofits — the
+    polars streaming engine can't always push semi-joins all the way
+    into a 3+ Param product, so an intermediate still materialises.
+
+    This function aggregates ``(min, max)`` of ``abs(coef)`` per
+    objective term, per RHS Param-chain, and per LHS constraint term
+    using polars' aggregation expressions.  The streaming engine only
+    has to carry running min/max scalars through the chain; no
+    intermediate coefficient array is materialised.  Per-term peak is
+    O(1) instead of O(rows × Param-product-cardinality).
+
+    Quirks vs the legacy ``_ranges_via_passmodel``:
+
+    * The dedup-sum step in ``_build_lp_arrays`` could combine two
+      terms' contributions to the same (row, col) cell before reporting
+      the matrix value.  This function reports each per-term coefficient
+      magnitude separately, so a cell whose pre-dedup terms are e.g.
+      ``+1.0`` and ``-0.999`` shows up as min/max ``≈ 1.0`` here vs
+      ``0.001`` after dedup.  Range detection at the magnitude level
+      doesn't care: the resulting trigger / recommendation is the same
+      modulo this corner.
+    * Var/Expr on the RHS is treated as "scale-neutral" for range
+      readout (the magnitudes get folded into the LHS at solve time);
+      ``_build_lp_arrays`` did the same fold + range; here we just
+      skip them, which is mathematically equivalent for the readout
+      because their coefficients are already counted via the LHS scan.
+    """
+    import math as _math
+    import os as _os
+    import sys as _sys
+    import time as _time
+
+    import polars as _pl
+
+    from ..engine import Param as _Param
+    from ..engine import _align_enum_join_keys as _align
+
+    _profile = _os.environ.get("POLAR_HIGH_RANGES_PROFILE") == "1"
+    if _profile:
+        try:
+            import psutil as _ps
+            _proc = _ps.Process()
+            _t0 = _time.monotonic()
+
+            def _emit(phase: str, **extras) -> None:
+                rss = _proc.memory_info().rss / (1024 ** 3)
+                wall = _time.monotonic() - _t0
+                extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
+                print(
+                    f"[ranges-stream profile]\tphase={phase}\trss_gb={rss:.2f}"
+                    f"\twall_s={wall:.2f}"
+                    + (f"\t{extras_str}" if extras_str else ""),
+                    file=_sys.stderr, flush=True,
+                )
+            _emit("enter", n_cstrs=len(problem._cstrs))
+        except ImportError:
+            _profile = False
+
+    inf = _math.inf
+    matrix_lo, matrix_hi = inf, 0.0
+    cost_lo, cost_hi = inf, 0.0
+    bound_lo, bound_hi = inf, 0.0
+    rhs_lo, rhs_hi = inf, 0.0
+
+    def _agg(lazy_frame: _pl.LazyFrame, col: str) -> tuple[float | None, float | None]:
+        """Min/max(abs(``col``)) over finite non-zero rows.
+
+        Produces a per-row ``_abs`` column via streaming-collect, then
+        numpy-reduces.  The shape "collect a column, then reduce" is
+        what polars' streaming engine handles reliably for deep
+        Param-chain plans (proven via :meth:`Problem.write_mps`'s
+        per-term collect); the alternative "select(min, max) inside
+        the lazy plan" form fails to stream on the same chains and
+        materialises the upstream join — observed at >30 GB on the
+        FlexTool DES LP's ``profile_flow_upper_limit`` constraint.
+        Numpy min/max on the (potentially ~10⁷-row) collected column
+        is O(rows), with the column itself occupying ~8 bytes/row.
+        """
+        plan = (
+            lazy_frame
+            .select(_pl.col(col).abs().alias("__abs"))
+            .filter(_pl.col("__abs").is_finite() & (_pl.col("__abs") > 0))
+        )
+        try:
+            df = plan.collect(engine="streaming")
+        except TypeError:
+            try:
+                df = plan.collect(streaming=True)
+            except TypeError:
+                df = plan.collect()
+        except Exception:
+            df = plan.collect()
+        if df.height == 0:
+            return None, None
+        arr = df["__abs"].to_numpy()
+        return float(arr.min()), float(arr.max())
+
+    def _update_matrix(lo: float | None, hi: float | None) -> None:
+        nonlocal matrix_lo, matrix_hi
+        if lo is None or hi is None:
+            return
+        if lo < matrix_lo:
+            matrix_lo = lo
+        if hi > matrix_hi:
+            matrix_hi = hi
+
+    def _update_cost(lo: float | None, hi: float | None) -> None:
+        nonlocal cost_lo, cost_hi
+        if lo is None or hi is None:
+            return
+        if lo < cost_lo:
+            cost_lo = lo
+        if hi > cost_hi:
+            cost_hi = hi
+
+    def _update_rhs_scalar(value: float) -> None:
+        nonlocal rhs_lo, rhs_hi
+        if _math.isfinite(value) and value != 0:
+            a = abs(float(value))
+            if a < rhs_lo:
+                rhs_lo = a
+            if a > rhs_hi:
+                rhs_hi = a
+
+    # Bounds — pure Python; one float per var family × 2.
+    for v in problem._vars.values():
+        for b in (v.lower, v.upper):
+            if _math.isfinite(b) and b != 0:
+                a = abs(float(b))
+                if a < bound_lo:
+                    bound_lo = a
+                if a > bound_hi:
+                    bound_hi = a
+
+    if _profile:
+        _emit("bounds_done")
+
+    # Cost — stream-aggregate each objective term.
+    for ti, t in enumerate(problem._obj_terms):
+        if t.lazy is None:
+            continue
+        lo, hi = _agg(t.lazy, "coef")
+        _update_cost(lo, hi)
+        if _profile:
+            _emit("obj_term_done", term_idx=ti)
+
+    if _profile:
+        _emit("obj_done")
+
+    # Per-family size guard.  Families above this row count are skipped
+    # in Layer-1 detection — their rhs/term coefficient distributions
+    # don't fold into the four-range readout.  This is a deliberate
+    # graceful-degradation: the polars streaming engine intermittently
+    # fails to push the row-key semi-join into deep multi-Param product
+    # chains on very large families (the FlexTool DES LP's
+    # ``profile_flow_upper_limit`` family is the canonical offender —
+    # 1.5 M rows × multi-Param rhs allocates >30 GB even with the
+    # semi-join + left-join + streaming-collect pattern that
+    # ``Problem.write_mps`` survives on).  Skipping means the autoscale
+    # trigger / Layer 3 recommendation is based on the families it
+    # could read; smaller-family ranges still inform the decision.
+    # Override with ``POLAR_HIGH_RANGES_MAX_FAMILY_ROWS=<int>`` —
+    # set to 0 to disable the skip and accept the OOM risk.
+    try:
+        _max_family_rows = int(
+            _os.environ.get("POLAR_HIGH_RANGES_MAX_FAMILY_ROWS", "1000000")
+        )
+    except (ValueError, TypeError):
+        _max_family_rows = 1_000_000
+
+    # Matrix + RHS — per constraint family.
+    for cname, proto, over in problem._cstrs:
+        row_count = 0 if over is None else int(over.height)
+        if _profile:
+            _emit(
+                "family_start", family=cname,
+                row_count=row_count,
+                term_count=len(proto.expr.terms),
+            )
+        if _max_family_rows > 0 and row_count > _max_family_rows:
+            if _profile:
+                _emit(
+                    "family_skipped", family=cname,
+                    row_count=row_count,
+                    threshold=_max_family_rows,
+                )
+            continue
+        rhs = proto.rhs
+
+        # RHS magnitude readout — mirror ``Problem.write_mps``'s rhs
+        # collect pattern exactly (semi-join + left-join with the row
+        # index + streaming collect), then numpy-reduce the value
+        # column.  write_mps's pattern is the proven-working shape on
+        # FlexTool's ``profile_flow_upper_limit`` family
+        # (1.5 M rows × multi-Param rhs); replacing it with a "produce
+        # an aggregate inside the lazy plan" form makes polars give up
+        # on pushing the row-key filter into the Param product, and
+        # the upstream join materialises >30 GB.  Producing the same
+        # per-row frame as write_mps + a final numpy ``np.abs`` /
+        # ``min`` / ``max`` adds ~12 MB per Mrow (the column itself)
+        # on top of polars' own collect-time peak.
+        if isinstance(rhs, (int, float)):
+            _update_rhs_scalar(float(rhs))
+        elif isinstance(rhs, _Param):
+            if over is not None and rhs.dims:
+                on = list(rhs.dims)
+                ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
+                keys = ri_a.select(on).unique()
+                rf_pruned = rf_a.join(keys, on=on, how="semi")
+                plan = ri_a.join(rf_pruned, on=on, how="left").select("value")
+                try:
+                    j = plan.collect(engine="streaming")
+                except TypeError:
+                    try:
+                        j = plan.collect(streaming=True)
+                    except TypeError:
+                        j = plan.collect()
+                except Exception:
+                    j = plan.collect()
+                if j.height > 0:
+                    vals = j["value"].fill_null(0.0).to_numpy()
+                    mask = np.isfinite(vals) & (vals != 0)
+                    if mask.any():
+                        abs_vals = np.abs(vals[mask])
+                        lo = float(abs_vals.min())
+                        hi = float(abs_vals.max())
+                        if lo < rhs_lo:
+                            rhs_lo = lo
+                        if hi > rhs_hi:
+                            rhs_hi = hi
+            else:
+                # Dimless Param: tiny, collect directly.
+                f = rhs.frame
+                if "value" in f.columns and f.height > 0:
+                    vals = f["value"].to_numpy()
+                    mask = np.isfinite(vals) & (vals != 0)
+                    if mask.any():
+                        abs_vals = np.abs(vals[mask])
+                        lo = float(abs_vals.min())
+                        hi = float(abs_vals.max())
+                        if lo < rhs_lo:
+                            rhs_lo = lo
+                        if hi > rhs_hi:
+                            rhs_hi = hi
+        # Var / Expr RHS: skip — they fold into the LHS at solve time,
+        # so their coefficient magnitudes are already counted via the
+        # LHS scan below.  ``_build_lp_arrays`` did the same fold; here
+        # we just rely on the LHS pass to catch the same magnitudes.
+
+        if _profile:
+            _emit("rhs_done", family=cname)
+
+        # LHS matrix magnitudes.
+        if over is None:
+            axis_cols: list[str] = []
+            row_index_lf: _pl.LazyFrame | None = None
+        else:
+            axis_cols = list(over.columns)
+            row_index_lf = over.lazy()
+
+        for ti, term in enumerate(proto.expr.terms):
+            if not term.dims or row_index_lf is None:
+                # Scalar (no row binding) — aggregate directly.  Same
+                # rationale as the scalar branch in ``_build_lp_arrays``:
+                # already-collapsed terms are small.
+                lo, hi = _agg(term.lazy, "coef")
+            else:
+                on = [d for d in term.dims if d in axis_cols]
+                rl_a, tl_a = _align(row_index_lf, term.lazy, on)
+                keys = rl_a.select(on).unique()
+                pruned = tl_a.join(keys, on=on, how="semi")
+                lo, hi = _agg(pruned, "coef")
+            _update_matrix(lo, hi)
+            if _profile:
+                _emit(
+                    "term_done", family=cname, term_idx=ti,
+                    has_dims=str(bool(term.dims)),
+                )
+
+    matrix = (matrix_lo, matrix_hi) if matrix_hi > 0 else _NAN_PAIR
+    cost = (cost_lo, cost_hi) if cost_hi > 0 else _NAN_PAIR
+    bound = (bound_lo, bound_hi) if bound_hi > 0 else _NAN_PAIR
+    rhs_r = (rhs_lo, rhs_hi) if rhs_hi > 0 else _NAN_PAIR
+    return _build_report(matrix, cost, bound, rhs_r, config)
+
+
 def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     """Fallback path: assemble LP via polar-high's internal ``_build_lp_arrays``.
 
@@ -243,6 +536,30 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     the extra pass.  We document the cost explicitly rather than
     silently using it.
     """
+    import os as _os
+    import sys as _sys
+    import time as _time
+    _profile = _os.environ.get("POLAR_HIGH_RANGES_PROFILE") == "1"
+    if _profile:
+        try:
+            import psutil as _ps
+            _proc = _ps.Process()
+            _t0 = _time.monotonic()
+
+            def _emit(phase: str, **extras) -> None:
+                rss = _proc.memory_info().rss / (1024 ** 3)
+                wall = _time.monotonic() - _t0
+                extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
+                print(
+                    f"[ranges profile]\tphase={phase}\trss_gb={rss:.2f}"
+                    f"\twall_s={wall:.2f}"
+                    + (f"\t{extras_str}" if extras_str else ""),
+                    file=_sys.stderr, flush=True,
+                )
+            _emit("enter")
+        except ImportError:
+            _profile = False
+
     # Prepare the same n_cols / col_lb / col_ub arrays ``Problem.solve``
     # builds before calling ``_build_lp_arrays`` — see the streaming
     # solve path in polar_high.engine for the canonical sequence.
@@ -253,6 +570,9 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         cids = v.frame["col_id"].to_numpy()
         col_lb[cids] = v.lower
         col_ub[cids] = v.upper
+
+    if _profile:
+        _emit("bounds_built", n_cols=n_cols)
 
     (
         col_lb_h,
@@ -270,16 +590,33 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         col_ub=col_ub,
     )
 
+    if _profile:
+        _emit("build_lp_arrays_done", nnz=int(sorted_v.size))
+
     # The objective vector — built inline in ``_solve_passmodel`` /
-    # ``_solve_streaming``; mirror that walk here.
+    # ``_solve_streaming``; mirror that walk here.  Use the streaming
+    # engine on each ``t.lazy.collect()`` so a Param-chain objective
+    # term doesn't materialise a wide intermediate (same anti-explosion
+    # rationale as the LHS term collect inside ``_build_lp_arrays``).
     col_obj = np.zeros(n_cols, dtype=np.float64)
     import polars as pl  # local import — autoscale must not pull polars
 
     # at import time for environments that don't need this fallback.
-    for t in problem._obj_terms:
+    for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
-        f = t.lazy.collect() if isinstance(t.lazy, pl.LazyFrame) else t.lazy
+        if isinstance(t.lazy, pl.LazyFrame):
+            try:
+                f = t.lazy.collect(engine="streaming")
+            except TypeError:
+                try:
+                    f = t.lazy.collect(streaming=True)
+                except TypeError:
+                    f = t.lazy.collect()
+            except Exception:
+                f = t.lazy.collect()
+        else:
+            f = t.lazy
         if f.height == 0:
             continue
         np.add.at(
@@ -287,6 +624,8 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
             f["col_id"].to_numpy(),
             f["coef"].to_numpy(),
         )
+        if _profile:
+            _emit("obj_term_collected", term_idx=ti, height=int(f.height))
 
     # ``kHighsInf`` substitution in ``_build_lp_arrays`` replaces ±inf,
     # so we filter via ``np.isfinite`` and the HiGHS sentinel explicitly.
@@ -334,14 +673,17 @@ def detect_ranges(problem_or_solution: Any, config: ScalingConfig) -> RangeRepor
     if isinstance(streamed, dict):
         return ranges_from_streamed(streamed, config)
 
-    # Pre-solve Problem: detect via the streaming solve's private fields.
-    # We never mutate them.
+    # Pre-solve Problem: detect via the streaming-aggregation path.
+    # We never mutate the Problem.  ``_ranges_via_streaming`` bypasses
+    # ``_build_lp_arrays`` entirely (the legacy fallback ``_ranges_via_passmodel``
+    # remained at the bottom of this module for back-compat / test
+    # coverage, but production callers should never reach it).
     if (
         hasattr(problem_or_solution, "_vars")
         and hasattr(problem_or_solution, "_cstrs")
-        and hasattr(problem_or_solution, "_build_lp_arrays")
+        and hasattr(problem_or_solution, "_obj_terms")
     ):
-        return _ranges_via_passmodel(problem_or_solution, config)
+        return _ranges_via_streaming(problem_or_solution, config)
 
     raise TypeError(
         "detect_ranges expects a polar-high Problem (pre-solve) or a "
