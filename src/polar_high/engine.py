@@ -1333,7 +1333,7 @@ class Problem:
     # ------------------------------------------------------------------
     def write_mps(
         self,
-        path: "str | os.PathLike",
+        path: str | os.PathLike,
         *,
         free_format: bool = True,
         column_order_strict: bool = True,
@@ -1445,6 +1445,7 @@ class Problem:
         if profile:
             try:
                 import time as _time
+
                 import psutil as _psutil
             except ImportError:
                 sys.stderr.write(
@@ -1943,14 +1944,14 @@ class Problem:
                         if is_int and not in_integer:
                             int_marker_id += 1
                             f.write(
-                                f"    MARKER                 'MARKER'"
-                                f"                 'INTORG'\n"
+                                "    MARKER                 'MARKER'"
+                                "                 'INTORG'\n"
                             )
                             in_integer = True
                         elif (not is_int) and in_integer:
                             f.write(
-                                f"    MARKER                 'MARKER'"
-                                f"                 'INTEND'\n"
+                                "    MARKER                 'MARKER'"
+                                "                 'INTEND'\n"
                             )
                             in_integer = False
                         cur_col = c
@@ -1960,8 +1961,8 @@ class Problem:
                 del cs, rs, vs, blk
             if in_integer:
                 f.write(
-                    f"    MARKER                 'MARKER'"
-                    f"                 'INTEND'\n"
+                    "    MARKER                 'MARKER'"
+                    "                 'INTEND'\n"
                 )
                 in_integer = False
 
@@ -1970,7 +1971,7 @@ class Problem:
 
             # RHS section — emit only non-zero entries (MPS convention).
             f.write("RHS\n")
-            for base_row, row_count, _, rhs_vec in families:
+            for base_row, _row_count, _, rhs_vec in families:
                 # numpy mask of non-zero entries; finite check too — an
                 # ``inf`` rhs would mean an unbounded sense, which we emit
                 # as no entry (HiGHS treats absent rhs as 0 in MPS, but
@@ -2370,7 +2371,7 @@ class Problem:
         save_memory: bool = False,
         _mps_out_path: str | None = None,
         _build_only: bool = False,
-    ) -> "Solution | None":
+    ) -> Solution | None:
         # Build the per-column arrays inside this frame (rather than in
         # the public ``solve`` caller) so they die at the end of the
         # streaming solve rather than living through ``HiGHS.run()`` on

@@ -26,8 +26,8 @@ from pathlib import Path
 # (We test whether runtime set_threadpool_size works in mode "single".)
 mode = sys.argv[1] if len(sys.argv) > 1 else "baseline"
 
-import numpy as np
-import polars as pl
+import numpy as np  # noqa: E402
+import polars as pl  # noqa: E402
 
 # Now make polar_high importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -56,7 +56,8 @@ def now() -> float:
 def build_problem_multi(n_vars: int, n_cstrs_dim: int, nnz_per_cstr: int, n_families: int) -> Problem:
     """Multi-family variant: split constraints into N families. Mimics realistic
     LPs where many small constraint families each contribute triples."""
-    from polar_high.engine import Param, Sum as Sum2
+    from polar_high.engine import Param
+    from polar_high.engine import Sum as Sum2
     pb = Problem()
     idx_i = pl.DataFrame({"i": pl.int_range(0, n_vars, dtype=pl.Int64, eager=True)})
     x = pb.add_var("x", dims=("i",), index=idx_i, lower=0.0, upper=10.0)
@@ -123,8 +124,8 @@ def instrumented_write_mps(pb: Problem, path: str) -> dict:
     Only re-implements the heavy phases — not full MPS streaming — but
     is faithful enough that the peak occurs at the same point.
     """
-    import warnings
-    from polar_high.engine import Param, Var, Expr, _Term, _align_enum_join_keys
+
+    from polar_high.engine import _align_enum_join_keys
 
     phases: dict[str, float] = {}
     gc.collect()
