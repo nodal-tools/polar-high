@@ -657,6 +657,72 @@ class CstrRecord:
         return f"CstrRecord(name={self.name!r}, rows={n})"
 
 
+class _CanonicalMatrix:
+    """Canonical CSC LP storage (Stage B1).
+
+    Built once by :meth:`Problem.canonicalise`; consumers (currently only
+    :meth:`Problem.write_mps`, more under B2/B3) walk the arrays
+    read-only.  ``val`` / ``col_obj`` / ``row_lb`` / ``row_ub`` carry
+    the POST-Layer-2 scaled coefficients — the side vectors have
+    already been baked in.  Row indices are 0-based over CONSTRAINT
+    rows only (no objective row); column indices are 0-based over the
+    full ``Problem._next_col`` range.
+    """
+
+    __slots__ = (
+        "n_rows",
+        "n_cols",
+        "nnz",
+        "col_ptr",
+        "row_idx",
+        "val",
+        "row_lb",
+        "row_ub",
+        "sense_char",
+        "col_obj",
+        "col_lb",
+        "col_ub",
+        "col_int",
+        "col_names",
+        "row_names",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_rows: int,
+        n_cols: int,
+        nnz: int,
+        col_ptr: np.ndarray,
+        row_idx: np.ndarray,
+        val: np.ndarray,
+        row_lb: np.ndarray,
+        row_ub: np.ndarray,
+        sense_char: np.ndarray,
+        col_obj: np.ndarray,
+        col_lb: np.ndarray,
+        col_ub: np.ndarray,
+        col_int: np.ndarray,
+        col_names: list[str],
+        row_names: list[str],
+    ):
+        self.n_rows = n_rows
+        self.n_cols = n_cols
+        self.nnz = nnz
+        self.col_ptr = col_ptr
+        self.row_idx = row_idx
+        self.val = val
+        self.row_lb = row_lb
+        self.row_ub = row_ub
+        self.sense_char = sense_char
+        self.col_obj = col_obj
+        self.col_lb = col_lb
+        self.col_ub = col_ub
+        self.col_int = col_int
+        self.col_names = col_names
+        self.row_names = row_names
+
+
 def _split_terms(terms: dict, side: str) -> tuple[Expr | None, Param | float]:
     """Sort {label: term} into (variable Expr, constant Param-or-float).
     Variable terms are summed into a single Expr; constant terms are
@@ -913,6 +979,17 @@ class Problem:
         self._layer2_col_factor: np.ndarray | None = None
         self._layer2_row_factor: np.ndarray | None = None
         self._layer2_locked: bool = False
+        # Stage B1 — canonical CSC store.  Populated lazily by
+        # :meth:`canonicalise`; consumed (currently) only by
+        # :meth:`write_mps`.  ``_canonical_dirty`` flips to ``True`` on
+        # ``add_var`` / ``add_cstr`` (and should be flipped by future
+        # ``apply_layer2`` reruns) so the next ``canonicalise`` call
+        # rebuilds.  Side vectors (``_layer2_col_factor`` /
+        # ``_layer2_row_factor``) are baked into ``_matrix.val`` /
+        # ``col_obj`` / ``row_lb`` / ``row_ub`` at build time per
+        # orchestrator decision D8.
+        self._matrix: _CanonicalMatrix | None = None
+        self._canonical_dirty: bool = True
 
     def set_solver_options(self, options: dict | None) -> None:
         """Store HiGHS options to be applied in ``solve()``.  Pass ``None``
@@ -979,6 +1056,7 @@ class Problem:
         frame = index.select(*dims).with_columns(col_id=pl.Series(col_ids))
         v = Var(name, dims, frame, lower, upper, integer)
         self._vars[name] = v
+        self._canonical_dirty = True
         return v
 
     # -- constraints -----------------------------------------------------
@@ -1031,6 +1109,7 @@ class Problem:
 
         proto = _CstrProto(var_expr, sense, const)
         self._cstrs.append((name, proto, over))
+        self._canonical_dirty = True
 
     # -- introspection ---------------------------------------------------
 
@@ -1143,6 +1222,14 @@ class Problem:
             proto.expr.terms = []
             proto.rhs = None
         self._cstrs = []
+
+        # Stage B1 — drop the canonical store too.  It's the same data
+        # in a different shape; carrying it past release would defeat
+        # the save_memory contract.  The next ``canonicalise`` call
+        # would have nothing to read from anyway (``_cstrs`` and
+        # ``_obj_terms`` are empty).
+        self._matrix = None
+        self._canonical_dirty = True
 
         self._released = True
 
@@ -1361,6 +1448,447 @@ class Problem:
         )
 
     # ------------------------------------------------------------------
+    # Canonical CSC store (Stage B1)
+    #
+    # GLPK-style: build the LP matrix once, then have every consumer
+    # walk read-only arrays.  Currently only :meth:`write_mps` reads
+    # ``_matrix``; :meth:`_build_lp_arrays`, :meth:`_solve_streaming`,
+    # :class:`WarmProblem`, and :class:`LpView` keep their Stage A
+    # multiply-at-emit code until B2/B3.
+    # ------------------------------------------------------------------
+    def canonicalise(self) -> _CanonicalMatrix:
+        """Build (or return cached) the canonical CSC matrix + metadata.
+
+        Idempotent: returns the cached ``_matrix`` unless
+        ``_canonical_dirty`` is set (which ``add_var`` / ``add_cstr``
+        flip).  Side vectors (``_layer2_col_factor`` /
+        ``_layer2_row_factor``) are baked into the returned arrays at
+        build time per orchestrator decision D8.
+        """
+        if self._matrix is not None and not self._canonical_dirty:
+            return self._matrix
+        self._matrix = self._build_canonical_matrix()
+        self._canonical_dirty = False
+        return self._matrix
+
+    def _build_canonical_matrix(self) -> _CanonicalMatrix:
+        """One-shot LP build: walks ``_cstrs`` + ``_obj_terms`` once,
+        applies Layer-2 side vectors, global-dedups, and returns a
+        canonical CSC ``_CanonicalMatrix``.  See :meth:`canonicalise`.
+        """
+        # Per-family profile gate — same env var as write_mps so the
+        # canonicalise step appears in the same `[write_mps profile]`
+        # stream.  Emits the per-family checkpoints that used to live
+        # inline in write_mps (D8 moved the family walk here).
+        _profile = os.environ.get("POLAR_HIGH_WRITE_MPS_PROFILE") == "1"
+        _cm_emit = None  # type: ignore[assignment]
+        if _profile:
+            try:
+                import psutil as _ps_cm
+                _cm_proc = _ps_cm.Process()
+                _cm_t0 = time.monotonic()
+
+                def _cm_emit(phase: str, **extras) -> None:  # noqa: E306
+                    rss = _cm_proc.memory_info().rss / (1024**3)
+                    wall = time.monotonic() - _cm_t0
+                    extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
+                    sys.stderr.write(
+                        f"[write_mps profile]\tphase={phase}"
+                        f"\trss_gb={rss:.2f}\twall_s={wall:.2f}"
+                        + (f"\t{extras_str}" if extras_str else "")
+                        + "\n"
+                    )
+                    sys.stderr.flush()
+                _cm_emit("canonicalise_enter", n_cstrs=len(self._cstrs))
+            except ImportError:
+                _profile = False
+
+        n_cols = int(self._next_col)
+
+        # Side vectors (BAKE site per D8).  After this method returns,
+        # ``_matrix.val`` / ``col_obj`` / ``row_lb`` / ``row_ub`` carry
+        # post-Layer-2 coefficients and consumers do NOT re-multiply.
+        _rf = self._layer2_row_factor
+        _cf = self._layer2_col_factor
+
+        # ---- Pass 1: walk families to build row metadata + LHS triples.
+        triple_rows: list[np.ndarray] = []
+        triple_cols: list[np.ndarray] = []
+        triple_vals: list[np.ndarray] = []
+        rows_lb_chunks: list[np.ndarray] = []
+        rows_ub_chunks: list[np.ndarray] = []
+        sense_chunks: list[np.ndarray] = []
+        row_names: list[str] = []
+        next_row = 0  # 0-based over constraint rows (no objective row).
+
+        for _fam_idx, (cname, proto, over) in enumerate(self._cstrs):
+            expr, sense, rhs = proto.expr, proto.sense, proto.rhs
+
+            if over is None:
+                row_count = 1
+                row_index = pl.DataFrame({"_rid": [0]})
+                axis_cols: list[str] = []
+            else:
+                row_count = int(over.height)
+                axis_cols = list(over.columns)
+                row_index = over.with_columns(
+                    _rid=pl.int_range(0, over.height, dtype=pl.Int64)
+                )
+
+            if _profile:
+                _cm_emit(
+                    "family_start",
+                    family=cname,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    term_count=len(expr.terms),
+                )
+
+            base_row = next_row
+            next_row += row_count
+
+            # ---- RHS vector (Param / scalar / Var-on-RHS fold).
+            rhs_vec = np.zeros(row_count, dtype=np.float64)
+            if isinstance(rhs, (int, float)):
+                rhs_vec[:] = float(rhs)
+            elif isinstance(rhs, Param):
+                missing = [d for d in rhs.dims if d not in axis_cols]
+                if missing:
+                    raise ValueError(
+                        f"constraint {cname!r}: rhs Param has dim {missing} "
+                        f"not in over={axis_cols}"
+                    )
+                on = list(rhs.dims)
+                if on:
+                    ri_a, rf_a = _align_enum_join_keys(
+                        row_index.lazy(),
+                        rhs.lazy,
+                        on,
+                    )
+                    keys_lazy = ri_a.select(on).unique()
+                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
+                    _plan = ri_a.join(rf_pruned, on=on, how="left")
+                    try:
+                        j = _plan.collect(engine="streaming")
+                    except TypeError:
+                        j = _plan.collect(streaming=True)
+                    if j.height != row_count:
+                        raise ValueError(
+                            f"constraint {cname!r}: rhs Param has duplicate "
+                            f"keys on {on!r} — left join from row_index "
+                            f"(rows={row_count}) produced {j.height} rows."
+                        )
+                    rhs_vec = (
+                        j.sort("_rid")["value"]
+                        .fill_null(0.0)
+                        .to_numpy()
+                        .astype(np.float64)
+                    )
+                else:
+                    rhs_vec[:] = float(rhs.frame["value"][0])
+            elif isinstance(rhs, (Var, Expr)):
+                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
+                neg = [
+                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
+                    for t in rhs_expr.terms
+                ]
+                expr = Expr(expr.terms + neg)
+            else:
+                raise TypeError(
+                    f"constraint {cname!r}: unsupported rhs type "
+                    f"{type(rhs).__name__}"
+                )
+
+            # ---- Layer 2 row-factor on RHS (BAKE).
+            if _rf is not None and row_count:
+                rhs_vec = rhs_vec * _rf[base_row : base_row + row_count]
+
+            # ---- sense → lb/ub vectors.
+            if sense == "<=":
+                sc = "L"
+                lb_vec = np.full(row_count, -np.inf, dtype=np.float64)
+                ub_vec = rhs_vec
+            elif sense == ">=":
+                sc = "G"
+                lb_vec = rhs_vec
+                ub_vec = np.full(row_count, np.inf, dtype=np.float64)
+            elif sense == "==":
+                sc = "E"
+                lb_vec = rhs_vec
+                ub_vec = rhs_vec
+            else:
+                raise ValueError(
+                    f"constraint {cname!r}: sense must be '<=', '>=' or "
+                    f"'=='; got {sense!r}"
+                )
+            rows_lb_chunks.append(lb_vec)
+            rows_ub_chunks.append(ub_vec)
+            sense_chunks.append(
+                np.full(row_count, ord(sc), dtype=np.uint8)
+            )
+
+            # ---- row names.
+            if over is None:
+                row_names.append(cname)
+            else:
+                row_names.extend(
+                    over.select(
+                        pl.format(
+                            "{}[{}]",
+                            pl.lit(cname),
+                            pl.concat_str(
+                                [pl.col(d).cast(pl.String) for d in axis_cols],
+                                separator=",",
+                            ),
+                        ).alias("__rn")
+                    )["__rn"].to_list()
+                )
+
+            # ---- LHS term plans (same semi-join + streaming pattern as
+            # write_mps' Stage A code).
+            row_index_lf = row_index.lazy()
+            term_plans: list[tuple] = []
+            for term in expr.terms:
+                if term.dims:
+                    missing = [d for d in term.dims if d not in axis_cols]
+                    if missing:
+                        raise ValueError(
+                            f"constraint {cname!r}: term has open dims "
+                            f"{term.dims}, but constraint axes are "
+                            f"{axis_cols}; aggregate {missing} via Sum() "
+                            f"before adding."
+                        )
+                    on = [d for d in term.dims if d in axis_cols]
+                    rl_a, tl_a = _align_enum_join_keys(
+                        row_index_lf, term.lazy, on
+                    )
+                    keys_lazy = rl_a.select(on).unique()
+                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                    plan = (
+                        rl_a.join(tl_pruned, on=on, how="inner")
+                        .select("_rid", "col_id", "coef")
+                    )
+                    term_plans.append(("dim", plan))
+                else:
+                    term_plans.append(
+                        ("scalar", term.lazy.select("col_id", "coef"))
+                    )
+
+            if not term_plans:
+                if _profile:
+                    _cm_emit(
+                        "family_collected",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        fam_nnz=0,
+                    )
+                continue
+
+            # Collect one-at-a-time to bound peak memory; same fallback
+            # chain (streaming engine → streaming kwarg → plain collect)
+            # write_mps' Stage A code uses.
+            def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
+                try:
+                    return p.collect(engine="streaming")
+                except TypeError:
+                    try:
+                        return p.collect(streaming=True)
+                    except TypeError:
+                        return p.collect()
+                except Exception:
+                    return p.collect()
+
+            collected = [_collect_one(p) for _, p in term_plans]
+            fam_nnz = 0
+            for (kind, _), j in zip(term_plans, collected):
+                if kind == "dim":
+                    if j.height == 0:
+                        continue
+                    rids_local = j["_rid"].to_numpy().astype(np.int64)
+                    abs_rows = (base_row + rids_local).astype(np.int64)
+                    cids = j["col_id"].to_numpy().astype(np.int64)
+                    vals = j["coef"].to_numpy().astype(np.float64)
+                    # BAKE side vectors into LHS values.
+                    if _rf is not None:
+                        vals = vals * _rf[abs_rows]
+                    if _cf is not None:
+                        vals = vals * _cf[cids]
+                    triple_rows.append(abs_rows)
+                    triple_cols.append(cids)
+                    triple_vals.append(vals)
+                    fam_nnz += abs_rows.size
+                else:
+                    cids = j["col_id"].to_numpy().astype(np.int64)
+                    vals = j["coef"].to_numpy().astype(np.float64)
+                    if cids.size == 0:
+                        continue
+                    rs = np.repeat(
+                        np.arange(
+                            base_row, base_row + row_count, dtype=np.int64
+                        ),
+                        cids.size,
+                    )
+                    tiled_cols = np.tile(cids, row_count)
+                    tiled_vals = np.tile(vals, row_count)
+                    if _rf is not None:
+                        tiled_vals = tiled_vals * _rf[rs]
+                    if _cf is not None:
+                        tiled_vals = tiled_vals * _cf[tiled_cols]
+                    triple_rows.append(rs)
+                    triple_cols.append(tiled_cols)
+                    triple_vals.append(tiled_vals)
+                    fam_nnz += rs.size
+            del collected
+
+            if _profile:
+                _cm_emit(
+                    "family_collected",
+                    family=cname,
+                    family_idx=_fam_idx,
+                    fam_nnz=fam_nnz,
+                )
+
+        n_constraint_rows = next_row
+
+        # ---- Pass 2: global dedup-sum on (col, row) keys (D9).  Same
+        # pattern as ``_build_lp_arrays`` post-Stage-A: polars group_by.
+        if triple_rows:
+            tr = np.concatenate(triple_rows)
+            tc = np.concatenate(triple_cols)
+            tv = np.concatenate(triple_vals)
+            del triple_rows, triple_cols, triple_vals
+            dedup = (
+                pl.DataFrame({"r": tr, "c": tc, "v": tv})
+                .group_by(["r", "c"])
+                .agg(pl.col("v").sum())
+            )
+            tr = dedup["r"].to_numpy().astype(np.int64)
+            tc = dedup["c"].to_numpy().astype(np.int64)
+            tv = dedup["v"].to_numpy().astype(np.float64)
+            del dedup
+        else:
+            tr = np.zeros(0, dtype=np.int64)
+            tc = np.zeros(0, dtype=np.int64)
+            tv = np.zeros(0, dtype=np.float64)
+
+        if _profile:
+            _cm_emit("global_deduped", nnz=int(tr.size))
+
+        # ---- Pass 3: CSC sort + col_ptr.  Mirrors ``_build_lp_arrays``
+        # at engine.py:~2538 (idx_dtype choice and lexsort + np.add.at).
+        nnz = int(tr.size)
+        idx_dtype = np.int32 if nnz < (1 << 31) else np.int64
+        if nnz:
+            order = np.lexsort((tr, tc))  # primary: col, secondary: row
+            sorted_r = tr[order].astype(idx_dtype)
+            sorted_c = tc[order].astype(idx_dtype)
+            sorted_v = tv[order].astype(np.float64)
+        else:
+            sorted_r = np.zeros(0, dtype=idx_dtype)
+            sorted_c = np.zeros(0, dtype=idx_dtype)
+            sorted_v = np.zeros(0, dtype=np.float64)
+        del tr, tc, tv
+
+        col_ptr = np.zeros(n_cols + 1, dtype=idx_dtype)
+        if sorted_c.size:
+            np.add.at(col_ptr[1:], sorted_c, 1)
+        col_ptr = np.cumsum(col_ptr).astype(idx_dtype)
+
+        if _profile:
+            _cm_emit("csc_built", nnz=nnz)
+
+        # ---- Pass 4: objective.  BAKE col_factor (no row_factor —
+        # the cost row is NOT in the row_factor vector per GLPK
+        # convention; orchestrator principle #4).
+        col_obj = np.zeros(n_cols, dtype=np.float64)
+        for t in self._obj_terms:
+            f = t.lazy.collect()
+            if f.height == 0:
+                del f
+                continue
+            cids = f["col_id"].to_numpy().astype(np.int64)
+            vals = f["coef"].to_numpy().astype(np.float64)
+            if _cf is not None:
+                vals = vals * _cf[cids]
+            # np.add.at handles duplicate col_ids across obj terms.
+            np.add.at(col_obj, cids, vals)
+            del f
+
+        # ---- Pass 5: col metadata.  ``Var.lower``/``upper`` are
+        # already mutated in place by ``apply_layer2``; no further
+        # scaling needed here (BOUNDS section gets these verbatim).
+        col_lb = np.zeros(n_cols, dtype=np.float64)
+        col_ub = np.full(n_cols, np.inf, dtype=np.float64)
+        col_int = np.zeros(n_cols, dtype=np.int8)
+        for v in self._vars.values():
+            ids = v.frame["col_id"].to_numpy()
+            col_lb[ids] = float(v.lower)
+            col_ub[ids] = float(v.upper)
+            if v.integer:
+                col_int[ids] = 1
+
+        # ---- Pass 6: col names.  Used by write_mps + (future)
+        # write_lp / diagnostic emitters.  Not gated on emit_names —
+        # the canonical store always carries them; write_mps can
+        # override with generic R/C names at emit time.
+        col_names: list[str] = [""] * n_cols
+        for v in self._vars.values():
+            ids = v.frame["col_id"].to_numpy()
+            if v.dims:
+                tagged = (
+                    v.frame.select(
+                        pl.format(
+                            "{}[{}]",
+                            pl.lit(v.name),
+                            pl.concat_str(
+                                [pl.col(d).cast(pl.String) for d in v.dims],
+                                separator=",",
+                            ),
+                        ).alias("__name")
+                    )
+                )["__name"].to_list()
+                for cid, nm in zip(ids.tolist(), tagged):
+                    col_names[cid] = nm
+            else:
+                col_names[int(ids[0])] = v.name
+
+        # Concat row metadata into final arrays.
+        if rows_lb_chunks:
+            row_lb = np.concatenate(rows_lb_chunks)
+            row_ub = np.concatenate(rows_ub_chunks)
+            sense_char = np.concatenate(sense_chunks)
+        else:
+            row_lb = np.zeros(0, dtype=np.float64)
+            row_ub = np.zeros(0, dtype=np.float64)
+            sense_char = np.zeros(0, dtype=np.uint8)
+
+        if _profile:
+            _cm_emit(
+                "canonicalise_exit",
+                n_rows=n_constraint_rows,
+                n_cols=n_cols,
+                nnz=nnz,
+            )
+
+        return _CanonicalMatrix(
+            n_rows=n_constraint_rows,
+            n_cols=n_cols,
+            nnz=nnz,
+            col_ptr=col_ptr,
+            row_idx=sorted_r,
+            val=sorted_v,
+            row_lb=row_lb,
+            row_ub=row_ub,
+            sense_char=sense_char,
+            col_obj=col_obj,
+            col_lb=col_lb,
+            col_ub=col_ub,
+            col_int=col_int,
+            col_names=col_names,
+            row_names=row_names,
+        )
+
+    # ------------------------------------------------------------------
     # Direct polars → MPS writer
     #
     # Independent of the HiGHS-backed ``build_only`` path: walks the
@@ -1549,449 +2077,76 @@ class Problem:
                 stacklevel=2,
             )
 
-        n_cols = int(self._next_col)
-
         # ------------------------------------------------------------------
-        # Phase 1 — walk constraint families to build:
-        #   - row_names list (index 0 = "cost", indices 1.. = constraints)
-        #   - per-family (sense, base_row, row_count, rhs_vec)
-        #   - per-family deduplicated COO triples for the LHS, shifted by
-        #     base_row so row_id matches the final emit order
+        # Stage B1 — read from the canonical CSC matrix.  Per D8, side
+        # vectors are already baked into ``m.val`` / ``m.col_obj`` /
+        # ``m.row_lb`` / ``m.row_ub`` so this method does NOT multiply
+        # by ``_layer2_*_factor`` itself.
         # ------------------------------------------------------------------
-        row_names: list[str] = ["cost"]
-        # families: list of (base_row, row_count, sense_char, rhs_vec)
-        families: list[tuple[int, int, str, np.ndarray]] = []
-        triple_frames: list[pl.DataFrame] = []
+        if profile:
+            _emit("canonicalise_start")
+        m = self.canonicalise()
+        if profile:
+            _emit("canonicalise_done", nnz=m.nnz, n_rows=m.n_rows, n_cols=m.n_cols)
 
-        next_row = 1  # row 0 reserved for the objective ("cost")
-        # Cumulative nonzero count across families, for profile reporting.
-        _triples_nnz_so_far = 0
+        n_cols = m.n_cols
+        n_constraint_rows = m.n_rows
 
-        for _fam_idx, (cname, proto, over) in enumerate(self._cstrs):
-            expr, sense, rhs = proto.expr, proto.sense, proto.rhs
-
-            if over is None:
-                row_count = 1
-                row_index = pl.DataFrame({"_rid": [0]})
-                axis_cols: list[str] = []
-            else:
-                row_count = int(over.height)
-                axis_cols = list(over.columns)
-                row_index = over.with_columns(
-                    _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-                )
-
-            if profile:
-                _emit(
-                    "family_start",
-                    family=cname,
-                    family_idx=_fam_idx,
-                    row_count=row_count,
-                    term_count=len(expr.terms),
-                )
-
-            base_row = next_row
-            next_row += row_count
-
-            # rhs vector — Expr/Var rhs gets moved to lhs as -terms.
-            rhs_vec = np.zeros(row_count, dtype=np.float64)
-            if isinstance(rhs, (int, float)):
-                rhs_vec[:] = float(rhs)
-            elif isinstance(rhs, Param):
-                missing = [d for d in rhs.dims if d not in axis_cols]
-                if missing:
-                    raise ValueError(
-                        f"constraint {cname!r}: rhs Param has dim {missing} "
-                        f"not in over={axis_cols}"
-                    )
-                on = list(rhs.dims)
-                if on:
-                    ri_a, rf_a = _align_enum_join_keys(
-                        row_index.lazy(),
-                        rhs.lazy,
-                        on,
-                    )
-                    keys_lazy = ri_a.select(on).unique()
-                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
-                    _plan = ri_a.join(rf_pruned, on=on, how="left")
-                    try:
-                        j = _plan.collect(engine="streaming")
-                    except TypeError:
-                        j = _plan.collect(streaming=True)
-                    if j.height != row_count:
-                        raise ValueError(
-                            f"constraint {cname!r}: rhs Param has duplicate "
-                            f"keys on {on!r} — left join from row_index "
-                            f"(rows={row_count}) produced {j.height} rows."
-                        )
-                    rhs_vec = (
-                        j.sort("_rid")["value"]
-                        .fill_null(0.0)
-                        .to_numpy()
-                        .astype(np.float64)
-                    )
-                else:
-                    rhs_vec[:] = float(rhs.frame["value"][0])
-            elif isinstance(rhs, (Var, Expr)):
-                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [
-                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
-                    for t in rhs_expr.terms
-                ]
-                expr = Expr(expr.terms + neg)
-            else:
-                raise TypeError(
-                    f"constraint {cname!r}: unsupported rhs type "
-                    f"{type(rhs).__name__}"
-                )
-
-            if sense == "<=":
-                sense_char = "L"
-            elif sense == ">=":
-                sense_char = "G"
-            elif sense == "==":
-                sense_char = "E"
-            else:
+        # Hard-error on NaN / inf coefficients (silent filtering would
+        # hide real model bugs; the MPS spec has no representation).
+        # Checks both the matrix values and the objective row — both
+        # are written to the COLUMNS section.  (RHS rows skip non-finite
+        # entries below, matching the prior emit behaviour where
+        # ``inf`` rhs on an L/G row collapses to no entry.)
+        if m.nnz:
+            bad_mask = ~np.isfinite(m.val)
+            if bad_mask.any():
+                bad_k = int(np.nonzero(bad_mask)[0][0])
                 raise ValueError(
-                    f"constraint {cname!r}: sense must be '<=', '>=' or "
-                    f"'=='; got {sense!r}"
+                    f"Problem.write_mps: {int(bad_mask.sum())} matrix "
+                    f"coefficient(s) are NaN or infinite — refusing to "
+                    f"write a corrupt MPS. First offender (row, col, coef): "
+                    f"({int(m.row_idx[bad_k])}, ?, {float(m.val[bad_k])})"
                 )
-
-            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
-            # 1-based here (cost row is absolute row 0); row_factor is
-            # 0-indexed over constraints, so the slice starts at
-            # base_row - 1.
-            if self._layer2_row_factor is not None and row_count:
-                rhs_vec = rhs_vec * self._layer2_row_factor[
-                    base_row - 1 : base_row - 1 + row_count
-                ]
-
-            families.append((base_row, row_count, sense_char, rhs_vec))
-
-            # Row names for this family.
-            if over is None:
-                row_names.append(cname)
-            else:
-                row_names.extend(
-                    over.select(
-                        pl.format(
-                            "{}[{}]",
-                            pl.lit(cname),
-                            pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in axis_cols],
-                                separator=",",
-                            ),
-                        ).alias("__rn")
-                    )["__rn"].to_list()
-                )
-
-            # Build this family's COO contribution.  Each term yields
-            # either a "dim" plan (joined to row_index) or a "scalar" plan
-            # (tiled across row_count rows).  Mirrors the per-family loop
-            # in :meth:`_solve_streaming` (lines ~1965-2034) but feeds the
-            # resulting triples to a global polars frame instead of HiGHS.
-            #
-            # The "dim" branch uses the same anti-explosion pattern as the
-            # RHS Param join above (lines ~1570-1593): align Enum keys,
-            # semi-join the term plan against the row-index key set so
-            # polars can prune the upstream join chain, then left-join to
-            # the row index and collect with the streaming engine.  Without
-            # the semi-join, a term shaped ``Var * Param₁ * Param₂ * ...``
-            # materialises a wide intermediate before the final row
-            # alignment — observed at +26 GB / 1.5M-row family on the DES
-            # LP.  With it, peak per-term is bounded by ``row_count``.
-            row_index_lf = row_index.lazy()
-            term_plans: list[tuple] = []
-            for term in expr.terms:
-                if term.dims:
-                    missing = [d for d in term.dims if d not in axis_cols]
-                    if missing:
-                        raise ValueError(
-                            f"constraint {cname!r}: term has open dims "
-                            f"{term.dims}, but constraint axes are "
-                            f"{axis_cols}; aggregate {missing} via Sum() "
-                            f"before adding."
-                        )
-                    on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(
-                        row_index_lf, term.lazy, on
-                    )
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = (
-                        rl_a.join(tl_pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
-                    )
-                    term_plans.append(("dim", plan))
-                else:
-                    term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
-
-            fam_rows_list: list[np.ndarray] = []
-            fam_cols_list: list[np.ndarray] = []
-            fam_vals_list: list[np.ndarray] = []
-            if term_plans:
-                # Collect each term plan one-at-a-time with the streaming
-                # engine to bound peak memory; the per-term semi-join above
-                # is the prerequisite that lets streaming actually prune.
-                # On older polars (no ``engine=`` kwarg) fall back to
-                # ``streaming=True``; if streaming is unsupported for the
-                # plan shape, fall back silently to a plain ``.collect()``.
-                def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
-                    try:
-                        return p.collect(engine="streaming")
-                    except TypeError:
-                        try:
-                            return p.collect(streaming=True)
-                        except TypeError:
-                            return p.collect()
-                    except Exception:
-                        return p.collect()
-
-                # Layer 2 side-vector multiplication (off by default; both
-                # arrays None ⇒ behaviour identical to pre-Layer-2 code).
-                # row_factor is indexed 0-based over constraint rows;
-                # write_mps puts the cost row at absolute row 0 and the
-                # first constraint at absolute row 1 (base_row starts at
-                # 1), so the row_factor index for a triple with local
-                # _rid is ``base_row + _rid - 1``.
-                _rf = self._layer2_row_factor
-                _cf = self._layer2_col_factor
-                collected = [_collect_one(p) for _, p in term_plans]
-                for (kind, _), j in zip(term_plans, collected):
-                    if kind == "dim":
-                        if j.height == 0:
-                            continue
-                        rids_local = j["_rid"].to_numpy().astype(np.int64)
-                        cids = j["col_id"].to_numpy().astype(np.int64)
-                        vals = j["coef"].to_numpy().astype(np.float64)
-                        if _rf is not None:
-                            vals = vals * _rf[base_row - 1 + rids_local]
-                        if _cf is not None:
-                            vals = vals * _cf[cids]
-                        fam_rows_list.append(rids_local)
-                        fam_cols_list.append(cids)
-                        fam_vals_list.append(vals)
-                    else:
-                        cids = j["col_id"].to_numpy().astype(np.int64)
-                        vals = j["coef"].to_numpy().astype(np.float64)
-                        if cids.size == 0:
-                            continue
-                        tiled_rows = np.repeat(
-                            np.arange(row_count, dtype=np.int64), cids.size
-                        )
-                        tiled_cols = np.tile(cids, row_count)
-                        tiled_vals = np.tile(vals, row_count)
-                        if _rf is not None:
-                            tiled_vals = tiled_vals * _rf[base_row - 1 + tiled_rows]
-                        if _cf is not None:
-                            tiled_vals = tiled_vals * _cf[tiled_cols]
-                        fam_rows_list.append(tiled_rows)
-                        fam_cols_list.append(tiled_cols)
-                        fam_vals_list.append(tiled_vals)
-                del collected
-
-            if profile:
-                _fam_collected_nnz = sum(int(a.size) for a in fam_rows_list)
-                _triples_nnz_so_far += _fam_collected_nnz
-                _emit(
-                    "family_collected",
-                    family=cname,
-                    family_idx=_fam_idx,
-                    fam_nnz=_fam_collected_nnz,
-                    triples_so_far=_triples_nnz_so_far,
-                )
-
-            if fam_rows_list:
-                fr = np.concatenate(fam_rows_list)
-                fc = np.concatenate(fam_cols_list)
-                fv = np.concatenate(fam_vals_list)
-                # Per-family dedup-sum, then shift _rid by base_row so the
-                # global frame uses absolute row ids.
-                dedup = (
-                    pl.DataFrame({"r": fr, "c": fc, "v": fv})
-                    .group_by(["r", "c"])
-                    .agg(pl.col("v").sum())
-                )
-                if profile:
-                    _emit(
-                        "family_deduped",
-                        family=cname,
-                        family_idx=_fam_idx,
-                        dedup_nnz=int(dedup.height),
-                    )
-                triple_frames.append(
-                    dedup.select(
-                        col_id=pl.col("c").cast(pl.Int64),
-                        row_id=(pl.col("r").cast(pl.Int64) + base_row),
-                        coef=pl.col("v").cast(pl.Float64),
-                    )
-                )
-                if profile:
-                    _emit(
-                        "family_appended",
-                        family=cname,
-                        family_idx=_fam_idx,
-                        n_frames=len(triple_frames),
-                    )
-                del dedup, fr, fc, fv
-            else:
-                if profile:
-                    _emit(
-                        "family_appended",
-                        family=cname,
-                        family_idx=_fam_idx,
-                        n_frames=len(triple_frames),
-                        empty=1,
-                    )
-            del fam_rows_list, fam_cols_list, fam_vals_list, term_plans
-
-        # ------------------------------------------------------------------
-        # Phase 2 — objective triples (row_id = 0, the "cost" row).
-        # ------------------------------------------------------------------
-        if self._obj_terms:
-            obj_cids: list[np.ndarray] = []
-            obj_vals: list[np.ndarray] = []
-            # Layer 2 col-factor (objective gets col_factor only —
-            # there is no row_factor entry for the cost row).
-            _cf_obj = self._layer2_col_factor
-            for t in self._obj_terms:
-                f = t.lazy.collect()
-                if f.height == 0:
-                    del f
-                    continue
-                cids = f["col_id"].to_numpy().astype(np.int64)
-                vals = f["coef"].to_numpy().astype(np.float64)
-                if _cf_obj is not None:
-                    vals = vals * _cf_obj[cids]
-                obj_cids.append(cids)
-                obj_vals.append(vals)
-                del f
-            if obj_cids:
-                oc = np.concatenate(obj_cids)
-                ov = np.concatenate(obj_vals)
-                obj_df = (
-                    pl.DataFrame({"c": oc, "v": ov})
-                    .group_by("c")
-                    .agg(pl.col("v").sum())
-                    .select(
-                        col_id=pl.col("c").cast(pl.Int64),
-                        row_id=pl.lit(0, dtype=pl.Int64),
-                        coef=pl.col("v").cast(pl.Float64),
-                    )
-                )
-                triple_frames.append(obj_df)
-                del obj_df, oc, ov
-            del obj_cids, obj_vals
-
-        if profile:
-            _emit("obj_collected", n_frames=len(triple_frames))
-
-        # ------------------------------------------------------------------
-        # Phase 3 — concat + global sort by (col_id, row_id).
-        # ------------------------------------------------------------------
-        if triple_frames:
-            all_triples = pl.concat(triple_frames, how="vertical_relaxed")
-        else:
-            all_triples = pl.DataFrame(
-                schema={"col_id": pl.Int64, "row_id": pl.Int64, "coef": pl.Float64}
-            )
-        del triple_frames
-
-        if profile:
-            _emit("triples_concat", nnz=int(all_triples.height))
-
-        # Hard-error on NaN / inf coefficients.  Silent filtering would
-        # hide real model bugs; the MPS spec has no representation for
-        # NaN coefficients anyway.
-        if all_triples.height:
-            bad = all_triples.filter(
-                pl.col("coef").is_nan() | pl.col("coef").is_infinite()
-            )
-            if bad.height:
-                sample = bad.head(3)
+        if n_cols:
+            obj_bad = ~np.isfinite(m.col_obj)
+            if obj_bad.any():
+                bad_j = int(np.nonzero(obj_bad)[0][0])
                 raise ValueError(
-                    f"Problem.write_mps: {bad.height} coefficient(s) are "
-                    f"NaN or infinite — refusing to write a corrupt MPS. "
-                    f"First offenders (col_id, row_id, coef): "
-                    f"{sample.rows()}"
+                    f"Problem.write_mps: {int(obj_bad.sum())} objective "
+                    f"coefficient(s) are NaN or infinite — refusing to "
+                    f"write a corrupt MPS. First offender (col, coef): "
+                    f"({bad_j}, {float(m.col_obj[bad_j])})"
                 )
 
-        # Streaming sort — falls back to disk if the triples don't fit.
-        try:
-            sorted_triples = (
-                all_triples.lazy()
-                .sort(["col_id", "row_id"])
-                .collect(engine="streaming")
-            )
-        except TypeError:
-            sorted_triples = (
-                all_triples.lazy()
-                .sort(["col_id", "row_id"])
-                .collect(streaming=True)
-            )
-        del all_triples
-
-        if profile:
-            _emit("triples_sorted", nnz=int(sorted_triples.height))
-
-        # ------------------------------------------------------------------
-        # Phase 4 — build col_id → name lookup and integer-col set.
-        # ------------------------------------------------------------------
-        col_names: list[str] = [""] * n_cols
-        integer_cols: set[int] = set()
+        # ---- Names: row 0 is "cost", indices 1.. are constraint rows.
+        # MPS row index space (used in RHS emit below) keeps the cost
+        # at absolute row 0, so we prepend "cost" to the constraint
+        # row_names from the canonical matrix.
         if emit_names:
-            for v in self._vars.values():
-                ids = v.frame["col_id"].to_numpy()
-                if v.integer:
-                    integer_cols.update(int(c) for c in ids.tolist())
-                if v.dims:
-                    tagged = (
-                        v.frame.select(
-                            pl.format(
-                                "{}[{}]",
-                                pl.lit(v.name),
-                                pl.concat_str(
-                                    [pl.col(d).cast(pl.String) for d in v.dims],
-                                    separator=",",
-                                ),
-                            ).alias("__name")
-                        )
-                    )["__name"].to_list()
-                    for cid, nm in zip(ids.tolist(), tagged):
-                        col_names[cid] = nm
-                else:
-                    col_names[int(ids[0])] = v.name
+            row_names: list[str] = ["cost"] + list(m.row_names)
+            col_names: list[str] = list(m.col_names)
         else:
-            # Generic stable names: column 0 → C0000001, etc.
-            for j in range(n_cols):
-                col_names[j] = f"C{j + 1:07d}"
-            for v in self._vars.values():
-                if v.integer:
-                    integer_cols.update(
-                        int(c) for c in v.frame["col_id"].to_numpy().tolist()
-                    )
-
-        # row_names for the constraint section.  Row 0 is always "cost"
-        # (a reserved name — keep it literal even when emit_names=False).
-        if not emit_names:
-            # Replace constraint rows with generic R-names; keep "cost".
             row_names = ["cost"] + [
-                f"R{i + 1:07d}" for i in range(1, len(row_names))
+                f"R{i + 2:07d}" for i in range(n_constraint_rows)
             ]
-            # Note: the cost row externally appears as "cost"; constraint
+            col_names = [f"C{j + 1:07d}" for j in range(n_cols)]
+            # Note: cost row externally appears as "cost"; constraint
             # rows are R0000002, R0000003, ... so the generic numbering
             # gives 1-indexed sequential row ids that match how a user
             # would count rows in the file.
 
-        # ------------------------------------------------------------------
-        # Phase 5 — stream the MPS file out.
-        # ------------------------------------------------------------------
+        # ---- Integer-col set from m.col_int (1 bit per column).
+        integer_cols: set[int] = set(
+            int(c) for c in np.nonzero(m.col_int)[0].tolist()
+        )
+
+        # Sense characters per constraint row, decoded from m.sense_char.
+        sense_chars = m.sense_char.tobytes().decode("ascii") if n_constraint_rows else ""
+
         # MPS coefficient formatting: %.17g preserves round-trip for
-        # float64 across solvers (HiGHS uses ~16 digits; CPLEX, Gurobi
-        # all parse %.17g without trouble).  Names emit verbatim — the
-        # caller is responsible for whitespace-free names (the formatting
-        # used by :class:`Var` / constraint families never produces
-        # whitespace inside a name).
+        # float64 across solvers.  Names emit verbatim — the caller is
+        # responsible for whitespace-free names.
         def _fmt(v: float) -> str:
             return f"{float(v):.17g}"
 
@@ -2008,53 +2163,51 @@ class Problem:
             # ROWS section.
             f.write("ROWS\n")
             f.write(" N  cost\n")
-            row_offset = 1  # index into row_names for the first constraint row
-            for base_row, row_count, sense_char, _ in families:
-                end_row = base_row + row_count
-                for rid in range(base_row, end_row):
-                    f.write(f" {sense_char}  {row_names[rid]}\n")
-            del row_offset
+            for rid in range(n_constraint_rows):
+                f.write(f" {sense_chars[rid]}  {row_names[rid + 1]}\n")
 
-            # COLUMNS section — stream the sorted triples in chunks.
+            # COLUMNS section — walk CSC column-by-column.  For each
+            # column j, emit the objective entry (if present) first then
+            # the constraint coefficients in row order.
             f.write("COLUMNS\n")
             in_integer = False
-            int_marker_id = 0  # bumped each INTORG to give unique marker labels
-
-            n_triples = sorted_triples.height
-            CHUNK = 250_000
-            # Track the current column across chunk boundaries so we know
-            # when to flip integer markers.  None == no column emitted yet.
-            cur_col: int | None = None
-            for start in range(0, n_triples, CHUNK):
-                blk = sorted_triples.slice(start, CHUNK)
-                cs = blk["col_id"].to_numpy()
-                rs = blk["row_id"].to_numpy()
-                vs = blk["coef"].to_numpy()
-                for k in range(cs.shape[0]):
-                    c = int(cs[k])
-                    r = int(rs[k])
-                    v = float(vs[k])
-                    if c != cur_col:
-                        # Flip integer markers if needed at column-boundary.
-                        is_int = c in integer_cols
-                        if is_int and not in_integer:
-                            int_marker_id += 1
-                            f.write(
-                                "    MARKER                 'MARKER'"
-                                "                 'INTORG'\n"
-                            )
-                            in_integer = True
-                        elif (not is_int) and in_integer:
-                            f.write(
-                                "    MARKER                 'MARKER'"
-                                "                 'INTEND'\n"
-                            )
-                            in_integer = False
-                        cur_col = c
+            int_marker_id = 0
+            col_ptr = m.col_ptr
+            row_idx = m.row_idx
+            val = m.val
+            col_obj = m.col_obj
+            for j in range(n_cols):
+                start = int(col_ptr[j])
+                end = int(col_ptr[j + 1])
+                obj_v = float(col_obj[j])
+                obj_nz = obj_v != 0.0 and math.isfinite(obj_v)
+                if start == end and not obj_nz:
+                    continue
+                # Integer-marker flip at column boundary.
+                is_int = j in integer_cols
+                if is_int and not in_integer:
+                    int_marker_id += 1
                     f.write(
-                        f"    {col_names[c]}  {row_names[r]}  {_fmt(v)}\n"
+                        "    MARKER                 'MARKER'"
+                        "                 'INTORG'\n"
                     )
-                del cs, rs, vs, blk
+                    in_integer = True
+                elif (not is_int) and in_integer:
+                    f.write(
+                        "    MARKER                 'MARKER'"
+                        "                 'INTEND'\n"
+                    )
+                    in_integer = False
+                cname = col_names[j]
+                if obj_nz:
+                    f.write(f"    {cname}  cost  {_fmt(obj_v)}\n")
+                # Matrix entries — row_idx is 0-based over constraint
+                # rows; MPS row name is row_names[rid + 1].
+                for k in range(start, end):
+                    r = int(row_idx[k])
+                    f.write(
+                        f"    {cname}  {row_names[r + 1]}  {_fmt(val[k])}\n"
+                    )
             if in_integer:
                 f.write(
                     "    MARKER                 'MARKER'"
@@ -2065,22 +2218,23 @@ class Problem:
             if profile:
                 _emit("columns_emitted")
 
-            # RHS section — emit only non-zero entries (MPS convention).
+            # RHS section — one entry per constraint row that has a
+            # finite non-zero rhs.  For L sense the rhs lives in ub;
+            # for G in lb; for E both are equal so either works.
             f.write("RHS\n")
-            for base_row, _row_count, _, rhs_vec in families:
-                # numpy mask of non-zero entries; finite check too — an
-                # ``inf`` rhs would mean an unbounded sense, which we emit
-                # as no entry (HiGHS treats absent rhs as 0 in MPS, but
-                # for L/G the row bound is +/-inf anyway so it cancels).
-                if rhs_vec.size == 0:
-                    continue
-                nz_idx = np.nonzero(np.isfinite(rhs_vec) & (rhs_vec != 0.0))[0]
-                if nz_idx.size == 0:
-                    continue
-                for local_i in nz_idx.tolist():
-                    rid = base_row + int(local_i)
+            if n_constraint_rows:
+                # Pick the finite side as rhs.  np.where short-circuits
+                # the inf masking on the two halves.
+                lb = m.row_lb
+                ub = m.row_ub
+                lb_fin = np.isfinite(lb)
+                # Prefer ub for L (lb=-inf), lb for G (ub=+inf), and lb
+                # for E (lb==ub).  Equivalent: pick lb if finite, else ub.
+                rhs_arr = np.where(lb_fin, lb, ub)
+                nz = np.nonzero(np.isfinite(rhs_arr) & (rhs_arr != 0.0))[0]
+                for rid in nz.tolist():
                     f.write(
-                        f"    rhs  {row_names[rid]}  {_fmt(rhs_vec[local_i])}\n"
+                        f"    rhs  {row_names[rid + 1]}  {_fmt(rhs_arr[rid])}\n"
                     )
 
             if profile:
@@ -2088,18 +2242,23 @@ class Problem:
 
             # BOUNDS section — per-variable-family scalar bounds.  Emit
             # only when the column deviates from the MPS default
-            # ``[0, +inf]``.
+            # ``[0, +inf]``.  Walks ``self._vars`` (not ``m.col_lb`` /
+            # ``m.col_ub``) to preserve the per-family bound-shape
+            # classification — every column in a family shares the
+            # same lo/hi, so per-family is the natural grouping.  The
+            # values come from ``Var.lower`` / ``Var.upper`` which
+            # ``apply_layer2`` mutates in place; ``m.col_lb`` /
+            # ``m.col_ub`` are built from those same values (see
+            # _build_canonical_matrix pass 5), so the BOUNDS section is
+            # bit-for-bit identical to the pre-B1 output.
             f.write("BOUNDS\n")
             for v in self._vars.values():
                 lo = float(v.lower)
                 hi = float(v.upper)
-                # Classify the family's bound shape once.
                 if math.isfinite(lo) and lo == 0.0 and math.isinf(hi) and hi > 0:
-                    # Default — emit nothing for the whole family.
                     continue
                 ids = v.frame["col_id"].to_numpy()
                 if math.isinf(lo) and lo < 0 and math.isinf(hi) and hi > 0:
-                    # Free variable.
                     for cid in ids.tolist():
                         f.write(f" FR bnd  {col_names[int(cid)]}\n")
                 elif math.isinf(lo) and lo < 0 and math.isfinite(hi):
@@ -2119,8 +2278,6 @@ class Problem:
                         f.write(f" LO bnd  {nm}  {_fmt(lo)}\n")
                         f.write(f" UP bnd  {nm}  {_fmt(hi)}\n")
                 else:
-                    # E.g. lower=+inf or upper=-inf — pathological; let
-                    # MPS readers complain rather than silently filter.
                     for cid in ids.tolist():
                         nm = col_names[int(cid)]
                         if math.isfinite(lo):
@@ -2132,8 +2289,6 @@ class Problem:
 
         if profile:
             _emit("bounds_emitted")
-
-        del sorted_triples
 
         if release:
             self._release_python_lp_inputs()

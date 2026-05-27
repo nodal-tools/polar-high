@@ -266,6 +266,11 @@ def test_write_mps_with_layer2_side_vectors(tmp_path) -> None:
     # asymmetry note).
     pb._layer2_col_factor = 1.0 / col_factor_math
     pb._layer2_row_factor = row_factor
+    # Stage B1: assigning side vectors after canonicalise() requires
+    # marking the cached _matrix stale so the next write_mps rebuilds
+    # with the baked vectors.  In production, ``apply_layer2`` flips
+    # this flag itself; the test mimics that responsibility.
+    pb._canonical_dirty = True
     # Deliberately do NOT set _layer2_locked = True and do NOT mutate
     # Var.lower/upper.  This test exercises the read path in isolation.
 
