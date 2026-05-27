@@ -390,6 +390,23 @@ class Param:
         return (-self) + other
 
 
+def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
+    """Collect a lazy plan via the polars streaming engine, with
+    fallbacks to the legacy ``streaming=True`` kwarg and plain
+    ``collect()``.  Shared by ``_build_canonical_matrix`` and
+    ``WarmProblem._initial_build``'s tracked-source second pass.
+    """
+    try:
+        return plan.collect(engine="streaming")
+    except TypeError:
+        try:
+            return plan.collect(streaming=True)
+        except TypeError:
+            return plan.collect()
+    except Exception:
+        return plan.collect()
+
+
 def _merge_param_sources(
     a: list[tuple[Param, int]] | None,
     b: list[tuple[Param, int]] | None,
@@ -3858,66 +3875,62 @@ class WarmProblem:
         ``passModel``.  Stores ``self._h`` and the row/col metadata maps
         for later updates.
 
-        This is a deliberate near-duplicate of ``Problem.solve``; we
-        accept the duplication so that any future change to
-        ``Problem.solve`` (which is on the hot path of 159 tests) does
-        NOT silently affect WarmProblem behaviour.
+        Stage B3: the bulk LP build (LHS CSC, RHS, obj, bounds) is now
+        delegated to :meth:`Problem.canonicalise` — the same canonical
+        matrix consumed by ``write_mps`` and ``_build_lp_arrays``.  The
+        Layer-2 side vectors are already baked into ``m.val`` /
+        ``m.col_obj`` / ``m.row_lb`` / ``m.row_ub`` per orchestrator
+        decision D8, so this method does NOT re-multiply.
+
+        A SEPARATE second pass over ``_cstrs`` rebuilds the tracked-
+        source ``_param_cells`` map.  Only terms with a non-empty
+        ``param_sources`` are touched; the per-term collect cost is
+        bounded by the (typically tiny) declared-mutable set.  The
+        factor cached per cell is the SCALED coef so that
+        ``update_param`` 's ``factor * new_value^pdir`` formula
+        reproduces the post-Layer-2 matrix entry — matching the
+        semantics the pre-B3 code maintained inline.
         """
         p = self._p
-        n_cols = p._next_col
-        col_lb = np.zeros(n_cols, dtype=np.float64)
-        col_ub = np.full(n_cols, np.inf, dtype=np.float64)
-        col_obj = np.zeros(n_cols, dtype=np.float64)
-        col_int = np.zeros(n_cols, dtype=np.int8)
-        col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
 
+        # ---- Step 1: bulk LP arrays from the canonical matrix. -----
+        m = p.canonicalise()
+        n_cols = m.n_cols
+        n_rows = m.n_rows
+
+        inf = highspy.kHighsInf
+        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
+        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
+        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
+        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
+
+        # Populate _var_cols (still needed by update_obj_coef / fix_cols /
+        # _resolve_dim_tuples).  Cheap: one int64 array per declared var.
         for v in p._vars.values():
             ids = v.frame["col_id"].to_numpy()
-            col_lb[ids] = float(v.lower)
-            col_ub[ids] = float(v.upper)
-            if v.integer:
-                col_int[ids] = 1
             self._var_cols[v.name] = ids.astype(np.int64)
-            if v.dims:
-                tagged = (
-                    v.frame.select(
-                        pl.format(
-                            "{}[{}]",
-                            pl.lit(v.name),
-                            pl.concat_str(
-                                [pl.col(d).cast(pl.String) for d in v.dims], separator=","
-                            ),
-                        ).alias("__name")
-                    )
-                )["__name"].to_list()
-                ids_list = ids.tolist()
-                for cid, nm in zip(ids_list, tagged):
-                    col_names[cid] = nm
-            else:
-                col_names[int(ids[0])] = v.name
 
-        # Layer 2 col-factor (off ⇒ no-op).  Mirrors the four LP
-        # consumers; cost has no row-factor entry.
-        _cf_obj = p._layer2_col_factor
-        for t in p._obj_terms:
-            f = t.lazy.collect()
-            cids = f["col_id"].to_numpy()
-            vals = f["coef"].to_numpy()
-            if _cf_obj is not None:
-                vals = vals * _cf_obj[cids]
-            np.add.at(col_obj, cids, vals)
-            del f
+        # Use the canonical matrix's col_names verbatim.  Unused slots
+        # are empty strings (vs the pre-B3 ``None``); ``passColName`` is
+        # skipped for those — same observable effect as the old loop.
+        col_names: list[str] = list(m.col_names)
+        row_names: list[str] = list(m.row_names)
 
-        rows_lb_chunks: list[np.ndarray] = []
-        rows_ub_chunks: list[np.ndarray] = []
-        row_names: list[str] = []
-        triple_rows: list[np.ndarray] = []
-        triple_cols: list[np.ndarray] = []
-        triple_vals: list[np.ndarray] = []
+        # ---- Step 2: per-cstr metadata + tracked-source second pass.
+        # The bulk path doesn't need any of this; both loops only fire
+        # for warm-update bookkeeping.
+        #
+        # ``_cstr_meta`` carries the user-declared family shape needed
+        # by ``update_rhs`` (and friends).  ``_param_cells`` maps the
+        # declared-mutable Params to their LP cells.  Both reuse the
+        # same family-walk arithmetic as ``_build_canonical_matrix`` —
+        # we only redo the small per-tracked-term collect, NOT the full
+        # LHS sweep.
+        _rf = p._layer2_row_factor
+        _cf = p._layer2_col_factor
+        track_acc: dict[str, list[dict]] = {}
         next_row = 0
-        pending: list[tuple] = []
-
-        for name, proto, over in p._cstrs:
+        for cname, proto, over in p._cstrs:
             expr, sense, rhs = proto.expr, proto.sense, proto.rhs
 
             if over is None:
@@ -3925,17 +3938,17 @@ class WarmProblem:
                 row_index = pl.DataFrame({"_rid": [0]})
                 axis_cols: list[str] = []
             else:
-                row_count = over.height
+                row_count = int(over.height)
                 axis_cols = list(over.columns)
-                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
+                row_index = over.with_columns(
+                    _rid=pl.int_range(0, over.height, dtype=pl.Int64)
+                )
 
             base_row = next_row
             next_row += row_count
 
-            # Stash metadata BEFORE folding rhs Var/Expr — sense and over
-            # capture the user's declared shape, which is what update_rhs
-            # needs.
-            self._cstr_meta[name] = {
+            # Stash family metadata (mirrors the pre-B3 cstr_meta dict).
+            self._cstr_meta[cname] = {
                 "base_row": int(base_row),
                 "row_count": int(row_count),
                 "sense": sense,
@@ -3943,261 +3956,73 @@ class WarmProblem:
                 "axis_cols": tuple(axis_cols),
             }
 
-            rhs_vec = np.zeros(row_count, dtype=np.float64)
-            if isinstance(rhs, (int, float)):
-                rhs_vec[:] = float(rhs)
-            elif isinstance(rhs, Param):
-                missing = [d for d in rhs.dims if d not in axis_cols]
-                if missing:
-                    raise ValueError(
-                        f"constraint {name!r}: rhs Param has dim {missing} not in over={axis_cols}"
-                    )
-                on = list(rhs.dims)
-                if on:
-                    # Bound the peak RAM of multi-Param rhs products.
-                    # rhs.lazy may be a chain of Param * Param * ... whose
-                    # eager materialisation (``rhs.frame``) explodes
-                    # intermediate join buffers by orders of magnitude
-                    # vs the constraint's row_count (FlexTool's
-                    # ``p_profile_value * p_process_existing_count *
-                    # p_process_availability`` allocates ~30 GB for a
-                    # constraint whose final row count is ~76k).
-                    #
-                    # Pre-prune via a semi-join against row_index's
-                    # actual join keys, then collect through polars's
-                    # streaming engine.  The semi-join gives the
-                    # optimiser an explicit "keep only these keys" hint;
-                    # the streaming engine bounds intermediate buffers
-                    # while the upstream Param product runs.
-                    ri_a, rf_a = _align_enum_join_keys(
-                        row_index.lazy(),
-                        rhs.lazy,
-                        on,
-                    )
-                    # Build the semi-join key set from the ALIGNED row
-                    # index so it shares the join-key dtypes with rf_a.
-                    # Building from the un-aligned ``row_index.lazy()``
-                    # raises a polars SchemaError on Enum mismatch when
-                    # rhs.lazy carries a subset-aligned Enum on the join
-                    # column (e.g. flextool's Lagrangian-region path).
-                    keys_lazy = ri_a.select(on).unique()
-                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
-                    _plan = ri_a.join(rf_pruned, on=on, how="left")
-                    try:
-                        j = _plan.collect(engine="streaming")
-                    except TypeError:
-                        # polars < 1.x used the streaming=True kwarg.
-                        j = _plan.collect(streaming=True)
-                    if j.height != row_count:
-                        dup_rids = (
-                            j.group_by("_rid")
-                            .agg(pl.len().alias("__n"))
-                            .filter(pl.col("__n") > 1)
-                            .sort("_rid")
-                            .head(5)["_rid"]
-                            .to_list()
-                        )
-                        sample = (
-                            j.filter(pl.col("_rid").is_in(dup_rids))
-                            .select(*on, "_rid", "value")
-                            .head(10)
-                        )
-                        raise ValueError(
-                            f"constraint {name!r}: rhs Param has duplicate keys on "
-                            f"{on!r} — left join from row_index (rows={row_count}) "
-                            f"produced {j.height} rows. Sample duplicates:\n{sample}"
-                        )
-                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
-                else:
-                    rhs_vec[:] = float(rhs.frame["value"][0])
-            elif isinstance(rhs, (Var, Expr)):
+            # If no tracked Params are declared OR none of this family's
+            # terms reference a mutable one, skip the second-pass collect
+            # entirely (zero overhead vs stock Problem.solve).
+            if not self._mutable_params:
+                continue
+
+            # Var/Expr-on-RHS fold so the second pass walks the same
+            # expanded ``expr.terms`` that the canonical matrix walked.
+            if isinstance(rhs, (Var, Expr)):
                 rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
                 neg = [
-                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
+                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
+                    for t in rhs_expr.terms
                 ]
                 expr = Expr(expr.terms + neg)
-            else:
-                raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
-
-            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
-            # the 0-based absolute constraint row id (no cost row in
-            # the WarmProblem row-index space, same as _build_lp_arrays).
-            if p._layer2_row_factor is not None and row_count:
-                rhs_vec = rhs_vec * p._layer2_row_factor[
-                    base_row : base_row + row_count
-                ]
-
-            if sense == "<=":
-                rows_lb_chunks.append(np.full(row_count, -np.inf, dtype=np.float64))
-                rows_ub_chunks.append(rhs_vec)
-            elif sense == ">=":
-                rows_lb_chunks.append(rhs_vec)
-                rows_ub_chunks.append(np.full(row_count, np.inf, dtype=np.float64))
-            elif sense == "==":
-                rows_lb_chunks.append(rhs_vec)
-                rows_ub_chunks.append(rhs_vec)
-            else:
-                raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
-
-            if over is None:
-                row_names.append(name)
-            else:
-                row_names.extend(
-                    (
-                        over.select(
-                            pl.format(
-                                "{}[{}]",
-                                pl.lit(name),
-                                pl.concat_str(
-                                    [pl.col(d).cast(pl.String) for d in axis_cols], separator=","
-                                ),
-                            ).alias("__rn")
-                        )
-                    )["__rn"].to_list()
-                )
 
             row_index_lf = row_index.lazy()
             for term in expr.terms:
-                # Determine which (if any) of this term's source Params
-                # are declared mutable.  Tracking is opt-in: when no
-                # source Param is mutable, we skip the wider-frame
-                # collection and pay zero overhead vs. stock
-                # ``Problem.solve``.
-                tracked_sources: list[tuple[Param, int]] = []
-                if term.param_sources and self._mutable_params:
-                    for pobj, pdir in term.param_sources:
-                        if pobj.name in self._mutable_params:
-                            tracked_sources.append((pobj, pdir))
+                if not term.param_sources:
+                    continue
+                tracked_sources: list[tuple[Param, int]] = [
+                    (pobj, pdir)
+                    for pobj, pdir in term.param_sources
+                    if pobj.name in self._mutable_params
+                ]
+                if not tracked_sources:
+                    continue
 
                 if term.dims:
                     missing = [d for d in term.dims if d not in axis_cols]
                     if missing:
+                        # The canonical matrix build already raised on
+                        # this; if we got here something is wildly out of
+                        # sync.  Reraise with the same error shape.
                         raise ValueError(
-                            f"constraint {name!r}: term has open dims "
+                            f"constraint {cname!r}: term has open dims "
                             f"{term.dims}, but constraint axes are "
                             f"{axis_cols}; aggregate {missing} via Sum() "
                             f"before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    # Semi-join + streaming, same as write_mps /
-                    # _build_lp_arrays / _solve_streaming — prunes the
-                    # term plan against the row-index key set so polars
-                    # can prune Param-product join chains.
+                    rl_a, tl_a = _align_enum_join_keys(
+                        row_index_lf, term.lazy, on
+                    )
                     keys_lazy = rl_a.select(on).unique()
                     tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    if tracked_sources:
-                        # Keep the term's open dims so we can recover
-                        # source-Param dim tuples per cell.
-                        plan = rl_a.join(tl_pruned, on=on, how="inner").select(
-                            "_rid", "col_id", "coef", *term.dims
-                        )
-                        pending.append(
-                            ("dim_track", base_row, plan, tracked_sources, tuple(term.dims))
-                        )
-                    else:
-                        plan = rl_a.join(tl_pruned, on=on, how="inner").select("_rid", "col_id", "coef")
-                        pending.append(("dim", base_row, plan))
-                else:
-                    if tracked_sources:
-                        # Scalar (collapsed) term — col_id, coef plus
-                        # any dims that survive on the term itself
-                        # (which by construction is empty since
-                        # term.dims is empty).  Tracking with no dims
-                        # only works for scalar Params; record without
-                        # dim_keys.
-                        plan = term.lazy.select("col_id", "coef")
-                        pending.append(("scalar_track", base_row, row_count, plan, tracked_sources))
-                    else:
-                        pending.append(
-                            ("scalar", base_row, row_count, term.lazy.select("col_id", "coef"))
-                        )
-
-        # Per-tracked-Param accumulators.  Each entry is a list of
-        # contributions (dicts with rows/cols/dim_keys/factor/direction)
-        # that we concatenate at the end.
-        track_acc: dict[str, list[dict]] = {}
-
-        if pending:
-            # Plan position depends on the tuple kind — see emission
-            # site above.  Use a small switch.
-            def _plan(pe):
-                k = pe[0]
-                if k == "dim":
-                    return pe[2]
-                if k == "dim_track":
-                    return pe[2]
-                if k == "scalar":
-                    return pe[3]
-                if k == "scalar_track":
-                    return pe[3]
-                raise AssertionError(f"unknown pending kind {k!r}")
-
-            plans = [_plan(pe) for pe in pending]
-            # Serial streaming collect, same pattern as the other
-            # term-collect sites in this module — bounds per-term peak
-            # via the streaming engine on top of the per-term semi-join
-            # added above.  Triple fallback for older polars / plans
-            # that don't yet stream.
-            def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
-                try:
-                    return p.collect(engine="streaming")
-                except TypeError:
-                    try:
-                        return p.collect(streaming=True)
-                    except TypeError:
-                        return p.collect()
-                except Exception:
-                    return p.collect()
-
-            # Layer 2 side-vector factors (off ⇒ no-op).  base_row is
-            # the 0-based absolute constraint row id.  Tracking factor
-            # below intentionally uses the SCALED coefs so that
-            # ``factor * new_param^pdir`` reproduces the post-Layer-2
-            # matrix entry on subsequent ``update_param`` calls.
-            _rf = p._layer2_row_factor
-            _cf = p._layer2_col_factor
-            collected = [_collect_one(p) for p in plans]
-            for pe, j in zip(pending, collected):
-                kind = pe[0]
-                if kind == "dim":
-                    _, base_row, _ = pe
-                    if j.height == 0:
-                        continue
-                    abs_rows = base_row + j["_rid"].to_numpy().astype(np.int64)
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
-                    if _rf is not None:
-                        vals = vals * _rf[abs_rows]
-                    if _cf is not None:
-                        vals = vals * _cf[cids]
-                    triple_rows.append(abs_rows)
-                    triple_cols.append(cids)
-                    triple_vals.append(vals)
-                elif kind == "dim_track":
-                    _, base_row, _, tracked_sources, term_dims = pe
+                    plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                        "_rid", "col_id", "coef", *term.dims
+                    )
+                    j = _collect_streaming(plan)
                     if j.height == 0:
                         continue
                     rids = j["_rid"].to_numpy().astype(np.int64)
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     coefs = j["coef"].to_numpy().astype(np.float64)
                     abs_rows = base_row + rids
+                    # Stage A multiply-at-emit reproduces the SCALED
+                    # coef so the cached factor matches what
+                    # ``_build_canonical_matrix`` BAKED into ``m.val``.
                     if _rf is not None:
                         coefs = coefs * _rf[abs_rows]
                     if _cf is not None:
                         coefs = coefs * _cf[cids]
-                    triple_rows.append(abs_rows.copy())
-                    triple_cols.append(cids.copy())
-                    triple_vals.append(coefs.copy())
-                    # Per source Param: extract dim_keys, factor, direction.
+                    term_dims = tuple(term.dims)
                     for pobj, pdir in tracked_sources:
                         pname = pobj.name
                         pdims = pobj.dims
-                        # Subset of pdims that survives in the term
-                        # frame; aggregation may have removed a dim
-                        # earlier, in which case Sum already dropped
-                        # this source from param_sources — we should
-                        # never see missing dims here, but guard.
                         missing_d = [d for d in pdims if d not in term_dims]
                         if missing_d:
                             continue
@@ -4205,8 +4030,12 @@ class WarmProblem:
                             keys_df = j.select(*pdims)
                             _kd_lhs = keys_df.with_row_index("__ridx")
                             _pdims_on = list(pdims)
-                            _kd_lhs, _pf_rhs = _align_enum_join_keys(_kd_lhs, pobj.frame, _pdims_on)
-                            joined = _kd_lhs.join(_pf_rhs, on=_pdims_on, how="left").sort("__ridx")
+                            _kd_lhs, _pf_rhs = _align_enum_join_keys(
+                                _kd_lhs, pobj.frame, _pdims_on
+                            )
+                            joined = _kd_lhs.join(
+                                _pf_rhs, on=_pdims_on, how="left"
+                            ).sort("__ridx")
                             old_vals = (
                                 joined["value"]
                                 .fill_null(0.0)
@@ -4215,7 +4044,9 @@ class WarmProblem:
                             )
                             if pdir == 1:
                                 safe = np.where(old_vals == 0.0, 1.0, old_vals)
-                                factor = np.where(old_vals == 0.0, 0.0, coefs / safe)
+                                factor = np.where(
+                                    old_vals == 0.0, 0.0, coefs / safe
+                                )
                             else:
                                 factor = coefs * old_vals
                             track_acc.setdefault(pname, []).append(
@@ -4224,7 +4055,9 @@ class WarmProblem:
                                     cols=cids.copy(),
                                     dim_keys=keys_df,
                                     factor=factor,
-                                    direction=np.full(coefs.size, pdir, dtype=np.int8),
+                                    direction=np.full(
+                                        coefs.size, pdir, dtype=np.int8
+                                    ),
                                     dim_signature=tuple(pdims),
                                 )
                             )
@@ -4243,58 +4076,26 @@ class WarmProblem:
                                     cols=cids.copy(),
                                     dim_keys=None,
                                     factor=factor,
-                                    direction=np.full(coefs.size, pdir, dtype=np.int8),
+                                    direction=np.full(
+                                        coefs.size, pdir, dtype=np.int8
+                                    ),
                                     dim_signature=(),
                                 )
                             )
-                elif kind == "scalar":
-                    _, base_row, row_count, _ = pe
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
-                    rs = np.repeat(
-                        np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
-                    )
-                    tiled_cols = np.tile(cids, row_count)
-                    tiled_vals = np.tile(vals, row_count)
-                    if _rf is not None:
-                        tiled_vals = tiled_vals * _rf[rs]
-                    if _cf is not None:
-                        tiled_vals = tiled_vals * _cf[tiled_cols]
-                    triple_rows.append(rs)
-                    triple_cols.append(tiled_cols)
-                    triple_vals.append(tiled_vals)
-                elif kind == "scalar_track":
-                    _, base_row, row_count, _, _tracked = pe
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
-                    rs = np.repeat(
-                        np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
-                    )
-                    tiled_cols = np.tile(cids, row_count)
-                    tiled_vals = np.tile(vals, row_count)
-                    if _rf is not None:
-                        tiled_vals = tiled_vals * _rf[rs]
-                    if _cf is not None:
-                        tiled_vals = tiled_vals * _cf[tiled_cols]
-                    triple_rows.append(rs)
-                    triple_cols.append(tiled_cols)
-                    triple_vals.append(tiled_vals)
-                    # Note: scalar tracked terms aren't supported for
-                    # update_param (the term has no dim columns to key
-                    # off).  The triples are still emitted; we simply
-                    # don't register cells.
+                else:
+                    # Scalar (collapsed) tracked terms are emitted into
+                    # the matrix but ``update_param`` can't key off them
+                    # (no dim columns); mirror the pre-B3 behaviour and
+                    # skip _param_cells registration.
+                    continue
 
         # Consolidate per-Param tracking accumulators.
         for pname, chunks in track_acc.items():
             if not chunks:
                 continue
-            # All chunks for one Param must share the same dim_signature.
             sig = chunks[0]["dim_signature"]
             same_sig = all(c["dim_signature"] == sig for c in chunks)
             if not same_sig:
-                # Inconsistent dim signatures across cells of one Param
-                # name — shouldn't happen with well-formed flextool, but
-                # guard.  Drop and skip.
                 continue
             rows = np.concatenate([c["rows"] for c in chunks])
             cols = np.concatenate([c["cols"] for c in chunks])
@@ -4313,60 +4114,13 @@ class WarmProblem:
                 dim_keys=dim_keys,
             )
 
-        if triple_rows:
-            tr = np.concatenate(triple_rows)
-            tc = np.concatenate(triple_cols)
-            tv = np.concatenate(triple_vals)
-            dedup = (
-                pl.DataFrame({"r": tr, "c": tc, "v": tv})
-                .group_by(["r", "c"])
-                .agg(pl.col("v").sum())
-            )
-            tr = dedup["r"].to_numpy().astype(np.int64)
-            tc = dedup["c"].to_numpy().astype(np.int64)
-            tv = dedup["v"].to_numpy().astype(np.float64)
-        else:
-            tr = np.zeros(0, dtype=np.int64)
-            tc = np.zeros(0, dtype=np.int64)
-            tv = np.zeros(0, dtype=np.float64)
-
-        n_rows = next_row
-        inf = highspy.kHighsInf
-
-        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
-        if rows_lb_chunks:
-            rows_lb_arr = np.concatenate(rows_lb_chunks)
-            rows_ub_arr = np.concatenate(rows_ub_chunks)
-        else:
-            rows_lb_arr = np.zeros(0, dtype=np.float64)
-            rows_ub_arr = np.zeros(0, dtype=np.float64)
-        row_lb_h = np.where(rows_lb_arr == -np.inf, -inf, rows_lb_arr).astype(np.float64)
-        row_ub_h = np.where(rows_ub_arr == np.inf, inf, rows_ub_arr).astype(np.float64)
-
-        # Pick HiGHS index dtype based on nnz (mirror Problem.solve):
-        # int32 when it fits, else int64.
-        nnz = int(tr.size)
-        idx_dtype = np.int32 if nnz < (1 << 31) else np.int64
-        if nnz:
-            order = np.lexsort((tr, tc))
-            sorted_r = tr[order].astype(idx_dtype)
-            sorted_c = tc[order].astype(idx_dtype)
-            sorted_v = tv[order].astype(np.float64)
-        else:
-            sorted_r = np.zeros(0, dtype=idx_dtype)
-            sorted_c = np.zeros(0, dtype=idx_dtype)
-            sorted_v = np.zeros(0, dtype=np.float64)
-
-        starts = np.zeros(n_cols + 1, dtype=idx_dtype)
-        if sorted_c.size:
-            np.add.at(starts[1:], sorted_c, 1)
-        starts = np.cumsum(starts).astype(idx_dtype)
-
+        # ---- Step 3: assemble HighsLp + passModel. ------------------
+        # CSC arrays come straight from the canonical matrix; their
+        # dtypes (int32 or int64 based on nnz) were chosen there.
         lp = highspy.HighsLp()
         lp.num_col_ = int(n_cols)
         lp.num_row_ = int(n_rows)
-        lp.col_cost_ = col_obj.astype(np.float64)
+        lp.col_cost_ = m.col_obj.astype(np.float64, copy=False)
         lp.col_lower_ = col_lb_h
         lp.col_upper_ = col_ub_h
         lp.row_lower_ = row_lb_h
@@ -4374,18 +4128,18 @@ class WarmProblem:
         lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
         lp.a_matrix_.num_col_ = int(n_cols)
         lp.a_matrix_.num_row_ = int(n_rows)
-        lp.a_matrix_.start_ = starts
-        lp.a_matrix_.index_ = sorted_r
-        lp.a_matrix_.value_ = sorted_v
+        lp.a_matrix_.start_ = m.col_ptr
+        lp.a_matrix_.index_ = m.row_idx
+        lp.a_matrix_.value_ = m.val
         lp.sense_ = (
             highspy.ObjSense.kMaximize if p._obj_sense == "max" else highspy.ObjSense.kMinimize
         )
         if p._obj_offset:
             lp.offset_ = float(p._obj_offset)
-        if col_int.any():
+        if m.col_int.any():
             kCont = highspy.HighsVarType.kContinuous
             kInt = highspy.HighsVarType.kInteger
-            integ_arr = np.where(col_int, kInt, kCont)
+            integ_arr = np.where(m.col_int, kInt, kCont)
             lp.integrality_ = integ_arr.tolist()
 
         h = highspy.Highs()
@@ -4414,7 +4168,8 @@ class WarmProblem:
                     )
         h.passModel(lp)
         for i, n in enumerate(col_names):
-            if n is not None:
+            # Canonical matrix uses "" for unused col slots; skip those.
+            if n:
                 h.passColName(i, n)
         for i, n in enumerate(row_names):
             h.passRowName(i, n)
