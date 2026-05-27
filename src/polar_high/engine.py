@@ -887,6 +887,32 @@ class Problem:
         # :meth:`_release_python_lp_inputs`).  Subsequent ``solve()``
         # calls then raise — there is no LP left to re-emit.
         self._released: bool = False
+        # Layer 2 side-vector scaling — see :mod:`flextool.engine_polars.
+        # autoscale._layer2`.  When set (by ``apply_layer2``), the four
+        # LP consumers (``write_mps``, ``_build_lp_arrays``,
+        # ``_solve_streaming``, ``WarmProblem._initial_build``) multiply
+        # each collected LHS / objective / RHS coefficient by these
+        # power-of-two factors at emit time instead of mutating the
+        # underlying lazy plans.  ``None`` = no scaling (default;
+        # consumers behave identically to pre-Layer-2 code).
+        #
+        # ``_layer2_col_factor[col_id]``: applied to LHS and cost terms
+        # (cost = ``col_factor[col_id]`` only — there is no objective
+        # row in the row-factor array).  Column bounds are NOT scaled
+        # here; ``apply_layer2`` mutates ``Var.lower`` / ``Var.upper``
+        # in place for that.
+        # ``_layer2_row_factor[row_id]``: applied to LHS and RHS;
+        # ``row_id`` is the 0-based index over constraint rows in the
+        # order constraints appear in ``self._cstrs`` (NOT including
+        # the objective row, which has no row factor).
+        # ``_layer2_locked``: when True, ``add_cstr`` raises — the side
+        # vectors are sized for the constraints that existed at
+        # ``apply_layer2`` time, so adding more rows would silently
+        # leave them un-scaled.  Set by a later commit's
+        # ``apply_layer2`` rewrite; this commit only adds the attr.
+        self._layer2_col_factor: np.ndarray | None = None
+        self._layer2_row_factor: np.ndarray | None = None
+        self._layer2_locked: bool = False
 
     def set_solver_options(self, options: dict | None) -> None:
         """Store HiGHS options to be applied in ``solve()``.  Pass ``None``
@@ -971,6 +997,12 @@ class Problem:
         the row to highspy at solve time.  Labels (the dict keys) are
         used in row names and diagnostics.
         """
+        if self._layer2_locked:
+            raise RuntimeError(
+                "Problem.add_cstr called after apply_layer2 — adding "
+                "constraints after Layer 2 is not supported (would need "
+                "to extend the row_factor side vector)."
+            )
         if rhs_terms is None:
             rhs_terms = {}
         if not isinstance(lhs_terms, dict) or not isinstance(rhs_terms, dict):
@@ -1619,6 +1651,15 @@ class Problem:
                     f"'=='; got {sense!r}"
                 )
 
+            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
+            # 1-based here (cost row is absolute row 0); row_factor is
+            # 0-indexed over constraints, so the slice starts at
+            # base_row - 1.
+            if self._layer2_row_factor is not None and row_count:
+                rhs_vec = rhs_vec * self._layer2_row_factor[
+                    base_row - 1 : base_row - 1 + row_count
+                ]
+
             families.append((base_row, row_count, sense_char, rhs_vec))
 
             # Row names for this family.
@@ -1700,32 +1741,47 @@ class Problem:
                     except Exception:
                         return p.collect()
 
+                # Layer 2 side-vector multiplication (off by default; both
+                # arrays None ⇒ behaviour identical to pre-Layer-2 code).
+                # row_factor is indexed 0-based over constraint rows;
+                # write_mps puts the cost row at absolute row 0 and the
+                # first constraint at absolute row 1 (base_row starts at
+                # 1), so the row_factor index for a triple with local
+                # _rid is ``base_row + _rid - 1``.
+                _rf = self._layer2_row_factor
+                _cf = self._layer2_col_factor
                 collected = [_collect_one(p) for _, p in term_plans]
                 for (kind, _), j in zip(term_plans, collected):
                     if kind == "dim":
                         if j.height == 0:
                             continue
-                        fam_rows_list.append(
-                            j["_rid"].to_numpy().astype(np.int64)
-                        )
-                        fam_cols_list.append(
-                            j["col_id"].to_numpy().astype(np.int64)
-                        )
-                        fam_vals_list.append(
-                            j["coef"].to_numpy().astype(np.float64)
-                        )
+                        rids_local = j["_rid"].to_numpy().astype(np.int64)
+                        cids = j["col_id"].to_numpy().astype(np.int64)
+                        vals = j["coef"].to_numpy().astype(np.float64)
+                        if _rf is not None:
+                            vals = vals * _rf[base_row - 1 + rids_local]
+                        if _cf is not None:
+                            vals = vals * _cf[cids]
+                        fam_rows_list.append(rids_local)
+                        fam_cols_list.append(cids)
+                        fam_vals_list.append(vals)
                     else:
                         cids = j["col_id"].to_numpy().astype(np.int64)
                         vals = j["coef"].to_numpy().astype(np.float64)
                         if cids.size == 0:
                             continue
-                        fam_rows_list.append(
-                            np.repeat(
-                                np.arange(row_count, dtype=np.int64), cids.size
-                            )
+                        tiled_rows = np.repeat(
+                            np.arange(row_count, dtype=np.int64), cids.size
                         )
-                        fam_cols_list.append(np.tile(cids, row_count))
-                        fam_vals_list.append(np.tile(vals, row_count))
+                        tiled_cols = np.tile(cids, row_count)
+                        tiled_vals = np.tile(vals, row_count)
+                        if _rf is not None:
+                            tiled_vals = tiled_vals * _rf[base_row - 1 + tiled_rows]
+                        if _cf is not None:
+                            tiled_vals = tiled_vals * _cf[tiled_cols]
+                        fam_rows_list.append(tiled_rows)
+                        fam_cols_list.append(tiled_cols)
+                        fam_vals_list.append(tiled_vals)
                 del collected
 
             if profile:
@@ -1789,13 +1845,20 @@ class Problem:
         if self._obj_terms:
             obj_cids: list[np.ndarray] = []
             obj_vals: list[np.ndarray] = []
+            # Layer 2 col-factor (objective gets col_factor only —
+            # there is no row_factor entry for the cost row).
+            _cf_obj = self._layer2_col_factor
             for t in self._obj_terms:
                 f = t.lazy.collect()
                 if f.height == 0:
                     del f
                     continue
-                obj_cids.append(f["col_id"].to_numpy().astype(np.int64))
-                obj_vals.append(f["coef"].to_numpy().astype(np.float64))
+                cids = f["col_id"].to_numpy().astype(np.int64)
+                vals = f["coef"].to_numpy().astype(np.float64)
+                if _cf_obj is not None:
+                    vals = vals * _cf_obj[cids]
+                obj_cids.append(cids)
+                obj_vals.append(vals)
                 del f
             if obj_cids:
                 oc = np.concatenate(obj_cids)
@@ -2261,6 +2324,15 @@ class Problem:
             else:
                 raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
 
+            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
+            # 0-based over constraint rows in this path (no objective
+            # row in the row-factor array; the HiGHS row index space
+            # starts at 0 too).
+            if self._layer2_row_factor is not None and row_count:
+                rhs_vec = rhs_vec * self._layer2_row_factor[
+                    base_row : base_row + row_count
+                ]
+
             # row bounds from sense — vectorize per family, no per-row loop
             if sense == "<=":
                 rows_lb_chunks.append(np.full(row_count, -np.inf, dtype=np.float64))
@@ -2370,15 +2442,27 @@ class Problem:
                     _blp_emit(
                         "pass2_collected", plan_idx=idx, height=int(j.height),
                     )
+            # Layer 2 side-vector factors (off ⇒ no-op).  In this path
+            # base_row is the 0-based absolute constraint row id, so
+            # row_factor is indexed directly by abs_rows.
+            _rf = self._layer2_row_factor
+            _cf = self._layer2_col_factor
             for p, j in zip(pending, collected_chunks):
                 kind = p[0]
                 if kind == "dim":
                     _, base_row, _ = p
                     if j.height == 0:
                         continue
-                    triple_rows.append(base_row + j["_rid"].to_numpy().astype(np.int64))
-                    triple_cols.append(j["col_id"].to_numpy().astype(np.int64))
-                    triple_vals.append(j["coef"].to_numpy().astype(np.float64))
+                    abs_rows = base_row + j["_rid"].to_numpy().astype(np.int64)
+                    cids = j["col_id"].to_numpy().astype(np.int64)
+                    vals = j["coef"].to_numpy().astype(np.float64)
+                    if _rf is not None:
+                        vals = vals * _rf[abs_rows]
+                    if _cf is not None:
+                        vals = vals * _cf[cids]
+                    triple_rows.append(abs_rows)
+                    triple_cols.append(cids)
+                    triple_vals.append(vals)
                 else:  # "scalar"
                     _, base_row, row_count, _ = p
                     cids = j["col_id"].to_numpy().astype(np.int64)
@@ -2386,9 +2470,15 @@ class Problem:
                     rs = np.repeat(
                         np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
                     )
+                    tiled_cols = np.tile(cids, row_count)
+                    tiled_vals = np.tile(vals, row_count)
+                    if _rf is not None:
+                        tiled_vals = tiled_vals * _rf[rs]
+                    if _cf is not None:
+                        tiled_vals = tiled_vals * _cf[tiled_cols]
                     triple_rows.append(rs)
-                    triple_cols.append(np.tile(cids, row_count))
-                    triple_vals.append(np.tile(vals, row_count))
+                    triple_cols.append(tiled_cols)
+                    triple_vals.append(tiled_vals)
             del collected_chunks
 
         if _blp_profile:
@@ -2542,9 +2632,16 @@ class Problem:
         # populate any cache on _Term, so the eager frame is released
         # once the COO contribution is built.  WarmProblem and any
         # subsequent solve re-collect from the surviving lazy plan.
+        # Layer 2 col-factor (off ⇒ no-op).  Objective gets col_factor
+        # only — there is no row_factor entry for the cost row.
+        _cf_obj = self._layer2_col_factor
         for t in self._obj_terms:
             f = t.lazy.collect()
-            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            cids = f["col_id"].to_numpy()
+            vals = f["coef"].to_numpy()
+            if _cf_obj is not None:
+                vals = vals * _cf_obj[cids]
+            np.add.at(col_obj, cids, vals)
             del f
 
         inf = highspy.kHighsInf
@@ -2694,6 +2791,7 @@ class Problem:
             # base_row for this family is ``next_row``; HiGHS appends
             # rows in monotonic order via addRows, so per-family row
             # ranges are implicit — we just bump the counter.
+            base_row = next_row
             next_row += row_count
 
             # rhs vector — Expr/Var on rhs gets moved to lhs as -terms.
@@ -2772,6 +2870,15 @@ class Problem:
                 expr = Expr(expr.terms + neg)
             else:
                 raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
+
+            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
+            # the 0-based absolute constraint row id; row_factor is
+            # 0-indexed over constraints (HiGHS row index space starts
+            # at 0 here — no cost row in the constraint space).
+            if self._layer2_row_factor is not None and row_count:
+                rhs_vec = rhs_vec * self._layer2_row_factor[
+                    base_row : base_row + row_count
+                ]
 
             if sense == "<=":
                 row_lb = np.full(row_count, -inf, dtype=np.float64)
@@ -2857,22 +2964,44 @@ class Problem:
                     except Exception:
                         return p.collect()
 
+                # Layer 2 side-vector multiplication (off ⇒ no-op).
+                # fam_rows/cols use _local_ (0..row_count) row ids
+                # within the family; row_factor is indexed by the
+                # absolute constraint row id ``base_row + local``.
+                _rf = self._layer2_row_factor
+                _cf = self._layer2_col_factor
                 collected = [_collect_one(p) for _, p in term_plans]
                 for (kind, _), j in zip(term_plans, collected):
                     if kind == "dim":
                         if j.height == 0:
                             continue
-                        fam_rows.append(j["_rid"].to_numpy().astype(np.int64))
-                        fam_cols.append(j["col_id"].to_numpy().astype(np.int64))
-                        fam_vals.append(j["coef"].to_numpy().astype(np.float64))
+                        rids_local = j["_rid"].to_numpy().astype(np.int64)
+                        cids = j["col_id"].to_numpy().astype(np.int64)
+                        vals = j["coef"].to_numpy().astype(np.float64)
+                        if _rf is not None:
+                            vals = vals * _rf[base_row + rids_local]
+                        if _cf is not None:
+                            vals = vals * _cf[cids]
+                        fam_rows.append(rids_local)
+                        fam_cols.append(cids)
+                        fam_vals.append(vals)
                     else:  # scalar — tile across the row_count rows
                         cids = j["col_id"].to_numpy().astype(np.int64)
                         vals = j["coef"].to_numpy().astype(np.float64)
                         if cids.size == 0:
                             continue
-                        fam_rows.append(np.repeat(np.arange(row_count, dtype=np.int64), cids.size))
-                        fam_cols.append(np.tile(cids, row_count))
-                        fam_vals.append(np.tile(vals, row_count))
+                        tiled_rows = np.repeat(
+                            np.arange(row_count, dtype=np.int64), cids.size
+                        )
+                        tiled_cols = np.tile(cids, row_count)
+                        tiled_vals = np.tile(vals, row_count)
+                        if _rf is not None:
+                            tiled_vals = tiled_vals * _rf[base_row + tiled_rows]
+                        if _cf is not None:
+                            tiled_vals = tiled_vals * _cf[tiled_cols]
+                        fam_rows.append(tiled_rows)
+                        fam_cols.append(tiled_cols)
+                        fam_vals.append(tiled_vals)
                 del collected
 
             if fam_rows:
@@ -3954,9 +4083,16 @@ class WarmProblem:
             else:
                 col_names[int(ids[0])] = v.name
 
+        # Layer 2 col-factor (off ⇒ no-op).  Mirrors the four LP
+        # consumers; cost has no row-factor entry.
+        _cf_obj = p._layer2_col_factor
         for t in p._obj_terms:
             f = t.lazy.collect()
-            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            cids = f["col_id"].to_numpy()
+            vals = f["coef"].to_numpy()
+            if _cf_obj is not None:
+                vals = vals * _cf_obj[cids]
+            np.add.at(col_obj, cids, vals)
             del f
 
         rows_lb_chunks: list[np.ndarray] = []
@@ -4069,6 +4205,14 @@ class WarmProblem:
                 expr = Expr(expr.terms + neg)
             else:
                 raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
+
+            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
+            # the 0-based absolute constraint row id (no cost row in
+            # the WarmProblem row-index space, same as _build_lp_arrays).
+            if p._layer2_row_factor is not None and row_count:
+                rhs_vec = rhs_vec * p._layer2_row_factor[
+                    base_row : base_row + row_count
+                ]
 
             if sense == "<=":
                 rows_lb_chunks.append(np.full(row_count, -np.inf, dtype=np.float64))
@@ -4193,6 +4337,13 @@ class WarmProblem:
                 except Exception:
                     return p.collect()
 
+            # Layer 2 side-vector factors (off ⇒ no-op).  base_row is
+            # the 0-based absolute constraint row id.  Tracking factor
+            # below intentionally uses the SCALED coefs so that
+            # ``factor * new_param^pdir`` reproduces the post-Layer-2
+            # matrix entry on subsequent ``update_param`` calls.
+            _rf = p._layer2_row_factor
+            _cf = p._layer2_col_factor
             collected = [_collect_one(p) for p in plans]
             for pe, j in zip(pending, collected):
                 kind = pe[0]
@@ -4200,9 +4351,16 @@ class WarmProblem:
                     _, base_row, _ = pe
                     if j.height == 0:
                         continue
-                    triple_rows.append(base_row + j["_rid"].to_numpy().astype(np.int64))
-                    triple_cols.append(j["col_id"].to_numpy().astype(np.int64))
-                    triple_vals.append(j["coef"].to_numpy().astype(np.float64))
+                    abs_rows = base_row + j["_rid"].to_numpy().astype(np.int64)
+                    cids = j["col_id"].to_numpy().astype(np.int64)
+                    vals = j["coef"].to_numpy().astype(np.float64)
+                    if _rf is not None:
+                        vals = vals * _rf[abs_rows]
+                    if _cf is not None:
+                        vals = vals * _cf[cids]
+                    triple_rows.append(abs_rows)
+                    triple_cols.append(cids)
+                    triple_vals.append(vals)
                 elif kind == "dim_track":
                     _, base_row, _, tracked_sources, term_dims = pe
                     if j.height == 0:
@@ -4211,6 +4369,10 @@ class WarmProblem:
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     coefs = j["coef"].to_numpy().astype(np.float64)
                     abs_rows = base_row + rids
+                    if _rf is not None:
+                        coefs = coefs * _rf[abs_rows]
+                    if _cf is not None:
+                        coefs = coefs * _cf[cids]
                     triple_rows.append(abs_rows.copy())
                     triple_cols.append(cids.copy())
                     triple_vals.append(coefs.copy())
@@ -4279,9 +4441,15 @@ class WarmProblem:
                     rs = np.repeat(
                         np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
                     )
+                    tiled_cols = np.tile(cids, row_count)
+                    tiled_vals = np.tile(vals, row_count)
+                    if _rf is not None:
+                        tiled_vals = tiled_vals * _rf[rs]
+                    if _cf is not None:
+                        tiled_vals = tiled_vals * _cf[tiled_cols]
                     triple_rows.append(rs)
-                    triple_cols.append(np.tile(cids, row_count))
-                    triple_vals.append(np.tile(vals, row_count))
+                    triple_cols.append(tiled_cols)
+                    triple_vals.append(tiled_vals)
                 elif kind == "scalar_track":
                     _, base_row, row_count, _, _tracked = pe
                     cids = j["col_id"].to_numpy().astype(np.int64)
@@ -4289,9 +4457,15 @@ class WarmProblem:
                     rs = np.repeat(
                         np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
                     )
+                    tiled_cols = np.tile(cids, row_count)
+                    tiled_vals = np.tile(vals, row_count)
+                    if _rf is not None:
+                        tiled_vals = tiled_vals * _rf[rs]
+                    if _cf is not None:
+                        tiled_vals = tiled_vals * _cf[tiled_cols]
                     triple_rows.append(rs)
-                    triple_cols.append(np.tile(cids, row_count))
-                    triple_vals.append(np.tile(vals, row_count))
+                    triple_cols.append(tiled_cols)
+                    triple_vals.append(tiled_vals)
                     # Note: scalar tracked terms aren't supported for
                     # update_param (the term has no dim columns to key
                     # off).  The triples are still emitted; we simply

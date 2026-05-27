@@ -110,9 +110,16 @@ class LpView:
         # ----- objective scatter ----------------------------------------
         # Materialize each term into a local DataFrame and let it drop;
         # never populate an eager cache on _Term.
+        # Layer 2 col-factor (off ⇒ no-op).  Mirrors the four
+        # in-engine consumers; cost has no row-factor entry.
+        _cf_obj = problem._layer2_col_factor
         for t in problem._obj_terms:
             f = t.lazy.collect()
-            np.add.at(col_obj, f["col_id"].to_numpy(), f["coef"].to_numpy())
+            cids = f["col_id"].to_numpy()
+            vals = f["coef"].to_numpy()
+            if _cf_obj is not None:
+                vals = vals * _cf_obj[cids]
+            np.add.at(col_obj, cids, vals)
             del f
 
         # ----- row + matrix build ---------------------------------------
