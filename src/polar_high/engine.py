@@ -2323,11 +2323,19 @@ class Problem:
     ]:
         """Build the per-row + matrix arrays for the non-streaming path.
 
-        Walks ``self._cstrs``, folds rhs Var/Expr terms into lhs, builds
-        per-family ``rows_lb`` / ``rows_ub`` vectors, materialises every
-        LHS term to a (row, col, coef) triple via a batched
-        :func:`pl.collect_all`, then dedup-sums coincident triples and
-        emits a CSC column-major sparse representation.
+        Stage B2: this function now delegates to :meth:`canonicalise` for
+        the family-walk + dedup + CSC build (which bakes in Layer 2 side
+        vectors per D8).  The pre-B2 body — per-family LHS collect, RHS
+        Param resolve, Stage A multiply-at-emit, global dedup + sort —
+        has been moved into :meth:`_build_canonical_matrix`.
+
+        The ``n_cols`` / ``col_lb`` / ``col_ub`` arguments are accepted
+        for backward compatibility with the existing callers
+        (:class:`LpView`, :func:`autoscale._ranges._ranges_via_passmodel`),
+        but the values used are read from the canonical matrix's
+        ``col_lb`` / ``col_ub`` — they're built from the same
+        ``Var.lower`` / ``Var.upper`` sources after :func:`apply_layer2`
+        mutates them in place, so the two are equivalent.
 
         Returns
         -------
@@ -2337,385 +2345,29 @@ class Problem:
             ``kHighsInf`` sentinel in place of ``np.inf`` so they're
             ready for ``HighsLp.row_lower_`` / ``row_upper_``.
         """
-        rows_lb_chunks: list[np.ndarray] = []
-        rows_ub_chunks: list[np.ndarray] = []
-        row_names: list[str] = []
-        triple_rows: list[np.ndarray] = []
-        triple_cols: list[np.ndarray] = []
-        triple_vals: list[np.ndarray] = []
-        next_row = 0
+        del n_cols, col_lb, col_ub  # unused; see docstring
 
-        # Inner profile gate — set ``POLAR_HIGH_BUILD_LP_PROFILE=1`` to
-        # get per-family + per-phase RSS snapshots from this function
-        # (cheap; one stderr line per family/phase, zero overhead when
-        # off).  Useful for localising OOMs inside the LP build that
-        # the outer ``_ranges`` / ``_orchestration`` profilers can't
-        # see into.
-        _blp_profile = os.environ.get("POLAR_HIGH_BUILD_LP_PROFILE") == "1"
-        if _blp_profile:
-            try:
-                import psutil as _ps_blp
-                _blp_proc = _ps_blp.Process()
-                _blp_t0 = time.monotonic()
+        m = self.canonicalise()
 
-                def _blp_emit(phase: str, **extras) -> None:
-                    rss = _blp_proc.memory_info().rss / (1024 ** 3)
-                    wall = time.monotonic() - _blp_t0
-                    extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
-                    print(
-                        f"[build_lp profile]\tphase={phase}\trss_gb={rss:.2f}"
-                        f"\twall_s={wall:.2f}"
-                        + (f"\t{extras_str}" if extras_str else ""),
-                        file=sys.stderr, flush=True,
-                    )
-                _blp_emit("enter", n_cstrs=len(self._cstrs))
-            except ImportError:
-                _blp_profile = False
-
-        # Pass 1: walk the constraint families, fold rhs Var/Expr into
-        # lhs, build row_lb/row_ub, row_names, and stage every term's
-        # final LazyFrame (post row-index join).  We don't collect yet —
-        # we batch all collects at the end so polars can run them in
-        # parallel and share I/O / common subplans.
-        #
-        # Each pending entry is one of:
-        #   ("dim", base_row, lazy_plan)  — joined-with-row-index lazy;
-        #                                   collect → (_rid, col_id, coef)
-        #   ("scalar", base_row, row_count, lazy_plan)
-        #                                 — un-bound scalar term;
-        #                                   collect → (col_id, coef);
-        #                                   tile across row_count rows
-        pending: list[tuple] = []
-
-        for name, proto, over in self._cstrs:
-            expr, sense, rhs = proto.expr, proto.sense, proto.rhs
-
-            if over is None:
-                row_count = 1
-                row_index = pl.DataFrame({"_rid": [0]})
-                axis_cols: list[str] = []
-            else:
-                row_count = over.height
-                axis_cols = list(over.columns)
-                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
-
-            base_row = next_row
-            next_row += row_count
-
-            if _blp_profile:
-                _blp_emit(
-                    "family_start", family=name,
-                    row_count=row_count, term_count=len(expr.terms),
-                )
-
-            # rhs vector — Expr/Var on rhs gets moved to lhs as -terms
-            rhs_vec = np.zeros(row_count, dtype=np.float64)
-            if isinstance(rhs, (int, float)):
-                rhs_vec[:] = float(rhs)
-            elif isinstance(rhs, Param):
-                missing = [d for d in rhs.dims if d not in axis_cols]
-                if missing:
-                    raise ValueError(
-                        f"constraint {name!r}: rhs Param has dim {missing} not in over={axis_cols}"
-                    )
-                on = list(rhs.dims)
-                if on:
-                    # Bound the peak RAM of multi-Param rhs products.
-                    # rhs.lazy may be a chain of Param * Param * ... whose
-                    # eager materialisation (``rhs.frame``) explodes
-                    # intermediate join buffers by orders of magnitude
-                    # vs the constraint's row_count (FlexTool's
-                    # ``p_profile_value * p_process_existing_count *
-                    # p_process_availability`` allocates ~30 GB for a
-                    # constraint whose final row count is ~76k).
-                    #
-                    # Pre-prune via a semi-join against row_index's
-                    # actual join keys, then collect through polars's
-                    # streaming engine.  The semi-join gives the
-                    # optimiser an explicit "keep only these keys" hint;
-                    # the streaming engine bounds intermediate buffers
-                    # while the upstream Param product runs.
-                    ri_a, rf_a = _align_enum_join_keys(
-                        row_index.lazy(),
-                        rhs.lazy,
-                        on,
-                    )
-                    # Build the semi-join key set from the ALIGNED row
-                    # index so it shares the join-key dtypes with rf_a.
-                    # Building from the un-aligned ``row_index.lazy()``
-                    # raises a polars SchemaError on Enum mismatch when
-                    # rhs.lazy carries a subset-aligned Enum on the join
-                    # column (e.g. flextool's Lagrangian-region path).
-                    keys_lazy = ri_a.select(on).unique()
-                    rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
-                    _plan = ri_a.join(rf_pruned, on=on, how="left")
-                    try:
-                        j = _plan.collect(engine="streaming")
-                    except TypeError:
-                        # polars < 1.x used the streaming=True kwarg.
-                        j = _plan.collect(streaming=True)
-                    if j.height != row_count:
-                        dup_rids = (
-                            j.group_by("_rid")
-                            .agg(pl.len().alias("__n"))
-                            .filter(pl.col("__n") > 1)
-                            .sort("_rid")
-                            .head(5)["_rid"]
-                            .to_list()
-                        )
-                        sample = (
-                            j.filter(pl.col("_rid").is_in(dup_rids))
-                            .select(*on, "_rid", "value")
-                            .head(10)
-                        )
-                        raise ValueError(
-                            f"constraint {name!r}: rhs Param has duplicate keys on "
-                            f"{on!r} — left join from row_index (rows={row_count}) "
-                            f"produced {j.height} rows. Sample duplicates:\n{sample}"
-                        )
-                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
-                else:
-                    rhs_vec[:] = float(rhs.frame["value"][0])
-            elif isinstance(rhs, (Var, Expr)):
-                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [
-                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
-                ]
-                expr = Expr(expr.terms + neg)
-            else:
-                raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
-
-            # Layer 2 row-factor on RHS (off ⇒ no-op).  base_row is
-            # 0-based over constraint rows in this path (no objective
-            # row in the row-factor array; the HiGHS row index space
-            # starts at 0 too).
-            if self._layer2_row_factor is not None and row_count:
-                rhs_vec = rhs_vec * self._layer2_row_factor[
-                    base_row : base_row + row_count
-                ]
-
-            # row bounds from sense — vectorize per family, no per-row loop
-            if sense == "<=":
-                rows_lb_chunks.append(np.full(row_count, -np.inf, dtype=np.float64))
-                rows_ub_chunks.append(rhs_vec)
-            elif sense == ">=":
-                rows_lb_chunks.append(rhs_vec)
-                rows_ub_chunks.append(np.full(row_count, np.inf, dtype=np.float64))
-            elif sense == "==":
-                rows_lb_chunks.append(rhs_vec)
-                rows_ub_chunks.append(rhs_vec)
-            else:
-                raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
-
-            # row names — format inside polars to skip a per-row f-string
-            # generator-expression.
-            if over is None:
-                row_names.append(name)
-            else:
-                row_names.extend(
-                    (
-                        over.select(
-                            pl.format(
-                                "{}[{}]",
-                                pl.lit(name),
-                                pl.concat_str(
-                                    [pl.col(d).cast(pl.String) for d in axis_cols], separator=","
-                                ),
-                            ).alias("__rn")
-                        )
-                    )["__rn"].to_list()
-                )
-
-            # Bind each LHS term to the row index — but defer collect.
-            row_index_lf = row_index.lazy()
-            for term in expr.terms:
-                if term.dims:
-                    missing = [d for d in term.dims if d not in axis_cols]
-                    if missing:
-                        raise ValueError(
-                            f"constraint {name!r}: term has open dims {term.dims}, "
-                            f"but constraint axes are {axis_cols}; aggregate "
-                            f"{missing} via Sum() before adding."
-                        )
-                    on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    # Same anti-explosion pattern as ``write_mps`` (and
-                    # the RHS Param path at ~line 1814): semi-join the
-                    # term plan against the row-index key set so polars
-                    # can prune the upstream Param-product join chain
-                    # rather than materialising a wide intermediate.
-                    # Without it, a term shaped ``Var * Param₁ * Param₂``
-                    # on a 1.5M-row family allocates +26 GB during one
-                    # collect; with it, peak per-term is bounded by
-                    # ``row_count``.  Notably, this function is called
-                    # from ``autoscale._ranges._ranges_via_passmodel``
-                    # for pre-solve range detection, so the explosion
-                    # hits Layer 1 BEFORE write_mps even runs.
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = (
-                        rl_a.join(tl_pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
-                    )
-                    pending.append(("dim", base_row, plan))
-                else:
-                    pending.append(
-                        ("scalar", base_row, row_count, term.lazy.select("col_id", "coef"))
-                    )
-
-        # Pass 2: collect each staged LazyFrame one at a time with the
-        # streaming engine.  Was ``pl.collect_all`` for parallel + shared
-        # subplan execution, but parallel collect of Param-product terms
-        # multiplied peak RSS by core-count on flextool-size LPs (the
-        # plans aren't sharing subplans anyway — each is rooted at a
-        # different family's lazy chain).  Streaming + serial bounds
-        # peak per-term; triple-fallback (``engine="streaming"`` →
-        # ``streaming=True`` → plain ``.collect()``) handles polars
-        # versions or plan shapes that don't yet support streaming.
-        def _collect_one(plan: pl.LazyFrame) -> pl.DataFrame:
-            try:
-                return plan.collect(engine="streaming")
-            except TypeError:
-                try:
-                    return plan.collect(streaming=True)
-                except TypeError:
-                    if _blp_profile:
-                        _blp_emit("collect_fallback", reason="typeerror_both")
-                    return plan.collect()
-            except Exception as exc:
-                if _blp_profile:
-                    _blp_emit(
-                        "collect_fallback", reason="exception",
-                        exc=type(exc).__name__,
-                    )
-                return plan.collect()
-
-        if _blp_profile:
-            _blp_emit("pass1_done", n_pending=len(pending))
-
-        if pending:
-            plans = [p[-1] for p in pending]
-            collected_chunks: list = []
-            for idx, p in enumerate(plans):
-                j = _collect_one(p)
-                collected_chunks.append(j)
-                if _blp_profile:
-                    _blp_emit(
-                        "pass2_collected", plan_idx=idx, height=int(j.height),
-                    )
-            # Layer 2 side-vector factors (off ⇒ no-op).  In this path
-            # base_row is the 0-based absolute constraint row id, so
-            # row_factor is indexed directly by abs_rows.
-            _rf = self._layer2_row_factor
-            _cf = self._layer2_col_factor
-            for p, j in zip(pending, collected_chunks):
-                kind = p[0]
-                if kind == "dim":
-                    _, base_row, _ = p
-                    if j.height == 0:
-                        continue
-                    abs_rows = base_row + j["_rid"].to_numpy().astype(np.int64)
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
-                    if _rf is not None:
-                        vals = vals * _rf[abs_rows]
-                    if _cf is not None:
-                        vals = vals * _cf[cids]
-                    triple_rows.append(abs_rows)
-                    triple_cols.append(cids)
-                    triple_vals.append(vals)
-                else:  # "scalar"
-                    _, base_row, row_count, _ = p
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
-                    rs = np.repeat(
-                        np.arange(base_row, base_row + row_count, dtype=np.int64), len(cids)
-                    )
-                    tiled_cols = np.tile(cids, row_count)
-                    tiled_vals = np.tile(vals, row_count)
-                    if _rf is not None:
-                        tiled_vals = tiled_vals * _rf[rs]
-                    if _cf is not None:
-                        tiled_vals = tiled_vals * _cf[tiled_cols]
-                    triple_rows.append(rs)
-                    triple_cols.append(tiled_cols)
-                    triple_vals.append(tiled_vals)
-            del collected_chunks
-
-        if _blp_profile:
-            _blp_emit("pass2_done")
-
-        if triple_rows:
-            tr = np.concatenate(triple_rows)
-            tc = np.concatenate(triple_cols)
-            tv = np.concatenate(triple_vals)
-            if _blp_profile:
-                _blp_emit("triples_concat", nnz=int(tr.size))
-            # Sum coefs for duplicate (row, col) pairs.
-            dedup = (
-                pl.DataFrame({"r": tr, "c": tc, "v": tv})
-                .group_by(["r", "c"])
-                .agg(pl.col("v").sum())
-            )
-            tr = dedup["r"].to_numpy().astype(np.int64)
-            tc = dedup["c"].to_numpy().astype(np.int64)
-            tv = dedup["v"].to_numpy().astype(np.float64)
-            if _blp_profile:
-                _blp_emit("triples_deduped", nnz=int(tr.size))
-        else:
-            tr = np.zeros(0, dtype=np.int64)
-            tc = np.zeros(0, dtype=np.int64)
-            tv = np.zeros(0, dtype=np.float64)
-
-        n_rows = next_row
+        # The canonical matrix stores ±inf for portability across solver
+        # adapters; HiGHS specifically wants ``kHighsInf``, so substitute
+        # at the boundary.
         inf = highspy.kHighsInf
-
-        # --- batched build via HighsLp + passModel (≫10× faster than the
-        # per-row addRow loop on flextool-size problems).
-        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
-        if rows_lb_chunks:
-            rows_lb_arr = np.concatenate(rows_lb_chunks)
-            rows_ub_arr = np.concatenate(rows_ub_chunks)
-        else:
-            rows_lb_arr = np.zeros(0, dtype=np.float64)
-            rows_ub_arr = np.zeros(0, dtype=np.float64)
-        row_lb_h = np.where(rows_lb_arr == -np.inf, -inf, rows_lb_arr).astype(np.float64)
-        row_ub_h = np.where(rows_ub_arr == np.inf, inf, rows_ub_arr).astype(np.float64)
-
-        # build column-major (CSC) sparse matrix from the dedup'd triples
-        # Pick HiGHS index dtype based on nnz: int32 when it fits
-        # (saves ~50% memory vs int64 on large LPs), else fall back to
-        # int64.  This affects ONLY the COO arrays passed to HiGHS via
-        # HighsLp (a_index_, a_start_); Var.frame["col_id"] keeps its
-        # int64 dtype for polars-join semantics.
-        nnz = int(tr.size)
-        idx_dtype = np.int32 if nnz < (1 << 31) else np.int64
-        if nnz:
-            order = np.lexsort((tr, tc))  # primary: col, secondary: row
-            sorted_r = tr[order].astype(idx_dtype)
-            sorted_c = tc[order].astype(idx_dtype)
-            sorted_v = tv[order].astype(np.float64)
-        else:
-            sorted_r = np.zeros(0, dtype=idx_dtype)
-            sorted_c = np.zeros(0, dtype=idx_dtype)
-            sorted_v = np.zeros(0, dtype=np.float64)
-
-        starts = np.zeros(n_cols + 1, dtype=idx_dtype)
-        if sorted_c.size:
-            np.add.at(starts[1:], sorted_c, 1)
-        starts = np.cumsum(starts).astype(idx_dtype)
+        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
+        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
+        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
+        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
 
         return (
             col_lb_h,
             col_ub_h,
             row_lb_h,
             row_ub_h,
-            sorted_v,
-            sorted_r,
-            starts,
-            row_names,
-            n_rows,
+            m.val,
+            m.row_idx,
+            m.col_ptr,
+            m.row_names,
+            m.n_rows,
         )
 
     # ------------------------------------------------------------------
