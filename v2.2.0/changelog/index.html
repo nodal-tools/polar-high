@@ -1,0 +1,3721 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Python library for building indexed linear and mixed-integer programs in polars.">
+      
+      
+      
+        <link rel="canonical" href="https://nodal-tools.github.io/polar-high/v2.2.0/changelog/">
+      
+      
+        <link rel="prev" href="../compare/benchmark/">
+      
+      
+        <link rel="next" href="../about/about/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Changelog - polar-high</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#changelog" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="polar-high" class="md-header__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            polar-high
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Changelog
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="polar-high" class="md-nav__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    polar-high
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/vars-and-params/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vars and Params
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/expressions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Expressions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/problem-and-solve/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Problem and Solve
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/duals-and-bases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duals and Bases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/loading-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Loading data
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/solvers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/scaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/warm-starting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warm-starting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/lagrangian/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lagrangian
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compare
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Compare
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../compare/alternatives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Alternatives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../compare/benchmark/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#220-2026-05-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.2.0] — 2026-05-28
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.2.0] — 2026-05-28">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#glpk-likeness-scorecard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GLPK-likeness scorecard
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#213-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.3] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.3] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#212-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.2] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.2] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#211-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.1] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.1] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#210-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.0] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.0] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#202-2026-05-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.0.2] — 2026-05-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.0.2] — 2026-05-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#201-2026-05-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.0.1] — 2026-05-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.0.1] — 2026-05-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#200-2026-05-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.0.0] — 2026-05-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.0.0] — 2026-05-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added-autoscale" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added — autoscale
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed-breaking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed (breaking)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#151-2026-05-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.5.1] — 2026-05-24
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.5.1] — 2026-05-24">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#150-2026-05-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.5.0] — 2026-05-24
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.5.0] — 2026-05-24">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#140-2026-05-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.4.0] — 2026-05-22
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.4.0] — 2026-05-22">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#130-2026-05-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.3.0] — 2026-05-22
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.3.0] — 2026-05-22">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#120-2026-05-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.2.0] — 2026-05-12
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.2.0] — 2026-05-12">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#114-2026-05-11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.4] — 2026-05-11
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.4] — 2026-05-11">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#113-2026-05-07" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.3] — 2026-05-07
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.3] — 2026-05-07">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#112-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.2] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.2] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#111-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.1] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.1] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#110-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.0] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.0] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#101-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.0.1] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.0.1] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.0.0] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.0.0] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../about/about/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../about/license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#220-2026-05-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.2.0] — 2026-05-28
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.2.0] — 2026-05-28">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#glpk-likeness-scorecard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GLPK-likeness scorecard
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#213-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.3] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.3] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#212-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.2] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.2] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#211-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.1] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.1] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#210-2026-05-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.1.0] — 2026-05-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.1.0] — 2026-05-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#202-2026-05-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.0.2] — 2026-05-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.0.2] — 2026-05-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#201-2026-05-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.0.1] — 2026-05-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.0.1] — 2026-05-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#200-2026-05-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [2.0.0] — 2026-05-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[2.0.0] — 2026-05-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added-autoscale" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added — autoscale
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed-breaking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed (breaking)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#151-2026-05-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.5.1] — 2026-05-24
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.5.1] — 2026-05-24">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#150-2026-05-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.5.0] — 2026-05-24
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.5.0] — 2026-05-24">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#140-2026-05-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.4.0] — 2026-05-22
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.4.0] — 2026-05-22">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#130-2026-05-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.3.0] — 2026-05-22
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.3.0] — 2026-05-22">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#120-2026-05-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.2.0] — 2026-05-12
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.2.0] — 2026-05-12">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#114-2026-05-11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.4] — 2026-05-11
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.4] — 2026-05-11">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#113-2026-05-07" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.3] — 2026-05-07
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.3] — 2026-05-07">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#112-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.2] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.2] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#111-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.1] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.1] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#110-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.1.0] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.1.0] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#101-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.0.1] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.0.1] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100-2026-05-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [1.0.0] — 2026-05-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[1.0.0] — 2026-05-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="changelog">Changelog<a class="headerlink" href="#changelog" title="Permanent link">&para;</a></h1>
+<h2 id="220-2026-05-28">[2.2.0] — 2026-05-28<a class="headerlink" href="#220-2026-05-28" title="Permanent link">&para;</a></h2>
+<p>GLPK-style refactor of the Layer 2 scaling pipeline and the matrix
+emit path.  Two architectural changes that, together, eliminate the
+"every consumer rebuilds the matrix from scratch" pattern that the
+v2.1.x line was tactically patching.</p>
+<h3 id="added">Added<a class="headerlink" href="#added" title="Permanent link">&para;</a></h3>
+<ul>
+<li>
+<p><code>Problem.canonicalise()</code> — lazily builds and caches a single
+  canonical CSC representation of the LP on <code>Problem._matrix</code> (a
+  new <code>_CanonicalMatrix</code> slot-dataclass carrying <code>col_ptr</code> /
+  <code>row_idx</code> / <code>val</code> plus per-row <code>lb</code>/<code>ub</code>/<code>sense</code> and per-col
+  <code>obj</code>/<code>lb</code>/<code>ub</code>/<code>integrality</code> and names).  Idempotent — repeat
+  calls return the cached matrix unless <code>_canonical_dirty</code> is set.
+  <code>add_var</code> / <code>add_cstr</code> set the dirty flag; the cached matrix is
+  released by <code>_release_python_lp_inputs</code> and
+  <code>write_mps(release=True)</code>.</p>
+</li>
+<li>
+<p><code>Problem._layer2_col_factor</code> / <code>Problem._layer2_row_factor</code> —
+  numpy side vectors written by <code>flextool</code>'s <code>apply_layer2</code>.  The
+  col-factor vector stores <code>1 / cf_math</code> (inverse); the row-factor
+  vector stores <code>rf_math</code> (forward).  At canonicalise time the
+  vectors are <em>baked</em> into <code>_matrix.val</code> / <code>_matrix.col_obj</code> /
+  <code>_matrix.row_lb</code> / <code>_matrix.row_ub</code> so consumers read pre-scaled
+  values directly.  <code>Problem._layer2_locked</code> prevents post-Layer-2
+  <code>add_var</code> / <code>add_cstr</code> that would invalidate the side-vector
+  sizing.</p>
+</li>
+<li>
+<p>Regression tests <code>tests/test_layer2_side_vector_emit.py</code> and
+  <code>tests/autoscale/test_ranges.py::test_ranges_via_streaming_honors_side_vectors</code>
+  — exercise every emit-site branch with explicit fake side
+  vectors so missed multiply sites or indexing offsets fail fast
+  without depending on flextool's bit-for-bit integration test.</p>
+</li>
+</ul>
+<h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
+<ul>
+<li>
+<p><code>Problem.write_mps</code> (Stage B1) — now calls <code>canonicalise()</code> and
+  walks <code>_matrix.col_ptr</code> column-by-column.  The previous per-family
+  triple-list build, group_by dedup, concat, and global sort are
+  consolidated into <code>_build_canonical_matrix</code> (runs once per
+  state-version, shared across all consumers).  Cross-consumer
+  workflows (write_mps then solve, or any combination of the four
+  canonical-consuming sinks) now family-walk exactly once.</p>
+</li>
+<li>
+<p><code>Problem._build_lp_arrays</code> (Stage B2) — reduced to ~30 LoC.
+  Reads from <code>_matrix</code> and applies the <code>±inf → kHighsInf</code>
+  substitution.  Per-family LHS walk, per-family RHS, Stage A
+  multiply-at-emit, global dedup + sort all moved into
+  <code>_build_canonical_matrix</code>.  Back-compat shim parameters
+  (<code>n_cols</code>, <code>col_lb</code>, <code>col_ub</code>) removed from the signature; the
+  two callers (<code>LpView.from_problem</code>, <code>_ranges_via_passmodel</code>)
+  updated.</p>
+</li>
+<li>
+<p><code>WarmProblem._initial_build</code> (Stage B3) — bulk LP build
+  (LHS / RHS / obj / bounds) now reads from <code>_matrix</code>.  Tracked-
+  source bookkeeping for <code>WarmProblem.update_param</code> keeps a small
+  separate walk over <code>_cstrs</code> filtered to terms with
+  <code>param_sources</code> set; these terms re-collect and apply the same
+  Stage A multiply-at-emit so the cached <code>_param_cells</code> factors
+  remain the SCALED coef (matches the pre-refactor formula that
+  <code>update_param</code> relies on).  Skipped entirely when
+  <code>self._mutable_params</code> is empty.</p>
+</li>
+<li>
+<p><code>LpView.from_problem</code> — reads <code>m.col_obj</code> from the canonical
+  matrix instead of walking <code>_obj_terms</code> and applying its own
+  Stage A multiply-at-emit.  After this commit, the ONLY
+  remaining Stage A multiply-at-emit consumer is
+  <code>Problem._solve_streaming</code> — intentional, its per-family CSR
+  memory bound exists specifically to avoid full-matrix
+  materialisation.</p>
+</li>
+<li>
+<p><code>polar_high.autoscale._ranges._ranges_via_streaming</code> honours
+  the side vectors.  When called post-Layer-2 it multiplies
+  per-term <code>abs(coef)</code> by <code>|row_factor| * |col_factor|</code> after the
+  polars collect (numpy, in place, no lazy plan modification) so
+  the readout sees the same effective magnitudes the consumers
+  will emit.  No-op when the side vectors are <code>None</code> (the
+  pre-Layer-2 readout pattern is unchanged).</p>
+</li>
+</ul>
+<h3 id="glpk-likeness-scorecard">GLPK-likeness scorecard<a class="headerlink" href="#glpk-likeness-scorecard" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>GLPK</th>
+<th>Pre-v2.2.0</th>
+<th>Post-v2.2.0</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Matrix is canonical (one copy)</td>
+<td>✓</td>
+<td>✗ (per-family lazy + 2-3 transient copies during emit)</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Scaling lives separately from coefs</td>
+<td>✓</td>
+<td>✗ (rewrote lazy plans via flextool's <code>_layer2</code>)</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Objective excluded from row scaling</td>
+<td>✓</td>
+<td>n/a (no row scaling)</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>Build/scale is O(m+n+nnz)</td>
+<td>✓</td>
+<td>✗ (transient triple copies + dedup hash + global sort coexisted)</td>
+<td>Mostly ✓ (canonicalise still has transient peak ~3× nnz; consumers no longer rewalk)</td>
+</tr>
+</tbody>
+</table>
+<p>The remaining "Mostly" on build/scale is the transient peak during
+<code>_build_canonical_matrix</code> itself: per-family triples → global concat
+→ polars <code>group_by</code> dedup → sort → final CSC.  A per-family
+streaming canonicalisation (consumers process families one at a
+time, dedup per-family, merge sorted CSC chunks) would close this
+gap by exploiting the disjoint-row-range property each family
+already has.  Future work.</p>
+<h2 id="213-2026-05-27">[2.1.3] — 2026-05-27<a class="headerlink" href="#213-2026-05-27" title="Permanent link">&para;</a></h2>
+<h3 id="fixed">Fixed<a class="headerlink" href="#fixed" title="Permanent link">&para;</a></h3>
+<ul>
+<li>
+<p><code>Problem._build_lp_arrays</code>, <code>Problem._solve_streaming</code>, and
+  <code>WarmProblem._initial_build</code> now use the same semi-join + per-term
+  streaming-collect pattern that v2.1.2 added to <code>Problem.write_mps</code>.
+  Plain-inner-join + <code>pl.collect_all</code> previously materialised deep
+  multi-Param LHS chains and multiplied the peak via parallel
+  collect.  Per-term peak is now bounded by <code>row_count × cols-per-row</code>
+  instead of the upstream Param-product cardinality.</p>
+</li>
+<li>
+<p><code>polar_high.autoscale.detect_ranges</code> on a pre-solve <code>Problem</code> now
+  bypasses <code>Problem._build_lp_arrays</code> entirely.  New
+  <code>_ranges_via_streaming</code> walks objective + constraint terms one at
+  a time with a semi-join + per-row <code>abs(coef)</code> collect (the shape
+  <code>write_mps</code> proves on the same chains) and numpy-reduces to
+  min/max.  Avoids materialising the full COO triple list +
+  global dedup that the legacy <code>_ranges_via_passmodel</code> ran for the
+  same readout.  Legacy code stays for back-compat but is no longer
+  reached from production callers.</p>
+</li>
+</ul>
+<h3 id="added_1">Added<a class="headerlink" href="#added_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li>
+<p><code>POLAR_HIGH_RANGES_MAX_FAMILY_ROWS</code> env var (default <code>1000000</code>,
+  <code>0</code> to disable) — skips constraint families above the threshold
+  in <code>_ranges_via_streaming</code>'s RHS + matrix readout.  Background:
+  polars' streaming engine intermittently fails to push the row-key
+  semi-join into deep multi-Param product chains on very large
+  families, so a single term collect can allocate &gt;30 GB before
+  failing on workloads like FlexTool's DES LP
+  (<code>profile_flow_upper_limit</code> at 1.5 M rows × multi-Param rhs).
+  Skipping means the range report rides on the families it could
+  read.</p>
+</li>
+<li>
+<p><code>POLAR_HIGH_BUILD_LP_PROFILE=1</code> and <code>POLAR_HIGH_RANGES_PROFILE=1</code>
+  diagnostic env vars — per-family / per-phase <code>psutil</code> RSS deltas
+  to stderr from <code>Problem._build_lp_arrays</code> and from the autoscale
+  range detectors respectively.  Zero overhead when unset.</p>
+</li>
+<li>
+<p>Regression test
+  <code>test_detect_ranges_param_chain_does_not_explode</code> — synthetic
+  200k-row Var × 3-Param chain.  Pre-fix peak 515 MB on this shape;
+  post-fix under 300 MB (test asserts &lt;300 MB).</p>
+</li>
+</ul>
+<h2 id="212-2026-05-27">[2.1.2] — 2026-05-27<a class="headerlink" href="#212-2026-05-27" title="Permanent link">&para;</a></h2>
+<h3 id="fixed_1">Fixed<a class="headerlink" href="#fixed_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem.write_mps</code> per-term collect on LHS Param-chain terms
+  (e.g. <code>Var * Param₁ * Param₂ * ...</code>) used to materialise the join
+  chain's wide intermediate before the final row alignment.  On a
+  9.9 M-row LP a single such family allocated +26 GB during one
+  <code>term.lazy.collect()</code>, pushing <code>write_mps</code> peak to ~43 GB despite
+  the spec target of 2-3 GB.  Retrofitted the same anti-explosion
+  pattern the RHS path has used since v2.0.0
+  (<code>_align_enum_join_keys</code> → semi-join against the row-index key
+  set → <code>collect(engine="streaming")</code> with <code>streaming=True</code> and
+  plain-<code>.collect()</code> fallbacks).  Synthetic 100 k-row test:
+  527 MB peak → 178 MB after the fix.  Coefficients byte-identical
+  with the pre-fix path; HiGHS objective unchanged.</li>
+</ul>
+<h2 id="211-2026-05-27">[2.1.1] — 2026-05-27<a class="headerlink" href="#211-2026-05-27" title="Permanent link">&para;</a></h2>
+<h3 id="added_2">Added<a class="headerlink" href="#added_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>docs/guide/performance.md</code> — new section "Writing MPS without HiGHS"
+  covering <code>Problem.write_mps</code>: API, the ~20× peak-memory advantage
+  over <code>Highs.writeModel</code>, <code>release=True</code> semantics, cross-solver
+  roundtrip coverage, and the <code>POLAR_HIGH_WRITE_MPS_PROFILE=1</code>
+  diagnostic env var.  Cross-linked from <code>docs/guide/scaling.md</code> and
+  <code>docs/guide/solvers.md</code>.</li>
+</ul>
+<h3 id="fixed_2">Fixed<a class="headerlink" href="#fixed_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Replaced a stale reference to a fictional <code>Problem.solve(write_mps=...)</code>
+  kwarg in <code>docs/guide/solvers.md</code> with the real <code>Problem.write_mps</code>
+  link.</li>
+<li>Ruff lint warnings in <code>tests/_bench_write_mps_parallel.py</code> (intentional
+  late polars import) and in the <code>RHS</code> section of <code>Problem.write_mps</code>
+  (unused tuple element renamed <code>_row_count</code>).</li>
+</ul>
+<h2 id="210-2026-05-27">[2.1.0] — 2026-05-27<a class="headerlink" href="#210-2026-05-27" title="Permanent link">&para;</a></h2>
+<h3 id="added_3">Added<a class="headerlink" href="#added_3" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem.write_mps(path, *, free_format=True, column_order_strict=True,
+  emit_names=True, release=False, name="POLAR_HIGH")</code> — direct
+  polars→MPS writer that bypasses <code>highspy.Highs.writeModel</code>.  Mirrors
+  the per-family streaming pattern from <code>_solve_streaming</code>, performs
+  one streaming sort by <code>(col_id, row_id)</code>, and chunked-streams the
+  COLUMNS section with <code>INTORG</code>/<code>INTEND</code> integer markers.  Target peak
+  is ~2–3 GB on a 10 M-row / 5 M-col / 20 M-nz LP — about 20× lower
+  than <code>Highs.writeModel</code>'s transient.  <code>release=True</code> reuses the same
+  <code>_release_python_lp_inputs</code> teardown as <code>solve(save_memory=True)</code> so
+  callers driving an out-of-process solver can drop the polar-side LP
+  source immediately after the write.</li>
+<li><code>POLAR_HIGH_WRITE_MPS_PROFILE=1</code> env var — when set, <code>Problem.write_mps</code>
+  emits per-phase and per-constraint-family <code>psutil</code> RSS deltas to
+  stderr for diagnosing memory hot spots.  Zero overhead when unset
+  (no <code>psutil</code> import, no closure call sites entered).</li>
+<li><code>tests/_bench_write_mps_parallel.py</code> — synthetic-LP bench for
+  <code>write_mps</code> peak memory across single-family / multi-family
+  topologies and polars thread counts.</li>
+</ul>
+<h3 id="changed_1">Changed<a class="headerlink" href="#changed_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Wrapper-driven MPS roundtrip harness (<code>tests/test_mps_fallback_wrapper.py</code>)
+  is now parametrized over both the legacy <code>LpView</code>-based writer and the
+  new <code>Problem.write_mps</code> direct writer, so the HiGHS / Gurobi / CPLEX /
+  Xpress readback tests exercise both code paths.</li>
+</ul>
+<h2 id="202-2026-05-26">[2.0.2] — 2026-05-26<a class="headerlink" href="#202-2026-05-26" title="Permanent link">&para;</a></h2>
+<h3 id="added_4">Added<a class="headerlink" href="#added_4" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>docs/guide/scaling.md</code> — user-facing guide for the
+  <code>polar_high.autoscale</code> package: when to use it, the typical
+  <code>detect_ranges → recommend_scaling → apply_scaling</code> pattern,
+  <code>ScalingMode</code> / <code>ScalingConfig</code> knobs, the precedence rules, the
+  min-floor guard + geometric-centring escape branch, and migration
+  from the retired <code>auto_user_bound_scale=True</code> flag.  Wired into
+  <code>mkdocs.yml</code>'s Guide section between Solvers and Warm-starting.</li>
+</ul>
+<h3 id="changed_2">Changed<a class="headerlink" href="#changed_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Stripped proper-name callouts of specific caller-side LPs from
+  source comments and CHANGELOG entries.  Replaced with generic
+  scenario descriptions ("a full-year LP with RHS=(1.84e-3,
+  2.02e+8)" etc.) so the technical narrative survives without
+  leaking caller-side LP names.</li>
+</ul>
+<h2 id="201-2026-05-26">[2.0.1] — 2026-05-26<a class="headerlink" href="#201-2026-05-26" title="Permanent link">&para;</a></h2>
+<h3 id="fixed_3">Fixed<a class="headerlink" href="#fixed_3" title="Permanent link">&para;</a></h3>
+<ul>
+<li>CI <code>ruff check</code> and <code>ruff format --check</code> failures inherited from
+  the v2.0.0 commits.  Sorted / removed unused imports, ran ruff
+  format, and migrated <code>ScalingMode(str, Enum)</code> → <code>ScalingMode(
+  enum.StrEnum)</code> to clear the UP042 hint.  Behaviour difference:
+  <code>str(ScalingMode.OFF)</code> now returns <code>"off"</code> instead of
+  <code>"ScalingMode.OFF"</code>; no code in <code>src/</code> or <code>tests/</code> stringifies the
+  enum, so this is invisible at the API boundary.</li>
+</ul>
+<h3 id="changed_3">Changed<a class="headerlink" href="#changed_3" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Cross-solver MPS-fallback tests now have sharpened skip strings
+  that distinguish <em>"wrapper-installed-but-CLI-binary-missing"</em> from
+  <em>"solver wholly absent"</em>, and point at the new wrapper-driven test
+  file for parallel coverage when only the Python wrapper is present.</li>
+</ul>
+<h3 id="added_5">Added<a class="headerlink" href="#added_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>tests/test_mps_fallback_wrapper.py</code>: for each commercial solver
+  whose Python wrapper is installed (Gurobi, CPLEX, Xpress), writes
+  the polar-high MPS file, reads it back into the wrapper, solves,
+  and asserts the objective matches a direct in-memory HiGHS solve.
+  Catches MPS-format issues end-to-end without needing the
+  standalone CLI binary.  COPT is intentionally out of scope here
+  due to the in-process COPT/HiGHS native-symbol conflict
+  documented in <code>solvers/_copt.py</code>.</li>
+</ul>
+<h2 id="200-2026-05-26">[2.0.0] — 2026-05-26<a class="headerlink" href="#200-2026-05-26" title="Permanent link">&para;</a></h2>
+<p>Headline: much-improved automatic LP scaling via a new
+<code>polar_high.autoscale</code> package. The previous one-shot
+<code>auto_user_bound_scale=True</code> constructor flag is <strong>retired</strong> and
+replaced by a richer caller-driven API that detects bound / cost /
+RHS / matrix ranges and recommends <code>user_bound_scale</code> and
+<code>user_objective_scale</code> exponents independently. The new path also
+adds a min-floor guard that catches a class of false-infeasibility
+results HiGHS' own <code>suggestScaling</code> can produce on wide-spread LPs.
+See the <a href="https://nodal-tools.github.io/polar-high/guide/scaling/">Scaling guide</a>
+for the full caller story.</p>
+<h3 id="added-autoscale">Added — autoscale<a class="headerlink" href="#added-autoscale" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>polar_high.autoscale</code> package with three pieces:</li>
+<li><code>detect_ranges(problem_or_solution, config)</code> returns a
+    <code>RangeReport</code> with the four <code>(abs_min, abs_max)</code> tuples
+    (<code>matrix</code>, <code>cost</code>, <code>col_bound</code>, <code>row_bound</code>) plus per-category
+    samples of smallest / largest contributors, usable on a built
+    <code>Problem</code> <em>or</em> on a returned <code>Solution</code> (re-uses
+    <code>Solution.streamed_lp_ranges</code> when available).</li>
+<li><code>recommend_scaling(ranges, config)</code> returns a <code>Layer3Plan</code> with
+    <code>user_bound_scale</code> and <code>user_objective_scale</code> integer exponents,
+    derived from HiGHS' own <code>suggestScaling</code> formula. Preserves the
+    geometric-centering escape branch for severe asymmetric-bound
+    LPs, now guarded by a min-floor check (see <em>Fixed</em>).</li>
+<li><code>ScalingMode</code> enum (<code>OFF</code> / <code>SOLVER_ONLY</code> / <code>BASIC</code> / <code>FULL</code>)
+    with helper predicates so library callers can decide policy per
+    mode rather than per-call kwarg.</li>
+<li>Precedence check: an axis whose <code>user_*_scale</code> is already set by
+  the caller (via <code>set_solver_options</code> or per-call <code>options=</code>) is
+  skipped by <code>recommend_scaling</code>. The caller's explicit value always
+  wins.</li>
+<li><code>Problem.set_solver_option(name, value)</code> and
+  <code>Problem.get_solver_option(name)</code> accessors as the clean surface
+  the precedence check reads from.</li>
+</ul>
+<h3 id="removed-breaking">Removed (breaking)<a class="headerlink" href="#removed-breaking" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem(auto_user_bound_scale: bool = ...)</code> constructor option.
+  The flag's one-shot, col-bound-only heuristic is superseded by
+  <code>autoscale.recommend_scaling()</code>, which considers all four ranges
+  independently and is configurable per-mode. Callers should:</li>
+<li>Build the <code>Problem</code> as before.</li>
+<li>Call <code>detect_ranges(p, config)</code> and then <code>recommend_scaling(
+     ranges, config)</code> for the chosen <code>ScalingMode</code>.</li>
+<li>Apply the returned <code>Layer3Plan</code> via <code>Problem.set_solver_option</code>.
+  See the autoscale package docstring for the migration pattern.</li>
+<li>The internal <code>_recommend_user_bound_scale</code> helper that backed the
+  retired flag.</li>
+</ul>
+<h3 id="fixed_4">Fixed<a class="headerlink" href="#fixed_4" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>False-infeasibility from over-aggressive scaling.</strong> When HiGHS'
+  own <code>suggestScaling</code> looks only at the <em>max</em> of <code>(bound_max,
+  rhs_max)</code>, it can pick a <code>user_bound_scale</code> exponent that crushes
+  the <em>min</em> below <code>kExcessivelySmallBoundValue</code> (1e-4). HiGHS'
+  presolve then mis-handles the near-zero rows and the LP comes
+  back infeasible. Observed on a full-year LP with
+  RHS=(1.84e-3, 2.02e+8): the formula picked N=-8 → scaled RHS min
+  7.2e-6 → spurious infeasibility. The new <code>recommend_scaling</code>
+  adds a min-floor guard: when the proposed delta would drag the
+  scaled min below the threshold, the current scale is returned
+  unchanged.</li>
+<li><strong>Duplicate-key rhs Param fan-out.</strong> The left-join from
+  <code>row_index</code> against an upstream Param with duplicate <code>(on=)</code> keys
+  used to surface as an opaque
+  <code>ValueError: operands could not be broadcast together with shapes
+  (X,) (Y,)</code> deep inside the solver adapter. <code>_build_lp_arrays</code>
+  (and the chunked / WarmProblem variants) now raise immediately
+  at the join boundary, naming the offending constraint plus a
+  sample of the duplicate keys.</li>
+<li><strong><code>--highs-threads N&gt;1</code> silently ignored.</strong> HiGHS'
+  <code>setOptionValue("threads", N)</code> is a no-op once the global Rayon
+  scheduler has been initialised (which happens at default
+  <code>threads=16</code>). We now call <code>Highs.resetGlobalScheduler(False)</code>
+  before applying the user's options so the requested thread count
+  actually takes effect.</li>
+</ul>
+<h3 id="notes">Notes<a class="headerlink" href="#notes" title="Permanent link">&para;</a></h3>
+<ul>
+<li>The 1.5.x releases (sidecar RSS sampler, <code>save_memory=True</code>
+  one-shot mode, chunked LP-range accumulator) are subsumed under
+  2.0.0; their entries remain below as the detailed history.</li>
+</ul>
+<h2 id="151-2026-05-24">[1.5.1] — 2026-05-24<a class="headerlink" href="#151-2026-05-24" title="Permanent link">&para;</a></h2>
+<h3 id="changed_4">Changed<a class="headerlink" href="#changed_4" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>docs/compare/benchmark.md</code>: trim the "how this differs from
+  earlier versions" methodology paragraph (covered in the 1.5.0
+  changelog entry) and minor wording cleanup.</li>
+</ul>
+<h2 id="150-2026-05-24">[1.5.0] — 2026-05-24<a class="headerlink" href="#150-2026-05-24" title="Permanent link">&para;</a></h2>
+<h3 id="added_6">Added<a class="headerlink" href="#added_6" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem.solve(save_memory: bool = False)</code> opt-in one-shot mode for
+  benchmark-style single solves. When <code>True</code>, polar-high drops its
+  Python-side LP source-of-truth (term lazy plans, Param frames,
+  caller-side column-bound / cost arrays, and the <code>col_names</code> /
+  <code>row_names</code> lists) once HiGHS has copied them, and then writes the
+  model to a temp MPS file, clears the original <code>Highs</code> instance,
+  calls <code>malloc_trim(0)</code> to return glibc arenas to the OS, and
+  creates a fresh <code>Highs</code> that reads the model back before
+  <code>h.run()</code>. The disk roundtrip resets HiGHS' incremental-<code>addRows</code>
+  allocator slack — at N=3000 dense full-solve it drops peak RSS
+  from ~38 GB to ~28 GB at the cost of ~+90 s wall time (the MPS
+  write + read). A subsequent <code>Problem.solve()</code> on a Problem that
+  has been released raises a clear <code>RuntimeError</code>; WarmProblem-style
+  incremental updates and re-solves are unavailable after
+  <code>save_memory=True</code>. Cold-start rolling-horizon loops that rebuild
+  the <code>Problem</code> from scratch each iteration are unaffected and
+  benefit from the per-iteration memory drop. Default <code>False</code>
+  preserves the warm-restart-capable behaviour.</li>
+</ul>
+<h3 id="changed_5">Changed<a class="headerlink" href="#changed_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>_running_finite_nonzero_min_max</code> (used by the streaming
+  LP-range accumulator) now scans in chunks of 1 M float64s instead
+  of materialising <code>np.abs(arr[finite])</code> for the whole array. On a
+  36 M-nonzero constraint family that cuts the transient temp
+  allocation from ~576 MB to ~16 MB. Functionally identical output.</li>
+<li><code>_solve_streaming</code> no longer concatenates <code>col_lb_h</code> with
+  <code>col_ub_h</code> (or <code>row_lb</code> with <code>row_ub</code> per family) for range
+  accumulation — each is scanned in place. Eliminates a 2·n_cols
+  (and 2·n_rows-per-family) transient copy each.</li>
+<li><code>_solve_streaming</code> drops <code>col_lb_h</code> / <code>col_ub_h</code> / <code>col_obj_h</code>
+  immediately after the LP-range accumulation completes — HiGHS has
+  its own internal copies from <code>addCols</code>, so the originals are not
+  needed through the family loop and <code>h.run()</code>. ~432 MB at N=3000
+  dense.</li>
+<li>Column-array construction (<code>col_lb</code> / <code>col_ub</code> / <code>col_obj</code> /
+  <code>col_int</code> / <code>col_names</code>) moved from <code>Problem.solve()</code> into
+  <code>_solve_streaming</code> so the caller's frame doesn't pin those arrays
+  through the entire family loop and <code>h.run()</code> call. Combined with
+  the drop above, this removes ~864 MB of caller-side residue at
+  N=3000 dense.</li>
+<li><code>benchmark/run_one.py</code> now starts a sidecar thread that samples
+  <code>VmRSS</code> from <code>/proc/self/status</code> at 25 ms cadence while <code>solve()</code>
+  runs, and calls <code>malloc_trim(0)</code> after <code>gc.collect()</code> at the
+  post-build and post-solve checkpoints. New CSV columns:
+  <code>rss_after_build_trim_mb</code>, <code>rss_after_solve_trim_mb</code>,
+  <code>rss_solve_min_mb</code>, <code>rss_solve_p50_mb</code>, <code>rss_solve_p95_mb</code>,
+  <code>rss_solve_max_mb</code>, <code>n_samples</code>. The <code>peak_rss_mb</code> column stays
+  as before (<code>ru_maxrss</code>, the unavoidable high-water mark including
+  transient HiGHS-setup scratch). Old 10-field CSV rows still parse
+  through <code>plot.py</code>.</li>
+<li><code>docs/compare/benchmark.md</code> rewritten: new memory-measurement
+  methodology section explains <code>peak_rss_mb</code> vs <code>rss_solve_p50_mb</code>
+  vs <code>rss_after_solve_trim_mb</code>; new section on the regular vs
+  <code>save_memory</code> modes with a side-by-side polar-high comparison;
+  headline tables updated to use <code>save_memory=True</code> for the
+  cross-tool comparison (matches linopy's <code>io_api="lp"</code> file-handoff
+  pattern). Threading-benefit numbers updated — speedup at N=10 000
+  is now 1.18× rather than 1.33× because the MPS roundtrip is a
+  serial step that doesn't scale with thread count.</li>
+</ul>
+<h2 id="140-2026-05-22">[1.4.0] — 2026-05-22<a class="headerlink" href="#140-2026-05-22" title="Permanent link">&para;</a></h2>
+<h3 id="removed">Removed<a class="headerlink" href="#removed" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem.peek_lp_ranges()</code>. The method rebuilt the full LP into
+  numpy arrays via the non-streaming path purely to extract coefficient
+  ranges — duplicate work the streaming solve already does. The same
+  four <code>(abs_min, abs_max)</code> tuples (<code>matrix</code>, <code>cost</code>, <code>col_bound</code>,
+  <code>row_bound</code>) are now populated automatically on every <code>solve()</code> and
+  exposed as <code>Solution.streamed_lp_ranges</code>. Callers that needed range
+  inspection should read from the <code>Solution</code> instead; there is no more
+  pre-solve range-inspection API.</li>
+</ul>
+<h3 id="added_7">Added<a class="headerlink" href="#added_7" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem(auto_user_bound_scale: bool = False)</code> constructor option.
+  When <code>True</code>, the streaming solve accumulates LP coefficient ranges
+  during the family loop (at no extra allocation cost — it walks the
+  per-family arrays we already build) and applies a <code>user_bound_scale</code>
+  recommendation via <code>setOptionValue</code> before <code>Highs.run()</code>, but only
+  when the caller has not already set <code>user_bound_scale</code> via the
+  options dict / <code>set_solver_options</code>. The embedded heuristic
+  <code>_recommend_user_bound_scale(bound_range, rhs_range)</code> is a direct
+  port of HiGHS' own <code>suggestScaling</code> lambda at
+  <code>HighsSolve.cpp:570-607</code>: it pulls <code>max(bound_max, rhs_max)</code> into
+  HiGHS' <code>[kExcessivelySmallBoundValue, kExcessivelyLargeBoundValue]</code>
+  = <code>[1e-4, 1e+6]</code> comfort zone using outer-rounded log2, and
+  reproduces the integer HiGHS prints in its <code>"Consider setting the
+  user_bound_scale option to &lt;N&gt;"</code> recommendation byte-for-byte.</li>
+<li><code>Solution.streamed_lp_ranges: dict | None</code> field. Populated by every
+  solve that flows through <code>_solve_streaming</code> (which is the default
+  path) with the four <code>(abs_min, abs_max) | None</code> range tuples. <code>None</code>
+  on solves that don't go through streaming (e.g. the non-streaming
+  <code>solve(streaming=False)</code> path).</li>
+</ul>
+<h3 id="changed_6">Changed<a class="headerlink" href="#changed_6" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>_solve_streaming</code> now performs running min/max accumulation over
+  <code>col_obj_h</code>, <code>col_lb_h</code>/<code>col_ub_h</code>, and per-family <code>val64</code> /
+  <code>row_lb</code> / <code>row_ub</code> numpy arrays. Cost is a handful of O(n) scans
+  with no new allocations. Used to drive <code>auto_user_bound_scale</code> and
+  exposed on <code>Solution.streamed_lp_ranges</code>.</li>
+<li>When <code>auto_user_bound_scale=True</code>, the decision is now reported on
+  stdout so the run log shows what scaling (if any) was applied —
+  one of: <code>applying user_bound_scale=N (bound …, rhs …; HiGHS' own
+  kExcessively[Small|Large]BoundValue formula)</code>, <code>no scaling --
+  max(bound, rhs) already within HiGHS' [1e-4, 1e+6] comfort zone
+  (bound …, rhs …)</code>, <code>no scaling -- no finite bound or RHS entries
+  to evaluate</code>, or <code>caller override in place (user_bound_scale=N)</code>.</li>
+</ul>
+<h2 id="130-2026-05-22">[1.3.0] — 2026-05-22<a class="headerlink" href="#130-2026-05-22" title="Permanent link">&para;</a></h2>
+<h3 id="added_8">Added<a class="headerlink" href="#added_8" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Generic Enum-dtype alignment on every internal join site. When two
+  frames are joined on a column that is <code>pl.Enum</code> on both sides but
+  with different categorical vocabularies, polar-high now up-casts
+  the narrower side to the wider Enum (provided one's categories are
+  a subset of the other's). Enum-vs-<code>pl.Utf8</code> mismatches are
+  resolved by casting the string side to the Enum dtype. Two Enums
+  with neither-subset vocabs raise a clear <code>ValueError</code> pointing the
+  caller to cast to <code>pl.Utf8</code> or build a union Enum. The behaviour
+  is exposed as the internal helper <code>polar_high.engine._align_enum_join_keys</code>
+  and exercised by every internal <code>.join</code> call site (operator joins,
+  <code>Where</code>, <code>Sum</code>, <code>Lag</code>, constraint-emission, <code>WarmProblem</code> updates).</li>
+<li><code>tests/test_enum_dtype_align.py</code>: unit + end-to-end coverage of the
+  new alignment behaviour, including the disjoint-vocab raise path
+  and an end-to-end <code>Problem.add_cstr</code> / <code>solve</code> with a narrower-vocab
+  rhs Param.</li>
+</ul>
+<h3 id="changed_7">Changed<a class="headerlink" href="#changed_7" title="Permanent link">&para;</a></h3>
+<ul>
+<li>README "Enum dtype handling" subsection documenting the
+  subset-up-cast rule and the raise-for-no-subset behaviour. No DSL
+  surface change — existing models keep building unchanged; mixed-vocab
+  models that previously needed per-site casts in caller code no
+  longer do.</li>
+<li><code>engine.py</code>: when a constraint's rhs is a <code>Param</code> (or a chain of
+  <code>Param * Param * ...</code>), pre-filter the rhs lazy plan with a semi-join
+  against <code>row_index</code>'s join keys and collect via the streaming engine
+  before the left-join into the constraint frame. Polars' optimiser
+  doesn't always propagate the implicit row-set restriction through a
+  multi-way Param product, so the intermediate buffers could blow up
+  by orders of magnitude relative to the final row count. On
+  FlexTool's South Africa 1-week PES-Hydro-dispatch case (a
+  <code>p_profile_value * p_process_existing_count * p_process_availability</code>
+  product), solver-finished ΔRSS drops from +28.77 GB to +9.40 GB
+  (-67%) and the section runtime drops from 57.7 s to 17.5 s.
+  Objective and total cost match the baseline byte-for-byte. Applied
+  to all three rhs-Param call sites: the non-streaming
+  <code>Problem.add_cstr</code> path, <code>_solve_streaming</code>, and <code>WarmProblem.solve</code>.
+  Falls back to <code>collect(streaming=True)</code> on polars &lt; 1.x.</li>
+<li>README: quickstart code is now inlined (GitHub/PyPI don't render
+  <code>pymdownx.snippets</code> includes); the cross-product index is split into
+  reusable <code>unit_index</code> / <code>time_index</code> sets; <code>cap</code> is built per-unit
+  then concatenated; <code>v_idx</code> renamed to <code>composite_index</code> (the <code>v_</code>
+  prefix is reserved for variables); <code>_idx</code> → <code>_index</code> throughout.</li>
+<li><code>Problem.add_cstr</code> arg order in README and quickstart fixture
+  reordered to <code>lhs_terms</code> before <code>sense</code> — reads more naturally as
+  <em>lhs sense rhs</em>. No API change (these are keyword args).</li>
+</ul>
+<h3 id="removed_1">Removed<a class="headerlink" href="#removed_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Breaking:</strong> <code>Problem.peek_lp_ranges()</code> removed. The method rebuilt
+  the full LP into numpy arrays via the non-streaming path purely to
+  extract coefficient ranges — duplicate work the streaming solve
+  already does. Stream-time range accumulation now populates
+  <code>Solution.streamed_lp_ranges</code> with the same four <code>(abs_min, abs_max)</code>
+  tuples (<code>matrix</code>, <code>cost</code>, <code>col_bound</code>, <code>row_bound</code>) at zero extra
+  cost on every <code>solve()</code> that goes through <code>_solve_streaming</code> (the
+  default). Callers that previously relied on <code>peek_lp_ranges()</code> for
+  diagnostics should read <code>sol.streamed_lp_ranges</code> after <code>solve()</code>
+  returns; the module helper <code>polar_high.engine._recommend_user_bound_scale</code>
+  consumes the <code>(lo, hi)</code> of the <code>col_bound</code> entry for the
+  geo-midpoint heuristic. The <code>top_k &gt; 0</code> per-coefficient name-lookup
+  variant of <code>peek_lp_ranges</code> has no streaming-time replacement; if
+  needed, build the LP via the non-streaming path
+  (<code>solve(streaming=False)</code>) and inspect via the solver-specific HiGHS
+  diagnostics.</li>
+</ul>
+<h2 id="120-2026-05-12">[1.2.0] — 2026-05-12<a class="headerlink" href="#120-2026-05-12" title="Permanent link">&para;</a></h2>
+<h3 id="added_9">Added<a class="headerlink" href="#added_9" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>polar_high.solvers</code> module: multi-solver dispatch behind a single
+  <code>solve(problem, solver_name=..., io_api=..., env=..., **options)</code>
+  entry point. HiGHS remains the default; <strong>Gurobi</strong>, <strong>CPLEX</strong>,
+  <strong>FICO Xpress</strong>, and <strong>COPT</strong> are supported on a
+  bring-your-own-license basis (we ship no binaries and no licenses).</li>
+<li><code>polar_high.solvers.available_solvers</code>: runtime registry of
+  installed solver Python wrappers, populated at import time. Tells
+  you which wrappers are <em>installed</em>; license checks fire inside the
+  adapter.</li>
+<li><code>IOMode.MPS</code> file-based fallback for users with a solver's CLI
+  binary on <code>PATH</code> but no matching Python wrapper. Writes a temp MPS
+  via <code>highspy</code>, invokes the CLI, parses the resulting <code>.sol</code> file.
+  Covers <code>gurobi_cl</code>, <code>cplex</code>, Xpress <code>optimizer</code>, and <code>copt_cmd</code>.</li>
+<li><code>polar_high.solvers._lp_view.LpView</code>: frozen, solver-agnostic
+  extraction surface that every adapter consumes. Engine-private
+  attribute access (<code>Problem._build_lp_arrays</code> etc.) is confined to
+  this single module.</li>
+<li>Optional install extras: <code>polar-high[gurobi]</code>, <code>polar-high[cplex]</code>,
+  <code>polar-high[xpress]</code>, <code>polar-high[copt]</code>. Each pulls only the
+  vendor's Python wrapper (plus <code>scipy</code> where vectorized loads need
+  it).</li>
+<li><code>docs/guide/solvers.md</code>: user-facing guide covering detection,
+  per-solver install, the <code>io_api='mps'</code> escape hatch, the <code>env=</code>
+  passthrough (Gurobi WLS example), and license troubleshooting.</li>
+</ul>
+<h3 id="changed_8">Changed<a class="headerlink" href="#changed_8" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem.solve(streaming=False)</code> now routes through
+  <code>polar_high.solvers._highs.run</code>. Behaviour and return type
+  unchanged — <code>streaming=True</code> retains the existing HiGHS-only
+  per-family <code>addRows</code> path.</li>
+<li>COPT adapter auto-routes through the <code>copt_cmd</code> CLI fallback
+  whenever <code>highspy</code> is already loaded in the interpreter. COPT
+  8.x's native core conflicts with HiGHS in-process (<code>Highs.run()</code>
+  segfaults once <code>coptpy</code> is imported); the auto-route keeps both
+  solvers usable from the same <code>polar-high</code> venv at the cost of a
+  per-solve MPS write + subprocess invocation. Requires <code>copt_cmd</code>
+  on PATH (not shipped by the <code>coptpy</code> pip wheel); a clean
+  <code>SolverNotAvailableError</code> is raised when it is missing. Details
+  in <code>docs/guide/solvers.md</code>.</li>
+</ul>
+<h2 id="114-2026-05-11">[1.1.4] — 2026-05-11<a class="headerlink" href="#114-2026-05-11" title="Permanent link">&para;</a></h2>
+<h3 id="added_10">Added<a class="headerlink" href="#added_10" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Problem.peek_lp_ranges()</code>: build the LP into numpy arrays and
+  return the abs-value ranges of finite non-zero entries on each
+  axis (matrix, cost, bounds, rhs) — same numbers HiGHS prints in
+  its "Coefficient ranges" diagnostic, but available <em>before</em>
+  <code>passModel()</code> runs. Optional <code>top_k</code> returns the worst offenders
+  per axis as <code>(abs_value, col_name, row_name_or_side)</code> triples.
+  Lets callers pick <code>user_bound_scale</code> / <code>user_cost_scale</code> or
+  refuse to solve a catastrophically scaled LP without paying for
+  a full solve. Uses <code>np.argpartition</code> so the cost is
+  <code>O(n_nonzeros)</code>.</li>
+<li><code>.github/dependabot.yml</code>: weekly dependency PRs for GitHub
+  Actions and Python (pip) ecosystems. The initial commit
+  (c3836f5) was the GitHub-provided template with an empty
+  <code>package-ecosystem</code>; this release fills it in so the bot
+  actually opens PRs.</li>
+</ul>
+<h3 id="changed_9">Changed<a class="headerlink" href="#changed_9" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>engine.py</code>: factor the non-streaming LP-build out of <code>solve()</code>
+  into a private <code>_build_lp_arrays()</code> helper. <code>solve()</code> and
+  <code>peek_lp_ranges()</code> now share the same arrays — diagnostics are
+  byte-for-byte what HiGHS sees.</li>
+<li><code>engine.py</code>: for constraint families with &gt; 50 000 rows,
+  collect term plans one at a time instead of <code>pl.collect_all</code>.
+  Peak memory drops from <code>O(n_terms × frame)</code> to <code>O(frame)</code>,
+  preventing stalls under memory pressure on large network
+  models.</li>
+<li><code>engine.py</code>: HiGHS no longer suppressed via <code>h.silent()</code> —
+  solver progress and the "Coefficient ranges" line now print to
+  stdout by default. Pass <code>options={"output_flag": False}</code> to
+  silence.</li>
+</ul>
+<h2 id="113-2026-05-07">[1.1.3] — 2026-05-07<a class="headerlink" href="#113-2026-05-07" title="Permanent link">&para;</a></h2>
+<h3 id="changed_10">Changed<a class="headerlink" href="#changed_10" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>docs/guide/debugging.md</code>: expanded with worked examples; doc
+  snippets are now wired to test fixtures
+  (<code>tests/fixtures/debug_example.py</code>,
+  <code>tests/fixtures/lagrangian_example.py</code>,
+  <code>tests/fixtures/quickstart_example.py</code>) so they're exercised by
+  the test suite and can't silently rot.</li>
+<li><code>mkdocs.yml</code>: drop <code>dedent_sections</code> from the <code>snippets</code>
+  pymdownx config — incompatible with the multi-fixture snippet
+  layout.</li>
+</ul>
+<h2 id="112-2026-05-05">[1.1.2] — 2026-05-05<a class="headerlink" href="#112-2026-05-05" title="Permanent link">&para;</a></h2>
+<h3 id="added_11">Added<a class="headerlink" href="#added_11" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>docs/guide/loading-data.md</code>: new guide page on going from CSV /
+  parquet / database tables to <code>Param</code> and <code>Var</code>, including the
+  long-format vs. wide-format trade-off and how column names become
+  dimension names.</li>
+</ul>
+<h3 id="changed_11">Changed<a class="headerlink" href="#changed_11" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>docs.yml</code>: drop the <code>dev</code> alias deploy on <code>main</code> pushes; only
+  tagged releases publish a versioned doc site.</li>
+</ul>
+<h2 id="111-2026-05-05">[1.1.1] — 2026-05-05<a class="headerlink" href="#111-2026-05-05" title="Permanent link">&para;</a></h2>
+<h3 id="fixed_5">Fixed<a class="headerlink" href="#fixed_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>pyproject.toml</code>: add Python 3.13 classifier. CI's test matrix
+  already covers 3.13; the classifier was missing so the
+  pyversions badge was reading "3.11 | 3.12" only.</li>
+<li><code>release.yml</code>: <code>skip-existing: true</code> on the PyPI publish step.
+  Re-tagging the same version now no-ops on PyPI's duplicate-file
+  rejection instead of showing the run as failed.</li>
+</ul>
+<h2 id="110-2026-05-05">[1.1.0] — 2026-05-05<a class="headerlink" href="#110-2026-05-05" title="Permanent link">&para;</a></h2>
+<h3 id="changed_12">Changed<a class="headerlink" href="#changed_12" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>BREAKING:</strong> renamed package <code>polar-high-opt</code> → <code>polar-high</code>
+  (Python module <code>polar_high_opt</code> → <code>polar_high</code>). All imports,
+  PyPI install name, repo and docs URLs move with it.</li>
+<li><strong>BREAKING:</strong> <code>Problem.solve()</code> defaults changed:
+  <code>streaming=True</code> (per-family <code>addRows</code> instead of one big
+  <code>passModel</code>; lower peak memory; numerically identical) and
+  <code>keep_solver=False</code> (the live <code>highspy.Highs</code> is dropped after
+  primal/dual extraction; pass <code>keep_solver=True</code> to retain it for
+  post-solve inspection like <code>sol.highs.writeModel(...)</code>).</li>
+<li><strong>BREAKING:</strong> <code>polar_high</code> sets <code>POLARS_MAX_THREADS=1</code> at import.
+  Rayon coordination overhead exceeds the parallel speedup on
+  typical LP-build workloads (see benchmark page). Override by
+  setting the env var before <code>import polar_high</code>.</li>
+<li>COO row/column indices use <code>int32</code> when <code>nnz &lt; 2^31</code>, falling
+  back to <code>int64</code> only when needed. Cuts working-set memory in
+  the matrix-assembly phase.</li>
+<li><code>_Term.frame</code> cache is no longer populated during <code>Problem.solve()</code>
+  — the lazy plan is collected into a local that goes out of scope
+  per family. Re-solves rebuild from the lazy plan as before.</li>
+</ul>
+<h3 id="added_12">Added<a class="headerlink" href="#added_12" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Benchmark suite under <code>benchmark/</code>: dense <code>N×N</code> LP (replicates
+  linopy's benchmark) and a sparse network-flow LP with irregular
+  edge→node topology. Reproducible via subprocess-isolated cells in
+  <code>benchmark/run.py</code>; figures rendered by <code>benchmark/plot.py</code>.</li>
+<li>New <code>docs/compare/benchmark.md</code> with five figures and the story
+  for each (build-only headline, threads scaling at fixed N,
+  threading benefit on the network LP, network LP, linopy-format
+  replication).</li>
+<li><code>Threading</code> section in <code>docs/guide/performance.md</code> documenting the
+  default-1 choice and the override pattern.</li>
+<li>Tiny dispatch LP (wind + coal × 3 hours) replaces the abstract
+  <code>i / j</code> placeholder in README and <code>docs/quickstart.md</code>.</li>
+</ul>
+<h2 id="101-2026-05-05">[1.0.1] — 2026-05-05<a class="headerlink" href="#101-2026-05-05" title="Permanent link">&para;</a></h2>
+<h3 id="added_13">Added<a class="headerlink" href="#added_13" title="Permanent link">&para;</a></h3>
+<ul>
+<li>GitHub Actions: tests on push/PR (Python 3.11–3.13), docs deploy
+  on main + tag (mike), PyPI release on tag (trusted publishing).</li>
+<li>Ruff lint + format configured in <code>pyproject.toml</code>; <code>[lint]</code>
+  optional-dependency added.</li>
+<li>README badges: PyPI version, Python versions, license, tests CI,
+  docs CI, ruff.</li>
+</ul>
+<h3 id="changed_13">Changed<a class="headerlink" href="#changed_13" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Repo / docs URLs moved from <code>jkiviluo/polar-high</code> to
+  <code>nodal-tools/polar-high</code>; documentation site is hosted at
+  <code>https://nodal-tools.fi/polar-high/</code>.</li>
+<li>One-time <code>ruff format</code> reflow across the source tree.</li>
+</ul>
+<h3 id="fixed_6">Fixed<a class="headerlink" href="#fixed_6" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Dead intra-doc anchor link in <code>guide/performance.md</code> (the
+  <code>vars-and-params.md</code> "Param × Param" heading slugifies to a single
+  hyphen, not two).</li>
+</ul>
+<h3 id="removed_2">Removed<a class="headerlink" href="#removed_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Two dangling unused locals (<code>engine.py</code> and <code>test_warm_problem.py</code>).</li>
+</ul>
+<h2 id="100-2026-05-05">[1.0.0] — 2026-05-05<a class="headerlink" href="#100-2026-05-05" title="Permanent link">&para;</a></h2>
+<p>First public release.</p>
+<h3 id="added_14">Added<a class="headerlink" href="#added_14" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>Var</code>, <code>Param</code>, <code>Expr</code> — building blocks for indexed expressions
+  expressed as polars DataFrames.</li>
+<li><code>Sum</code>, <code>Where</code>, <code>Lag</code> — aggregation, filtering, and time-shift
+  primitives that compile to LP rows efficiently.</li>
+<li><code>Problem</code> — assemble an LP/MIP and solve via HiGHS (<code>highspy</code>).</li>
+<li><code>WarmProblem</code> — re-solve with parameter / RHS / objective updates
+  while preserving the basis.</li>
+<li><code>LagrangianProblem</code> — generic dual-subgradient driver for
+  Lagrangian decomposition of coupled subproblems.</li>
+<li><code>Solution</code> — primal values, constraint duals, reduced costs, and a
+  live <code>highspy.Highs</code> handle for advanced post-solve inspection.</li>
+<li>MkDocs + mike documentation site under <code>docs/</code>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.indexes", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
