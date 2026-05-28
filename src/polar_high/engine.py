@@ -549,6 +549,20 @@ def _build_lhs_pruned_plan(
     return rl_a.join(acc_a, on=on, how="inner")
 
 
+def _prune_down_disabled() -> bool:
+    """Return True when the user has set POLAR_HIGH_DISABLE_PRUNE_DOWN=1.
+
+    Both the RHS prune-down (composite-Param ``_sources`` walk in
+    :meth:`Problem._build_canonical_matrix`) and the LHS prune-down
+    (``_build_lhs_pruned_plan`` invocations in
+    ``_build_canonical_matrix`` / ``_solve_streaming`` /
+    ``WarmProblem._initial_build``) honour this flag so users can fall
+    back to the original merged-lazy paths verbatim when the prune-down
+    optimisation produces unexpected drift.
+    """
+    return os.environ.get("POLAR_HIGH_DISABLE_PRUNE_DOWN") == "1"
+
+
 def _merge_param_sources(
     a: list[tuple[Param, int]] | None,
     b: list[tuple[Param, int]] | None,
@@ -1778,6 +1792,7 @@ class Problem:
                     on
                     and sources is not None
                     and len(sources) >= 2
+                    and not _prune_down_disabled()
                 )
                 if use_prune_down:
                     # Start the accumulator from row_index with value=1.0.
@@ -2004,6 +2019,7 @@ class Problem:
                         term.var_source is not None
                         and _lhs_psrc is not None
                         and len(_lhs_psrc) >= 2
+                        and not _prune_down_disabled()
                     )
                     if _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
@@ -3239,6 +3255,7 @@ class Problem:
                         term.var_source is not None
                         and _lhs_psrc is not None
                         and len(_lhs_psrc) >= 2
+                        and not _prune_down_disabled()
                     )
                     if _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
@@ -4633,6 +4650,7 @@ class WarmProblem:
                         term.var_source is not None
                         and _lhs_psrc is not None
                         and len(_lhs_psrc) >= 2
+                        and not _prune_down_disabled()
                     )
                     if _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
