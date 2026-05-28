@@ -1645,7 +1645,107 @@ class Problem:
                         f"not in over={axis_cols}"
                     )
                 on = list(rhs.dims)
-                if on:
+                # Prefer the prune-down path when the composite RHS Param
+                # tracks its atomic constituents via ``_sources`` (length
+                # >= 2).  Walking the chain one atomic at a time and
+                # semi-joining each atomic to the running accumulator's
+                # key projection keeps the intermediate bounded to
+                # ``row_count`` rows — avoiding the wide Cartesian-on-shared-
+                # dim intermediates that ``Param.__mul__``'s nested inner
+                # joins otherwise materialise (e.g. DES
+                # ``profile_flow_upper_limit`` RHS = profile_value *
+                # process_existing_count * process_availability, where the
+                # first inner join on ``d`` alone exploded to many hundred
+                # MB of (f, p, d, t)-keyed rows).
+                #
+                # Single-Param RHS (``_sources is None`` or len <= 1) and
+                # anonymous chains (``_sources is None``) fall back to the
+                # original merged-lazy + semi-join-prune path verbatim so
+                # we don't perturb existing parity.
+                sources = rhs._sources if isinstance(rhs._sources, list) else None
+                use_prune_down = (
+                    on
+                    and sources is not None
+                    and len(sources) >= 2
+                )
+                if use_prune_down:
+                    # Start the accumulator from row_index with value=1.0.
+                    # Each atomic contributes either as a left-joined value
+                    # column (multiplied / divided in) or, for scalar
+                    # atomics, as a literal scalar factor.
+                    acc = row_index.lazy().with_columns(value=pl.lit(1.0, dtype=pl.Float64))
+                    for atomic, direction in sources:
+                        atomic_on = [d for d in atomic.dims if d in axis_cols]
+                        if atomic_on:
+                            # Pre-prune the atomic to only rows whose keys
+                            # exist in the accumulator's projection.  Each
+                            # join is wrapped in _align_enum_join_keys so
+                            # Enum dtype mismatches between row_index keys
+                            # and atomic keys don't silently drop rows.
+                            acc_for_keys, atomic_lazy = _align_enum_join_keys(
+                                acc, atomic.lazy, atomic_on
+                            )
+                            keys_lazy = acc_for_keys.select(atomic_on).unique()
+                            keys_a, atomic_a = _align_enum_join_keys(
+                                keys_lazy, atomic_lazy, atomic_on
+                            )
+                            atomic_pruned = atomic_a.join(
+                                keys_a, on=atomic_on, how="semi"
+                            )
+                            acc_a, atomic_pruned_a = _align_enum_join_keys(
+                                acc_for_keys, atomic_pruned, atomic_on
+                            )
+                            joined = acc_a.join(
+                                atomic_pruned_a,
+                                on=atomic_on,
+                                how="left",
+                                suffix="__rhs_chain",
+                            )
+                            if direction >= 0:
+                                acc = joined.with_columns(
+                                    value=pl.col("value")
+                                    * pl.col("value__rhs_chain")
+                                ).drop("value__rhs_chain")
+                            else:
+                                acc = joined.with_columns(
+                                    value=pl.col("value")
+                                    / pl.col("value__rhs_chain")
+                                ).drop("value__rhs_chain")
+                        else:
+                            # Scalar atomic — fold the constant into the
+                            # running value column directly.
+                            scalar_val = float(atomic.frame["value"][0])
+                            if direction >= 0:
+                                acc = acc.with_columns(
+                                    value=pl.col("value") * scalar_val
+                                )
+                            else:
+                                acc = acc.with_columns(
+                                    value=pl.col("value") / scalar_val
+                                )
+                    if _profile:
+                        _cm_emit(
+                            "family_rhs_pruned_down",
+                            family=cname,
+                            family_idx=_fam_idx,
+                            n_atomics=len(sources),
+                        )
+                    _plan = acc.select("_rid", "value")
+                    j = _collect_streaming(_plan)
+                    if j.height != row_count:
+                        raise ValueError(
+                            f"constraint {cname!r}: rhs Param chain produced "
+                            f"{j.height} rows from row_index (rows={row_count})"
+                            " — likely duplicate keys in one of the atomic "
+                            f"Params {[a.name for a, _ in sources]!r}."
+                        )
+                    rhs_vec = (
+                        j.sort("_rid")["value"]
+                        .fill_null(0.0)
+                        .to_numpy()
+                        .astype(np.float64)
+                    )
+                elif on:
                     ri_a, rf_a = _align_enum_join_keys(
                         row_index.lazy(),
                         rhs.lazy,
