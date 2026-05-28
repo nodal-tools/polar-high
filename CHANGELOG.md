@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.2.0] — 2026-05-28
+
+GLPK-style refactor of the Layer 2 scaling pipeline and the matrix
+emit path.  Two architectural changes that, together, eliminate the
+"every consumer rebuilds the matrix from scratch" pattern that the
+v2.1.x line was tactically patching.
+
+### Added
+
+- `Problem.canonicalise()` — lazily builds and caches a single
+  canonical CSC representation of the LP on `Problem._matrix` (a
+  new `_CanonicalMatrix` slot-dataclass carrying `col_ptr` /
+  `row_idx` / `val` plus per-row `lb`/`ub`/`sense` and per-col
+  `obj`/`lb`/`ub`/`integrality` and names).  Idempotent — repeat
+  calls return the cached matrix unless `_canonical_dirty` is set.
+  `add_var` / `add_cstr` set the dirty flag; the cached matrix is
+  released by `_release_python_lp_inputs` and
+  `write_mps(release=True)`.
+
+- `Problem._layer2_col_factor` / `Problem._layer2_row_factor` —
+  numpy side vectors written by `flextool`'s `apply_layer2`.  The
+  col-factor vector stores `1 / cf_math` (inverse); the row-factor
+  vector stores `rf_math` (forward).  At canonicalise time the
+  vectors are *baked* into `_matrix.val` / `_matrix.col_obj` /
+  `_matrix.row_lb` / `_matrix.row_ub` so consumers read pre-scaled
+  values directly.  `Problem._layer2_locked` prevents post-Layer-2
+  `add_var` / `add_cstr` that would invalidate the side-vector
+  sizing.
+
+- Regression tests `tests/test_layer2_side_vector_emit.py` and
+  `tests/autoscale/test_ranges.py::test_ranges_via_streaming_honors_side_vectors`
+  — exercise every emit-site branch with explicit fake side
+  vectors so missed multiply sites or indexing offsets fail fast
+  without depending on flextool's bit-for-bit integration test.
+
+### Changed
+
+- `Problem.write_mps` (Stage B1) — now calls `canonicalise()` and
+  walks `_matrix.col_ptr` column-by-column.  The previous per-family
+  triple-list build, group_by dedup, concat, and global sort are
+  consolidated into `_build_canonical_matrix` (runs once per
+  state-version, shared across all consumers).  Cross-consumer
+  workflows (write_mps then solve, or any combination of the four
+  canonical-consuming sinks) now family-walk exactly once.
+
+- `Problem._build_lp_arrays` (Stage B2) — reduced to ~30 LoC.
+  Reads from `_matrix` and applies the `±inf → kHighsInf`
+  substitution.  Per-family LHS walk, per-family RHS, Stage A
+  multiply-at-emit, global dedup + sort all moved into
+  `_build_canonical_matrix`.  Back-compat shim parameters
+  (`n_cols`, `col_lb`, `col_ub`) removed from the signature; the
+  two callers (`LpView.from_problem`, `_ranges_via_passmodel`)
+  updated.
+
+- `WarmProblem._initial_build` (Stage B3) — bulk LP build
+  (LHS / RHS / obj / bounds) now reads from `_matrix`.  Tracked-
+  source bookkeeping for `WarmProblem.update_param` keeps a small
+  separate walk over `_cstrs` filtered to terms with
+  `param_sources` set; these terms re-collect and apply the same
+  Stage A multiply-at-emit so the cached `_param_cells` factors
+  remain the SCALED coef (matches the pre-refactor formula that
+  `update_param` relies on).  Skipped entirely when
+  `self._mutable_params` is empty.
+
+- `LpView.from_problem` — reads `m.col_obj` from the canonical
+  matrix instead of walking `_obj_terms` and applying its own
+  Stage A multiply-at-emit.  After this commit, the ONLY
+  remaining Stage A multiply-at-emit consumer is
+  `Problem._solve_streaming` — intentional, its per-family CSR
+  memory bound exists specifically to avoid full-matrix
+  materialisation.
+
+- `polar_high.autoscale._ranges._ranges_via_streaming` honours
+  the side vectors.  When called post-Layer-2 it multiplies
+  per-term `abs(coef)` by `|row_factor| * |col_factor|` after the
+  polars collect (numpy, in place, no lazy plan modification) so
+  the readout sees the same effective magnitudes the consumers
+  will emit.  No-op when the side vectors are `None` (the
+  pre-Layer-2 readout pattern is unchanged).
+
+### GLPK-likeness scorecard
+
+| Property | GLPK | Pre-v2.2.0 | Post-v2.2.0 |
+|---|---|---|---|
+| Matrix is canonical (one copy) | ✓ | ✗ (per-family lazy + 2-3 transient copies during emit) | ✓ |
+| Scaling lives separately from coefs | ✓ | ✗ (rewrote lazy plans via flextool's `_layer2`) | ✓ |
+| Objective excluded from row scaling | ✓ | n/a (no row scaling) | ✓ |
+| Build/scale is O(m+n+nnz) | ✓ | ✗ (transient triple copies + dedup hash + global sort coexisted) | Mostly ✓ (canonicalise still has transient peak ~3× nnz; consumers no longer rewalk) |
+
+The remaining "Mostly" on build/scale is the transient peak during
+`_build_canonical_matrix` itself: per-family triples → global concat
+→ polars `group_by` dedup → sort → final CSC.  A per-family
+streaming canonicalisation (consumers process families one at a
+time, dedup per-family, merge sorted CSC chunks) would close this
+gap by exploiting the disjoint-row-range property each family
+already has.  Future work.
+
 ## [2.1.3] — 2026-05-27
 
 ### Fixed
