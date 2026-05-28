@@ -2257,20 +2257,19 @@ class Problem:
         col_lb = np.zeros(n_cols, dtype=np.float64)
         col_ub = np.full(n_cols, np.inf, dtype=np.float64)
         col_int = np.zeros(n_cols, dtype=np.int8)
+        # ---- Pass 6: col names.  Used by write_mps + (future)
+        # write_lp / diagnostic emitters.  Not gated on emit_names —
+        # the canonical store always carries them; write_mps can
+        # override with generic R/C names at emit time.  Merged with
+        # the bounds/integrality scatter above so each var.frame's
+        # col_id materialisation runs once instead of twice.
+        col_names: list[str] = [""] * n_cols
         for v in self._vars.values():
             ids = v.frame["col_id"].to_numpy()
             col_lb[ids] = float(v.lower)
             col_ub[ids] = float(v.upper)
             if v.integer:
                 col_int[ids] = 1
-
-        # ---- Pass 6: col names.  Used by write_mps + (future)
-        # write_lp / diagnostic emitters.  Not gated on emit_names —
-        # the canonical store always carries them; write_mps can
-        # override with generic R/C names at emit time.
-        col_names: list[str] = [""] * n_cols
-        for v in self._vars.values():
-            ids = v.frame["col_id"].to_numpy()
             if v.dims:
                 tagged = (
                     v.frame.select(
