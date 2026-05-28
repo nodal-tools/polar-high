@@ -99,6 +99,7 @@ nav:
       - Lagrangian: guide/lagrangian.md
       - Performance: guide/performance.md
       - Debugging: guide/debugging.md
+      - Environment variables: guide/env-vars.md
   - Reference:
       - API: reference/api.md
   - Compare:
