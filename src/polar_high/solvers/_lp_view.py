@@ -184,9 +184,10 @@ class LpView:
             )
 
         # Reconstruct (row, col) pairs from CSC, then re-sort by row.
-        col_of = np.empty(nnz, dtype=np.int64)
-        for c in range(n_cols):
-            col_of[a_start[c] : a_start[c + 1]] = c
+        # ``np.repeat`` + ``np.diff`` is the vectorised equivalent of the
+        # per-column scatter loop and produces an identically-shaped
+        # int64 array.
+        col_of = np.repeat(np.arange(n_cols, dtype=np.int64), np.diff(a_start))
         row_of = a_index.astype(np.int64)
 
         order = np.lexsort((col_of, row_of))  # primary: row, secondary: col
