@@ -78,7 +78,6 @@ class LpView:
         n_cols = problem._next_col
         col_lb = np.zeros(n_cols, dtype=np.float64)
         col_ub = np.full(n_cols, np.inf, dtype=np.float64)
-        col_obj = np.zeros(n_cols, dtype=np.float64)
         col_int = np.zeros(n_cols, dtype=np.int8)  # 1 = integer column
         col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
 
@@ -107,22 +106,7 @@ class LpView:
                 cid0 = int(ids[0])
                 col_names[cid0] = v.name
 
-        # ----- objective scatter ----------------------------------------
-        # Materialize each term into a local DataFrame and let it drop;
-        # never populate an eager cache on _Term.
-        # Layer 2 col-factor (off ⇒ no-op).  Mirrors the four
-        # in-engine consumers; cost has no row-factor entry.
-        _cf_obj = problem._layer2_col_factor
-        for t in problem._obj_terms:
-            f = t.lazy.collect()
-            cids = f["col_id"].to_numpy()
-            vals = f["coef"].to_numpy()
-            if _cf_obj is not None:
-                vals = vals * _cf_obj[cids]
-            np.add.at(col_obj, cids, vals)
-            del f
-
-        # ----- row + matrix build ---------------------------------------
+        # ----- objective + row + matrix build ---------------------------
         # _build_lp_arrays converts bounds from ±inf to ±kHighsInf for
         # immediate HiGHS consumption; the view stores ±inf for adapter
         # portability, so we convert back here.
@@ -143,6 +127,13 @@ class LpView:
             col_lb=col_lb,
             col_ub=col_ub,
         )
+
+        # The objective vector lives on the canonical matrix (Stage B/D8
+        # bakes Layer 2's col_factor into ``m.col_obj`` at canonicalise
+        # time).  ``_build_lp_arrays`` triggered canonicalisation above,
+        # so this is a cache hit.  Copy because LpView's contract gives
+        # the consumer an owned array.
+        col_obj = problem.canonicalise().col_obj.copy()
 
         inf = highspy.kHighsInf
         col_lb_v = np.where(col_lb_h == -inf, -np.inf, col_lb_h).astype(np.float64)
