@@ -3998,9 +3998,13 @@ class WarmProblem:
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     coefs = j["coef"].to_numpy().astype(np.float64)
                     abs_rows = base_row + rids
-                    # Stage A multiply-at-emit reproduces the SCALED
-                    # coef so the cached factor matches what
-                    # ``_build_canonical_matrix`` BAKED into ``m.val``.
+                    # The Param-tracker cache stores the SCALED coef so
+                    # subsequent mutate-and-resolve cycles produce values
+                    # consistent with what ``_build_canonical_matrix``
+                    # BAKED into ``m.val`` (Layer 2 side vectors).  Apply
+                    # the same row/column factors here at second-pass
+                    # collect time so the per-term factor matches the
+                    # canonical assembly.
                     if _rf is not None:
                         coefs = coefs * _rf[abs_rows]
                     if _cf is not None:

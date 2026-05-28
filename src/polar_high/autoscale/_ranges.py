@@ -512,8 +512,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # When row_factor is on, we need per-row alignment with
                 # ``_rid`` so we can multiply ``value`` by
                 # ``row_factor[base_row + _rid]`` before reducing.  Mirror
-                # ``_build_lp_arrays``'s rhs build (line ~2245-2321):
-                # carry an ``_rid`` column on the row index.
+                # ``_build_canonical_matrix``'s rhs build: carry an
+                # ``_rid`` column on the row index.
                 if _l2_rf is None:
                     ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
                     keys = ri_a.select(on).unique()
@@ -569,8 +569,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             rhs_hi = hi
         # Var / Expr RHS: skip — they fold into the LHS at solve time,
         # so their coefficient magnitudes are already counted via the
-        # LHS scan below.  ``_build_lp_arrays`` did the same fold; here
-        # we just rely on the LHS pass to catch the same magnitudes.
+        # LHS scan below.  ``_build_canonical_matrix`` does the same
+        # fold; here we just rely on the LHS pass to catch the same
+        # magnitudes.
 
         if _profile:
             _emit("rhs_done", family=cname)
@@ -587,7 +588,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # the abs-only collect).  If on, we need ``_rid`` + ``col_id``
         # in the collected frame so we can index ``_l2_rf[base_row +
         # _rid]`` and ``_l2_cf[col_id]`` before the magnitude reduce.
-        # Mirror ``_build_lp_arrays``'s LHS join (engine.py ~2386-2404).
+        # Mirror ``_build_canonical_matrix``'s LHS join.
         if row_index_lf is not None and (_l2_rf is not None):
             row_index_lf_rid = over.with_columns(
                 _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
