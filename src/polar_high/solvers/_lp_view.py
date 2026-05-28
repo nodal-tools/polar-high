@@ -122,11 +122,7 @@ class LpView:
             starts,
             row_names,
             n_rows,
-        ) = problem._build_lp_arrays(
-            n_cols=n_cols,
-            col_lb=col_lb,
-            col_ub=col_ub,
-        )
+        ) = problem._build_lp_arrays()
 
         # The objective vector lives on the canonical matrix (Stage B/D8
         # bakes Layer 2's col_factor into ``m.col_obj`` at canonicalise

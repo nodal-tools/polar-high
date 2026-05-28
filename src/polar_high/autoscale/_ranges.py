@@ -710,16 +710,10 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         except ImportError:
             _profile = False
 
-    # Prepare the same n_cols / col_lb / col_ub arrays ``Problem.solve``
-    # builds before calling ``_build_lp_arrays`` — see the streaming
-    # solve path in polar_high.engine for the canonical sequence.
+    # ``_build_lp_arrays`` now consumes the canonical matrix (Stage B2),
+    # which derives column bounds from ``Var.lower`` / ``Var.upper``
+    # internally — no need to pre-build per-column bound arrays here.
     n_cols = problem._next_col
-    col_lb = np.zeros(n_cols, dtype=np.float64)
-    col_ub = np.zeros(n_cols, dtype=np.float64)
-    for v in problem._vars.values():
-        cids = v.frame["col_id"].to_numpy()
-        col_lb[cids] = v.lower
-        col_ub[cids] = v.upper
 
     if _profile:
         _emit("bounds_built", n_cols=n_cols)
@@ -734,11 +728,7 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         _starts,
         _row_names,
         _n_rows,
-    ) = problem._build_lp_arrays(
-        n_cols=n_cols,
-        col_lb=col_lb,
-        col_ub=col_ub,
-    )
+    ) = problem._build_lp_arrays()
 
     if _profile:
         _emit("build_lp_arrays_done", nnz=int(sorted_v.size))

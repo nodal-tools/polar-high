@@ -2323,10 +2323,6 @@ class Problem:
     # :mod:`polar_high.solvers`.
     def _build_lp_arrays(
         self,
-        *,
-        n_cols: int,
-        col_lb: np.ndarray,
-        col_ub: np.ndarray,
     ) -> tuple[
         np.ndarray,  # col_lb_h
         np.ndarray,  # col_ub_h
@@ -2346,14 +2342,6 @@ class Problem:
         Param resolve, Stage A multiply-at-emit, global dedup + sort —
         has been moved into :meth:`_build_canonical_matrix`.
 
-        The ``n_cols`` / ``col_lb`` / ``col_ub`` arguments are accepted
-        for backward compatibility with the existing callers
-        (:class:`LpView`, :func:`autoscale._ranges._ranges_via_passmodel`),
-        but the values used are read from the canonical matrix's
-        ``col_lb`` / ``col_ub`` — they're built from the same
-        ``Var.lower`` / ``Var.upper`` sources after :func:`apply_layer2`
-        mutates them in place, so the two are equivalent.
-
         Returns
         -------
         tuple of numpy arrays + list[str] + int
@@ -2362,8 +2350,6 @@ class Problem:
             ``kHighsInf`` sentinel in place of ``np.inf`` so they're
             ready for ``HighsLp.row_lower_`` / ``row_upper_``.
         """
-        del n_cols, col_lb, col_ub  # unused; see docstring
-
         m = self.canonicalise()
 
         # The canonical matrix stores ±inf for portability across solver
