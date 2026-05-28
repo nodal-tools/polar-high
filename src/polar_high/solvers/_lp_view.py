@@ -132,10 +132,10 @@ class LpView:
         col_obj = problem.canonicalise().col_obj.copy()
 
         inf = highspy.kHighsInf
-        col_lb_v = np.where(col_lb_h == -inf, -np.inf, col_lb_h).astype(np.float64)
-        col_ub_v = np.where(col_ub_h == inf, np.inf, col_ub_h).astype(np.float64)
-        row_lb_v = np.where(row_lb_h == -inf, -np.inf, row_lb_h).astype(np.float64)
-        row_ub_v = np.where(row_ub_h == inf, np.inf, row_ub_h).astype(np.float64)
+        col_lb_v = np.where(col_lb_h == -inf, -np.inf, col_lb_h).astype(np.float64, copy=False)
+        col_ub_v = np.where(col_ub_h == inf, np.inf, col_ub_h).astype(np.float64, copy=False)
+        row_lb_v = np.where(row_lb_h == -inf, -np.inf, row_lb_h).astype(np.float64, copy=False)
+        row_ub_v = np.where(row_ub_h == inf, np.inf, row_ub_h).astype(np.float64, copy=False)
 
         integrality = col_int if col_int.any() else None
 

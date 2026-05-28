@@ -1854,7 +1854,7 @@ class Problem:
                         j.sort("_rid")["value"]
                         .fill_null(0.0)
                         .to_numpy()
-                        .astype(np.float64)
+                        .astype(np.float64, copy=False)
                     )
                 elif on:
                     ri_a, rf_a = _align_enum_join_keys(
@@ -1879,7 +1879,7 @@ class Problem:
                         j.sort("_rid")["value"]
                         .fill_null(0.0)
                         .to_numpy()
-                        .astype(np.float64)
+                        .astype(np.float64, copy=False)
                     )
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -2135,10 +2135,10 @@ class Problem:
                 if kind == "dim":
                     if j.height == 0:
                         continue
-                    rids_local = j["_rid"].to_numpy().astype(np.int64)
-                    abs_rows = (base_row + rids_local).astype(np.int64)
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
+                    rids_local = j["_rid"].to_numpy().astype(np.int64, copy=False)
+                    abs_rows = (base_row + rids_local).astype(np.int64, copy=False)
+                    cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                    vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                     # BAKE side vectors into LHS values.
                     if _rf is not None:
                         vals = vals * _rf[abs_rows]
@@ -2149,8 +2149,8 @@ class Problem:
                     triple_vals.append(vals)
                     fam_nnz += abs_rows.size
                 else:
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
+                    cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                    vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                     if cids.size == 0:
                         continue
                     rs = np.repeat(
@@ -2199,9 +2199,9 @@ class Problem:
                 .group_by(["r", "c"])
                 .agg(pl.col("v").sum())
             )
-            tr = dedup["r"].to_numpy().astype(np.int64)
-            tc = dedup["c"].to_numpy().astype(np.int64)
-            tv = dedup["v"].to_numpy().astype(np.float64)
+            tr = dedup["r"].to_numpy().astype(np.int64, copy=False)
+            tc = dedup["c"].to_numpy().astype(np.int64, copy=False)
+            tv = dedup["v"].to_numpy().astype(np.float64, copy=False)
             del dedup
         else:
             tr = np.zeros(0, dtype=np.int64)
@@ -2243,8 +2243,8 @@ class Problem:
             if f.height == 0:
                 del f
                 continue
-            cids = f["col_id"].to_numpy().astype(np.int64)
-            vals = f["coef"].to_numpy().astype(np.float64)
+            cids = f["col_id"].to_numpy().astype(np.int64, copy=False)
+            vals = f["coef"].to_numpy().astype(np.float64, copy=False)
             if _cf is not None:
                 vals = vals * _cf[cids]
             # np.add.at handles duplicate col_ids across obj terms.
@@ -2776,10 +2776,10 @@ class Problem:
         # adapters; HiGHS specifically wants ``kHighsInf``, so substitute
         # at the boundary.
         inf = highspy.kHighsInf
-        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
-        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
-        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
-        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
+        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64, copy=False)
+        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64, copy=False)
+        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64, copy=False)
+        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64, copy=False)
 
         return (
             col_lb_h,
@@ -2901,8 +2901,8 @@ class Problem:
         inf = highspy.kHighsInf
 
         # Translate +/-inf in the column bounds to HiGHS's sentinel.
-        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
+        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64, copy=False)
+        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64, copy=False)
         col_obj_h = col_obj.astype(np.float64, copy=False)
 
         if _sp_on:
@@ -3148,7 +3148,7 @@ class Problem:
                             f"{on!r} — left join from row_index (rows={row_count}) "
                             f"produced {j.height} rows. Sample duplicates:\n{sample}"
                         )
-                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
+                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
             elif isinstance(rhs, (Var, Expr)):
@@ -3171,13 +3171,13 @@ class Problem:
 
             if sense == "<=":
                 row_lb = np.full(row_count, -inf, dtype=np.float64)
-                row_ub = np.where(rhs_vec == np.inf, inf, rhs_vec).astype(np.float64)
+                row_ub = np.where(rhs_vec == np.inf, inf, rhs_vec).astype(np.float64, copy=False)
             elif sense == ">=":
-                row_lb = np.where(rhs_vec == -np.inf, -inf, rhs_vec).astype(np.float64)
+                row_lb = np.where(rhs_vec == -np.inf, -inf, rhs_vec).astype(np.float64, copy=False)
                 row_ub = np.full(row_count, inf, dtype=np.float64)
             elif sense == "==":
                 rhs_h = np.where(rhs_vec == -np.inf, -inf, rhs_vec)
-                rhs_h = np.where(rhs_h == np.inf, inf, rhs_h).astype(np.float64)
+                rhs_h = np.where(rhs_h == np.inf, inf, rhs_h).astype(np.float64, copy=False)
                 row_lb = rhs_h
                 row_ub = rhs_h
             else:
@@ -3304,9 +3304,9 @@ class Problem:
                     if kind == "dim":
                         if j.height == 0:
                             continue
-                        rids_local = j["_rid"].to_numpy().astype(np.int64)
-                        cids = j["col_id"].to_numpy().astype(np.int64)
-                        vals = j["coef"].to_numpy().astype(np.float64)
+                        rids_local = j["_rid"].to_numpy().astype(np.int64, copy=False)
+                        cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                        vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                         if _rf is not None:
                             vals = vals * _rf[base_row + rids_local]
                         if _cf is not None:
@@ -3315,8 +3315,8 @@ class Problem:
                         fam_cols.append(cids)
                         fam_vals.append(vals)
                     else:  # scalar — tile across the row_count rows
-                        cids = j["col_id"].to_numpy().astype(np.int64)
-                        vals = j["coef"].to_numpy().astype(np.float64)
+                        cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                        vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                         if cids.size == 0:
                             continue
                         tiled_rows = np.repeat(
@@ -3355,7 +3355,7 @@ class Problem:
                 )
                 fr = dedup["r"].to_numpy()
                 fc = dedup["c"].to_numpy()
-                fv = dedup["v"].to_numpy().astype(np.float64)
+                fv = dedup["v"].to_numpy().astype(np.float64, copy=False)
                 del dedup
             else:
                 fr = np.zeros(0, dtype=np.int64)
@@ -4492,10 +4492,10 @@ class WarmProblem:
             )
 
         inf = highspy.kHighsInf
-        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
-        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
-        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
-        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
+        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64, copy=False)
+        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64, copy=False)
+        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64, copy=False)
+        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64, copy=False)
         if _sp_on:
             _sp_emit("bounds_translated", n_cols=n_cols, n_rows=n_rows)
 
@@ -4663,9 +4663,9 @@ class WarmProblem:
                     j = _collect_streaming(plan)
                     if j.height == 0:
                         continue
-                    rids = j["_rid"].to_numpy().astype(np.int64)
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    coefs = j["coef"].to_numpy().astype(np.float64)
+                    rids = j["_rid"].to_numpy().astype(np.int64, copy=False)
+                    cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                    coefs = j["coef"].to_numpy().astype(np.float64, copy=False)
                     abs_rows = base_row + rids
                     _fam_tracked_rows += int(coefs.size)
                     # The Param-tracker cache stores the SCALED coef so
