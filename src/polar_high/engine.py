@@ -80,6 +80,63 @@ def _running_finite_nonzero_min_max(
 
 
 # ---------------------------------------------------------------------------
+# Solve-path memory profiling helper
+#
+# Activated by ``POLAR_HIGH_SOLVE_PROFILE=1``.  Mirrors the
+# ``POLAR_HIGH_WRITE_MPS_PROFILE`` precedent in :meth:`Problem.write_mps`:
+# tab-separated stderr lines, zero overhead when the env var is unset
+# (one ``os.environ.get`` per :meth:`Problem.solve` call, no psutil
+# import, no time.monotonic calls, no stderr output).
+# ---------------------------------------------------------------------------
+
+
+def _make_solve_profile_emitter():
+    """Return ``(emit, enabled)`` where ``emit(phase, **extras)`` writes
+    a ``[solve profile]`` tab-separated line to stderr, or ``(None, False)``
+    when ``POLAR_HIGH_SOLVE_PROFILE`` is unset / psutil is missing.
+
+    Shared by :meth:`Problem._solve_streaming` and
+    :meth:`Problem._build_canonical_matrix` (when the latter is reached
+    via :meth:`Problem._build_lp_arrays` on the non-streaming path).
+    """
+    if os.environ.get("POLAR_HIGH_SOLVE_PROFILE") != "1":
+        return None, False
+    try:
+        import psutil as _ps
+    except ImportError:
+        sys.stderr.write(
+            "[solve profile] psutil not installed — "
+            "profiling disabled (install psutil to enable).\n"
+        )
+        sys.stderr.flush()
+        return None, False
+    _proc = _ps.Process()
+    _state = {
+        "t0": time.monotonic(),
+        "prev_rss_gb": _proc.memory_info().rss / (1024**3),
+    }
+
+    def emit(phase: str, **extras: object) -> None:
+        rss_gb = _proc.memory_info().rss / (1024**3)
+        delta_gb = rss_gb - _state["prev_rss_gb"]
+        _state["prev_rss_gb"] = rss_gb
+        wall_s = time.monotonic() - _state["t0"]
+        parts = [
+            "[solve profile]",
+            f"phase={phase}",
+            f"rss_gb={rss_gb:.2f}",
+            f"delta_gb={delta_gb:+.2f}",
+            f"wall_s={wall_s:.2f}",
+        ]
+        for k, v in extras.items():
+            parts.append(f"{k}={v}")
+        sys.stderr.write("\t".join(parts) + "\n")
+        sys.stderr.flush()
+
+    return emit, True
+
+
+# ---------------------------------------------------------------------------
 # Enum-dtype-aware join helpers
 #
 # polars 1.40 refuses to join two columns of dtype ``pl.Enum`` when the
@@ -1374,7 +1431,17 @@ class Problem:
         from .solvers._highs import run as _highs_run
         from .solvers._lp_view import LpView
 
+        _sp_emit_ns, _sp_on_ns = _make_solve_profile_emitter()
+        if _sp_on_ns:
+            _sp_emit_ns(
+                "nonstreaming_enter",
+                n_vars=len(self._vars),
+                n_cstrs=len(self._cstrs),
+            )
+
         view = LpView.from_problem(self)
+        if _sp_on_ns:
+            _sp_emit_ns("nonstreaming_lpview_built")
         # Per-call ``options`` wins over what was stored on the Problem.
         opts = options if options is not None else self._solver_options
         result = _highs_run(
@@ -1382,6 +1449,8 @@ class Problem:
             options=opts,
             keep_solver=keep_solver,
         )
+        if _sp_on_ns:
+            _sp_emit_ns("nonstreaming_highs_run_done")
 
         # SolverResult → Solution round-trip.  All of these private
         # attributes are populated unconditionally by ``_highs.run``;
@@ -2396,6 +2465,16 @@ class Problem:
         _mps_out_path: str | None = None,
         _build_only: bool = False,
     ) -> Solution | None:
+        _sp_emit, _sp_on = _make_solve_profile_emitter()
+        if _sp_on:
+            _sp_emit(
+                "enter",
+                n_vars=len(self._vars),
+                n_cstrs=len(self._cstrs),
+                n_obj_terms=len(self._obj_terms),
+                save_memory=int(save_memory),
+                keep_solver=int(keep_solver),
+            )
         # Build the per-column arrays inside this frame (rather than in
         # the public ``solve`` caller) so they die at the end of the
         # streaming solve rather than living through ``HiGHS.run()`` on
@@ -2409,6 +2488,8 @@ class Problem:
         col_obj = np.zeros(n_cols, dtype=np.float64)
         col_int = np.zeros(n_cols, dtype=np.int8)  # 1 = integer column
         col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
+        if _sp_on:
+            _sp_emit("col_arrays_alloc", n_cols=n_cols)
 
         for v in self._vars.values():
             ids = v.frame["col_id"].to_numpy()
@@ -2440,6 +2521,9 @@ class Problem:
                 cid0 = int(ids[0])
                 col_names[cid0] = v.name
 
+        if _sp_on:
+            _sp_emit("var_loop_done", n_cols=n_cols)
+
         # objective — scatter-add via np.add.at (one numpy op per term,
         # no per-nonzero Python iteration).  np.add.at handles the rare
         # case where a term frame contains duplicate col_ids correctly.
@@ -2460,6 +2544,9 @@ class Problem:
             np.add.at(col_obj, cids, vals)
             del f
 
+        if _sp_on:
+            _sp_emit("obj_terms_collected", n_obj_terms=len(self._obj_terms))
+
         inf = highspy.kHighsInf
 
         # Translate +/-inf in the column bounds to HiGHS's sentinel.
@@ -2467,7 +2554,12 @@ class Problem:
         col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
         col_obj_h = col_obj.astype(np.float64, copy=False)
 
+        if _sp_on:
+            _sp_emit("col_bounds_translated", n_cols=n_cols)
+
         h = highspy.Highs()
+        if _sp_on:
+            _sp_emit("highs_constructed")
 
         # Apply solver options BEFORE any model state is established —
         # mirrors the non-streaming path (``presolve`` and friends must
@@ -2509,12 +2601,21 @@ class Problem:
                         stacklevel=2,
                     )
 
+        if _sp_on:
+            _sp_emit(
+                "options_applied",
+                n_opts=(len(opts) if opts else 0),
+            )
+
         # Objective sense + offset up front; column data comes next.
         h.changeObjectiveSense(
             highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
         )
         if self._obj_offset:
             h.changeObjectiveOffset(float(self._obj_offset))
+
+        if _sp_on:
+            _sp_emit("obj_meta_set")
 
         # Add all columns in one shot — no nonzeros yet (rows arrive
         # afterwards via addRows).  highspy expects int32 for
@@ -2532,6 +2633,9 @@ class Problem:
             empty_f64,
         )
 
+        if _sp_on:
+            _sp_emit("add_cols_done", n_cols=n_cols)
+
         # Integrality — same vectorized HighsVarType lookup as the
         # passModel path; only set when at least one column is integer.
         if col_int.any():
@@ -2541,10 +2645,16 @@ class Problem:
             all_idx = np.arange(n_cols, dtype=np.int32)
             h.changeColsIntegrality(int(n_cols), all_idx, integ_arr)
 
+        if _sp_on:
+            _sp_emit("integrality_set", n_int_cols=int(col_int.sum()))
+
         # Column names — passColName is per-item but cheap.
         for i, nm in enumerate(col_names):
             if nm is not None:
                 h.passColName(i, nm)
+
+        if _sp_on:
+            _sp_emit("col_names_passed", n_cols=n_cols)
 
         # Under save_memory, HiGHS now owns the canonical name
         # storage, so we can drop the Python-side list.  At N=3000 dense
@@ -2585,6 +2695,9 @@ class Problem:
         del col_lb_h, col_ub_h, col_obj_h
         del col_lb, col_ub, col_obj, col_int
 
+        if _sp_on:
+            _sp_emit("col_arrays_dropped")
+
         # Walk the constraint families one at a time.  For each family
         # we collect that family's term plans, build local COO arrays,
         # convert to row-CSR, and call addRows.  All locals fall out of
@@ -2592,7 +2705,7 @@ class Problem:
         row_names: list[str] = []
         next_row = 0
 
-        for name, proto, over in self._cstrs:
+        for _fam_idx, (name, proto, over) in enumerate(self._cstrs):
             expr, sense, rhs = proto.expr, proto.sense, proto.rhs
 
             if over is None:
@@ -2603,6 +2716,15 @@ class Problem:
                 row_count = over.height
                 axis_cols = list(over.columns)
                 row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_start",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    term_count=len(expr.terms),
+                )
 
             # base_row for this family is ``next_row``; HiGHS appends
             # rows in monotonic order via addRows, so per-family row
@@ -2709,6 +2831,14 @@ class Problem:
                 row_ub = rhs_h
             else:
                 raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_rhs_built",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                )
 
             # Row names — same polars-side formatting as the
             # non-streaming path; stash for later passRowName loop.
@@ -2820,6 +2950,15 @@ class Problem:
                         fam_vals.append(tiled_vals)
                 del collected
 
+            if _sp_on:
+                _sp_emit(
+                    "fam_lhs_collected",
+                    family=name,
+                    family_idx=_fam_idx,
+                    term_count=len(term_plans),
+                    n_chunks=len(fam_rows),
+                )
+
             if fam_rows:
                 fr = np.concatenate(fam_rows)
                 fc = np.concatenate(fam_cols)
@@ -2839,6 +2978,14 @@ class Problem:
                 fr = np.zeros(0, dtype=np.int64)
                 fc = np.zeros(0, dtype=np.int64)
                 fv = np.zeros(0, dtype=np.float64)
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_dedup_done",
+                    family=name,
+                    family_idx=_fam_idx,
+                    nnz=int(fr.size),
+                )
 
             # Convert COO → row-CSR.  HiGHS expects int32 for both
             # ``start`` and ``index`` arrays in addRows; nnz per family
@@ -2861,6 +3008,15 @@ class Problem:
                 val64 = np.zeros(0, dtype=np.float64)
                 starts = np.zeros(row_count + 1, dtype=np.int32)
 
+            if _sp_on:
+                _sp_emit(
+                    "fam_csr_built",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    nnz=nnz,
+                )
+
             # addRows expects ``start`` of length num_new_row (no
             # trailing entry) — slice off the last cumulative count.
             h.addRows(
@@ -2872,6 +3028,15 @@ class Problem:
                 idx32,
                 val64,
             )
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_addRows_done",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    nnz=nnz,
+                )
 
             # Update stream-time LP ranges from this family's arrays.
             # Process row_lb / row_ub separately (no concat copy).
@@ -2899,6 +3064,9 @@ class Problem:
             del term_plans, fam_rows, fam_cols, fam_vals, fr, fc, fv, idx32, val64, starts
 
         n_rows = next_row
+
+        if _sp_on:
+            _sp_emit("all_fams_done", n_rows=n_rows, n_fams=len(self._cstrs))
 
         # Materialise the four LP-range tuples (matrix / cost / col_bound /
         # row_bound) for :attr:`Solution.streamed_lp_ranges` — no per-key
@@ -2931,6 +3099,9 @@ class Problem:
         for i, nm in enumerate(row_names):
             h.passRowName(i, nm if nm is not None else f"row_{i}")
 
+        if _sp_on:
+            _sp_emit("row_names_passed", n_rows=n_rows)
+
         # Same logic as col_names above — HiGHS now owns the row name
         # storage; the Python list is ~1.1 GB of redundant strings at
         # N=3000 dense.
@@ -2947,6 +3118,8 @@ class Problem:
         # See :meth:`_release_python_lp_inputs` for the contract.
         if save_memory:
             self._release_python_lp_inputs()
+            if _sp_on:
+                _sp_emit("release_python_lp_inputs_done")
 
             # HiGHS allocator round-trip via disk.  Even after every
             # polar-side reference is dropped, the C++ Highs instance
@@ -2990,8 +3163,12 @@ class Problem:
                 except Exception:
                     pass
                 h.writeModel(mps_path)
+                if _sp_on:
+                    _sp_emit("savemem_writeModel_done", mps_path=mps_path)
                 h.clearModel()
                 del h
+                if _sp_on:
+                    _sp_emit("savemem_highs_cleared")
                 # Best-effort allocator release: glibc's malloc holds
                 # freed arenas on its free-list by default; trim hands
                 # them back to the OS so RSS actually drops.  Linux-
@@ -3055,6 +3232,8 @@ class Problem:
                     except Exception:
                         pass
                 h.readModel(mps_path)
+                if _sp_on:
+                    _sp_emit("savemem_readModel_done", mps_path=mps_path)
                 # Restore the user's requested output_flag for run().
                 if not (opts and "output_flag" in opts):
                     try:
@@ -3069,13 +3248,28 @@ class Problem:
                 if not _caller_owns_mps and os.path.exists(mps_path):
                     os.unlink(mps_path)
 
+        if _sp_on:
+            _sp_emit("before_highs_run", n_rows=n_rows, n_cols=n_cols)
+
         h.run()
+
+        if _sp_on:
+            _sp_emit("after_highs_run")
+
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
         obj_val = h.getObjectiveValue()
         col_value = np.asarray(sol.col_value, dtype=np.float64)
         row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
         col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
+
+        if _sp_on:
+            _sp_emit(
+                "solution_extracted",
+                optimal=int(bool(status_ok)),
+                n_rows=n_rows,
+                n_cols=n_cols,
+            )
 
         if keep_solver:
             sol_highs: highspy.Highs | None = h
