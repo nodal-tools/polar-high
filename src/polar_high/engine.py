@@ -4080,29 +4080,61 @@ class WarmProblem:
         semantics the pre-B3 code maintained inline.
         """
         p = self._p
+        _sp_emit, _sp_on = _make_solve_profile_emitter()
+        if _sp_on:
+            _sp_emit(
+                "initial_build_enter",
+                n_vars=len(p._vars),
+                n_cstrs=len(p._cstrs),
+                n_obj_terms=len(p._obj_terms),
+                n_mutable_params=len(self._mutable_params),
+            )
 
         # ---- Step 1: bulk LP arrays from the canonical matrix. -----
+        # NOTE: internal POLAR_HIGH_WRITE_MPS_PROFILE-gated checkpoints
+        # inside ``_build_canonical_matrix`` fire when that env var is
+        # also set; we mark the boundary here so the [solve profile]
+        # stream brackets the canonicalise cliff cleanly.
+        if _sp_on:
+            _sp_emit("canonicalise_enter")
         m = p.canonicalise()
         n_cols = m.n_cols
         n_rows = m.n_rows
+        if _sp_on:
+            _sp_emit(
+                "canonicalise_returned",
+                n_rows=n_rows,
+                n_cols=n_cols,
+                nnz=int(m.val.size),
+            )
 
         inf = highspy.kHighsInf
         col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
         col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
         row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
         row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
+        if _sp_on:
+            _sp_emit("bounds_translated", n_cols=n_cols, n_rows=n_rows)
 
         # Populate _var_cols (still needed by update_obj_coef / fix_cols /
         # _resolve_dim_tuples).  Cheap: one int64 array per declared var.
         for v in p._vars.values():
             ids = v.frame["col_id"].to_numpy()
             self._var_cols[v.name] = ids.astype(np.int64)
+        if _sp_on:
+            _sp_emit("var_cols_populated", n_vars=len(p._vars))
 
         # Use the canonical matrix's col_names verbatim.  Unused slots
         # are empty strings (vs the pre-B3 ``None``); ``passColName`` is
         # skipped for those — same observable effect as the old loop.
         col_names: list[str] = list(m.col_names)
         row_names: list[str] = list(m.row_names)
+        if _sp_on:
+            _sp_emit(
+                "names_snapshotted",
+                n_col_names=len(col_names),
+                n_row_names=len(row_names),
+            )
 
         # ---- Step 2: per-cstr metadata + tracked-source second pass.
         # The bulk path doesn't need any of this; both loops only fire
@@ -4118,7 +4150,22 @@ class WarmProblem:
         _cf = p._layer2_col_factor
         track_acc: dict[str, list[dict]] = {}
         next_row = 0
-        for cname, proto, over in p._cstrs:
+        if _sp_on:
+            _sp_emit(
+                "cstr_meta_loop_start",
+                n_cstrs=len(p._cstrs),
+                n_mutable_params=len(self._mutable_params),
+                has_row_factor=int(_rf is not None),
+                has_col_factor=int(_cf is not None),
+            )
+        # Per-family tracked-work counters (only emitted for families
+        # that actually ran the second-pass collect — avoids stderr
+        # flooding when tracked work is sparse).  Counts at the
+        # checkpoint capture the family's cumulative tracked rows so
+        # the ramp is attributable.
+        _fam_tracked_total = 0
+        _fam_tracked_families = 0
+        for _fam_idx, (cname, proto, over) in enumerate(p._cstrs):
             expr, sense, rhs = proto.expr, proto.sense, proto.rhs
 
             if over is None:
@@ -4160,6 +4207,10 @@ class WarmProblem:
                 ]
                 expr = Expr(expr.terms + neg)
 
+            # Per-family tracked-row counter — incremented inside the
+            # term loop so the post-family checkpoint can attribute
+            # rows added by this family to the track_acc accumulator.
+            _fam_tracked_rows = 0
             row_index_lf = row_index.lazy()
             for term in expr.terms:
                 if not term.param_sources:
@@ -4200,6 +4251,7 @@ class WarmProblem:
                     cids = j["col_id"].to_numpy().astype(np.int64)
                     coefs = j["coef"].to_numpy().astype(np.float64)
                     abs_rows = base_row + rids
+                    _fam_tracked_rows += int(coefs.size)
                     # The Param-tracker cache stores the SCALED coef so
                     # subsequent mutate-and-resolve cycles produce values
                     # consistent with what ``_build_canonical_matrix``
@@ -4281,6 +4333,32 @@ class WarmProblem:
                     # skip _param_cells registration.
                     continue
 
+            # Per-family checkpoint — only fires for families that
+            # actually accumulated tracked rows.  Keeps stderr volume
+            # bounded on large LPs where most families have no tracked
+            # terms, while still surfacing the per-family cost when the
+            # ramp is concentrated.
+            if _sp_on and _fam_tracked_rows:
+                _fam_tracked_total += _fam_tracked_rows
+                _fam_tracked_families += 1
+                _sp_emit(
+                    "cstr_family_tracked",
+                    fam_idx=_fam_idx,
+                    family=cname,
+                    row_count=row_count,
+                    tracked_rows=_fam_tracked_rows,
+                    cum_tracked_rows=_fam_tracked_total,
+                )
+
+        if _sp_on:
+            _sp_emit(
+                "cstr_meta_loop_done",
+                n_cstrs=len(p._cstrs),
+                tracked_families=_fam_tracked_families,
+                tracked_rows_total=_fam_tracked_total,
+                track_acc_params=len(track_acc),
+            )
+
         # Consolidate per-Param tracking accumulators.
         for pname, chunks in track_acc.items():
             if not chunks:
@@ -4304,6 +4382,12 @@ class WarmProblem:
                 direction=direction,
                 dim_signature=sig,
                 dim_keys=dim_keys,
+            )
+
+        if _sp_on:
+            _sp_emit(
+                "track_acc_consolidated",
+                n_param_cells=len(self._param_cells),
             )
 
         # ---- Step 3: assemble HighsLp + passModel. ------------------
@@ -4333,8 +4417,18 @@ class WarmProblem:
             kInt = highspy.HighsVarType.kInteger
             integ_arr = np.where(m.col_int, kInt, kCont)
             lp.integrality_ = integ_arr.tolist()
+        if _sp_on:
+            _sp_emit(
+                "lp_assembled",
+                n_cols=int(n_cols),
+                n_rows=int(n_rows),
+                nnz=int(m.val.size),
+                has_integers=int(bool(m.col_int.any())),
+            )
 
         h = highspy.Highs()
+        if _sp_on:
+            _sp_emit("highs_constructed")
         opts = options if options is not None else p._solver_options
         # See the streaming-solve block — tear the global scheduler
         # down before re-applying ``threads`` / ``parallel`` on the
@@ -4358,20 +4452,35 @@ class WarmProblem:
                     warnings.warn(
                         f"HiGHS rejected option {key}={val!r} (status={status!r})", stacklevel=2
                     )
+        if _sp_on:
+            _sp_emit(
+                "highs_options_applied",
+                n_opts=(len(opts) if opts else 0),
+            )
+        if _sp_on:
+            _sp_emit("highs_passmodel_pre", n_cols=int(n_cols), n_rows=int(n_rows))
         h.passModel(lp)
+        if _sp_on:
+            _sp_emit("highs_passmodel_post")
         for i, n in enumerate(col_names):
             # Canonical matrix uses "" for unused col slots; skip those.
             if n:
                 h.passColName(i, n)
+        if _sp_on:
+            _sp_emit("highs_col_names_passed", n_col_names=len(col_names))
         for i, n in enumerate(row_names):
             # HiGHS' pybind11 binding requires ``str``; the canonical
             # matrix may carry ``None`` (or ``""``) for unnamed rows.
             # Fall back to a synthetic ``row_<idx>`` so the API contract
             # is satisfied and diagnostics remain useful.
             h.passRowName(i, n if n else f"row_{i}")
+        if _sp_on:
+            _sp_emit("highs_row_names_passed", n_row_names=len(row_names))
 
         self._h = h
         self._n_cols = int(n_cols)
         self._n_rows = int(n_rows)
         self._col_names = col_names
         self._row_names = row_names
+        if _sp_on:
+            _sp_emit("initial_build_exit", n_cols=int(n_cols), n_rows=int(n_rows))
