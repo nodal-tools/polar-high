@@ -464,6 +464,91 @@ def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
         return plan.collect()
 
 
+def _build_lhs_pruned_plan(
+    row_index_lf: pl.LazyFrame,
+    axis_cols: list[str],
+    var_source: "Var",
+    param_sources: list[tuple["Param", int]],
+    on: list[str],
+) -> pl.LazyFrame:
+    """Rebuild a Var × Param … LHS term as a prune-down chain, mirroring
+    the RHS prune-down in :meth:`Problem._build_canonical_matrix`.
+
+    The fully-merged ``term.lazy`` produced by :meth:`Var.__mul__` +
+    :meth:`Expr.__mul__` is a chain of inner joins ``Var ⋈ P1 ⋈ P2 …``.
+    For wide constraint families with multi-Param chains, that inner
+    join chain can materialise wide intermediates the polars optimizer
+    does not push the row_index semi-join through (the same bug class
+    the RHS prune-down fixes).  Here we rebuild the chain step by step,
+    starting from ``row_index ⋈ Var.frame`` (bounded by the constraint's
+    row_index key set) and joining each atomic Param one at a time —
+    each step's row count is bounded by the row_index projection.
+
+    Returns a lazy plan with columns ``(_rid, col_id, coef)`` ready to
+    collect.  Callers handle the streaming collect + side-vector BAKE
+    pass.  ``on`` is the join key (intersection of term.dims and
+    axis_cols) used to attach the resulting per-cell rows back to
+    row_index — same semantics as the unpruned path's
+    ``row_index ⋈ term.lazy`` final join.
+    """
+    var_dims = list(var_source.dims)
+    var_on = [d for d in var_dims if d in axis_cols]
+    var_lf = var_source.frame.lazy()
+    if var_on:
+        # Pre-prune the Var.frame against the row_index key set so the
+        # very first step is bounded by the constraint's row count.
+        ri_keys = row_index_lf.select(var_on).unique()
+        var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
+        var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
+    acc = var_lf.with_columns(coef=pl.lit(1.0, dtype=pl.Float64)).select(
+        *var_dims, "col_id", "coef"
+    )
+    acc_dims: list[str] = list(var_dims)
+    for atomic, direction in param_sources:
+        shared = [d for d in acc_dims if d in atomic.dims]
+        new_dims = list(dict.fromkeys(acc_dims + list(atomic.dims)))
+        atomic_lf = atomic.lazy
+        if shared:
+            # Pre-prune the atomic Param by the accumulator's key set —
+            # mirror of the RHS prune-down's per-atomic semi-join so the
+            # join below stays bounded by ``acc`` height.
+            acc_a, atomic_a = _align_enum_join_keys(acc, atomic_lf, shared)
+            acc_keys = acc_a.select(shared).unique()
+            acc_keys_a, atomic_a2 = _align_enum_join_keys(
+                acc_keys, atomic_a, shared
+            )
+            atomic_pruned = atomic_a2.join(acc_keys_a, on=shared, how="semi")
+            acc_b, atomic_pruned_b = _align_enum_join_keys(
+                acc_a, atomic_pruned, shared
+            )
+            joined = acc_b.join(
+                atomic_pruned_b,
+                on=shared,
+                how="inner",
+                suffix="__lhs_chain",
+            )
+        else:
+            joined = acc.join(atomic_lf, how="cross", suffix="__lhs_chain")
+        # ``value`` is the Param's coefficient column.  Either it was
+        # left unrenamed (no name clash) or, if ``coef`` happened to be
+        # present on the right side already (it never is for a Param
+        # frame — Param frames carry ``(*dims, value)``), the suffixed
+        # name would apply.  The inner-join Param branch above does not
+        # rename ``value`` so the direct reference is correct.
+        if direction >= 0:
+            acc = joined.with_columns(
+                coef=pl.col("coef") * pl.col("value")
+            ).select(*new_dims, "col_id", "coef")
+        else:
+            acc = joined.with_columns(
+                coef=pl.col("coef") / pl.col("value")
+            ).select(*new_dims, "col_id", "coef")
+        acc_dims = new_dims
+    # Final attach to row_index: same shape as the unpruned path.
+    rl_a, acc_a = _align_enum_join_keys(row_index_lf, acc, on)
+    return rl_a.join(acc_a, on=on, how="inner")
+
+
 def _merge_param_sources(
     a: list[tuple[Param, int]] | None,
     b: list[tuple[Param, int]] | None,
@@ -519,7 +604,7 @@ class Var:
 
     def to_expr(self) -> Expr:
         f = self.frame.lazy().with_columns(coef=pl.lit(1.0)).select(*self.dims, "col_id", "coef")
-        return Expr([_Term(f, self.dims)])
+        return Expr([_Term(f, self.dims, var_source=self)])
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
@@ -528,7 +613,7 @@ class Var:
                 .with_columns(coef=pl.lit(float(other)))
                 .select(*self.dims, "col_id", "coef")
             )
-            return Expr([_Term(f, self.dims)])
+            return Expr([_Term(f, self.dims, var_source=self)])
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
@@ -540,7 +625,7 @@ class Var:
                 j = lf.join(other.lazy, how="cross")
             j = j.rename({"value": "coef"}).select(*new_dims, "col_id", "coef")
             psrc = other._sources_for_propagation()
-            return Expr([_Term(j, new_dims, param_sources=psrc)])
+            return Expr([_Term(j, new_dims, param_sources=psrc, var_source=self)])
         return NotImplemented
 
     __rmul__ = __mul__
@@ -583,21 +668,37 @@ class _Term:
     tracking is requested — terms flowing through unnamed Params pay no
     overhead.  The Param object is held by reference so :class:`WarmProblem`
     can read its current value frame at build time.
+
+    ``var_source`` — opt-in metadata used by the LHS Param-chain prune-
+    down path (mirror of the RHS prune-down in
+    ``_build_canonical_matrix``).  Holds the originating :class:`Var`
+    (``Var.frame`` is the col_id source) and the eager Param chain
+    multiplicand list, so the canonical / streaming / warm builders can
+    rebuild a ``row_index → Var → P1 → P2 …`` join chain that prunes one
+    atomic at a time instead of materialising the fully-merged Var×Param×
+    Param… intermediate inside ``term.lazy``.  Set by :meth:`Var.__mul__`
+    / :meth:`Expr.__mul__` and preserved through ``Expr.__sub__`` /
+    ``__neg__`` / scalar multiplies.  Cleared (set to ``None``) by
+    operations that change the term's row identity — :func:`Sum`,
+    :func:`Where`, :func:`Lag` — because the rebuilt chain would no
+    longer mirror the post-aggregation/filter row set.
     """
 
-    __slots__ = ("lazy", "dims", "param_sources")
+    __slots__ = ("lazy", "dims", "param_sources", "var_source")
 
     def __init__(
         self,
         lazy: pl.LazyFrame | pl.DataFrame,
         dims: tuple[str, ...],
         param_sources: list[tuple[Param, int]] | None = None,
+        var_source: "Var | None" = None,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
         self.lazy = lazy
         self.dims = tuple(dims)
         self.param_sources = param_sources
+        self.var_source = var_source
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -632,7 +733,12 @@ class Expr:
 
     def __sub__(self, other):
         neg = [
-            _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims, param_sources=t.param_sources)
+            _Term(
+                t.lazy.with_columns(coef=-pl.col("coef")),
+                t.dims,
+                param_sources=t.param_sources,
+                var_source=t.var_source,
+            )
             for t in _to_expr(other).terms
         ]
         return Expr(self.terms + neg)
@@ -654,6 +760,7 @@ class Expr:
                         t.lazy.with_columns(coef=pl.col("coef") * float(scalar)),
                         t.dims,
                         param_sources=t.param_sources,
+                        var_source=t.var_source,
                     )
                     for t in self.terms
                 ]
@@ -673,7 +780,9 @@ class Expr:
                     *new_dims, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
-                new.append(_Term(j, new_dims, param_sources=merged))
+                new.append(
+                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source)
+                )
             return Expr(new)
         return NotImplemented
 
@@ -697,7 +806,9 @@ class Expr:
                     *new_dims, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
-                new.append(_Term(j, new_dims, param_sources=merged))
+                new.append(
+                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source)
+                )
             return Expr(new)
         return NotImplemented
 
@@ -1864,7 +1975,7 @@ class Problem:
             # Each entry: (kind, plan, on_dims) — on_dims is the shared
             # join keys for "dim" terms, or [] for "scalar" terms.
             term_plans: list[tuple] = []
-            for term in expr.terms:
+            for _term_idx, term in enumerate(expr.terms):
                 if term.dims:
                     missing = [d for d in term.dims if d not in axis_cols]
                     if missing:
@@ -1875,15 +1986,51 @@ class Problem:
                             f"before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(
-                        row_index_lf, term.lazy, on
+                    # Prefer LHS prune-down when the term carries both a
+                    # surviving Var reference and a Param-chain with >= 2
+                    # atomics — mirror of the RHS prune-down above.  Same
+                    # rationale: avoid the wide ``Var ⋈ P1 ⋈ P2 …``
+                    # intermediate that ``term.lazy`` materialises before
+                    # the row_index semi-join can prune it.  Single-Param
+                    # / no-Param / Sum-collapsed terms (var_source is
+                    # None after Sum/Where/Lag) fall through to the
+                    # original semi-join path verbatim.
+                    _lhs_psrc = (
+                        term.param_sources
+                        if isinstance(term.param_sources, list)
+                        else None
                     )
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = (
-                        rl_a.join(tl_pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
+                    _use_lhs_prune = (
+                        term.var_source is not None
+                        and _lhs_psrc is not None
+                        and len(_lhs_psrc) >= 2
                     )
+                    if _use_lhs_prune:
+                        plan = _build_lhs_pruned_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                        ).select("_rid", "col_id", "coef")
+                        if _profile:
+                            _cm_emit(
+                                "family_term_pruned_down",
+                                family=cname,
+                                family_idx=_fam_idx,
+                                term_idx=_term_idx,
+                                n_atomics=len(_lhs_psrc),
+                            )
+                    else:
+                        rl_a, tl_a = _align_enum_join_keys(
+                            row_index_lf, term.lazy, on
+                        )
+                        keys_lazy = rl_a.select(on).unique()
+                        tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                        plan = (
+                            rl_a.join(tl_pruned, on=on, how="inner")
+                            .select("_rid", "col_id", "coef")
+                        )
                     term_plans.append(("dim", plan, list(on)))
                 else:
                     term_plans.append(
@@ -3069,7 +3216,7 @@ class Problem:
             # this iteration.
             row_index_lf = row_index.lazy()
             term_plans: list[tuple] = []
-            for term in expr.terms:
+            for _term_idx, term in enumerate(expr.terms):
                 if term.dims:
                     missing = [d for d in term.dims if d not in axis_cols]
                     if missing:
@@ -3079,18 +3226,50 @@ class Problem:
                             f"{missing} via Sum() before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    # Semi-join + streaming pattern, mirroring write_mps
-                    # and _build_lp_arrays: prune the term plan against
-                    # the row-index key set so polars can prune Param-
-                    # product join chains rather than materialise a wide
-                    # intermediate.  Same bug class on the LHS as RHS.
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = (
-                        rl_a.join(tl_pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
+                    # Prefer LHS prune-down when the term carries a Var
+                    # reference + Param-chain (>=2 atomics) — mirror of
+                    # _build_canonical_matrix's LHS prune-down branch.
+                    # Single-Param / Sum-collapsed terms (var_source is
+                    # None) keep the original semi-join path verbatim.
+                    _lhs_psrc = (
+                        term.param_sources
+                        if isinstance(term.param_sources, list)
+                        else None
                     )
+                    _use_lhs_prune = (
+                        term.var_source is not None
+                        and _lhs_psrc is not None
+                        and len(_lhs_psrc) >= 2
+                    )
+                    if _use_lhs_prune:
+                        plan = _build_lhs_pruned_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                        ).select("_rid", "col_id", "coef")
+                        if _sp_on:
+                            _sp_emit(
+                                "family_term_pruned_down",
+                                family=name,
+                                family_idx=_fam_idx,
+                                term_idx=_term_idx,
+                                n_atomics=len(_lhs_psrc),
+                            )
+                    else:
+                        rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
+                        # Semi-join + streaming pattern, mirroring write_mps
+                        # and _build_lp_arrays: prune the term plan against
+                        # the row-index key set so polars can prune Param-
+                        # product join chains rather than materialise a wide
+                        # intermediate.  Same bug class on the LHS as RHS.
+                        keys_lazy = rl_a.select(on).unique()
+                        tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                        plan = (
+                            rl_a.join(tl_pruned, on=on, how="inner")
+                            .select("_rid", "col_id", "coef")
+                        )
                     term_plans.append(("dim", plan))
                 else:
                     term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
@@ -4440,14 +4619,47 @@ class WarmProblem:
                             f"before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(
-                        row_index_lf, term.lazy, on
+                    # Prefer LHS prune-down when this term carries both a
+                    # Var reference and a multi-atomic Param chain — same
+                    # criteria as _build_canonical_matrix / _solve_streaming.
+                    # Sum-collapsed terms (var_source=None) fall back to
+                    # the original merged-lazy semi-join path verbatim so
+                    # the warm-path output matches the canonical build.
+                    _lhs_psrc = (
+                        term.param_sources
+                        if isinstance(term.param_sources, list)
+                        else None
                     )
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = rl_a.join(tl_pruned, on=on, how="inner").select(
-                        "_rid", "col_id", "coef", *term.dims
+                    _use_lhs_prune = (
+                        term.var_source is not None
+                        and _lhs_psrc is not None
+                        and len(_lhs_psrc) >= 2
                     )
+                    if _use_lhs_prune:
+                        plan = _build_lhs_pruned_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                        ).select("_rid", "col_id", "coef", *term.dims)
+                        if _sp_on:
+                            _sp_emit(
+                                "family_term_pruned_down",
+                                family=cname,
+                                family_idx=_fam_idx,
+                                term_idx=0,
+                                n_atomics=len(_lhs_psrc),
+                            )
+                    else:
+                        rl_a, tl_a = _align_enum_join_keys(
+                            row_index_lf, term.lazy, on
+                        )
+                        keys_lazy = rl_a.select(on).unique()
+                        tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                        plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                            "_rid", "col_id", "coef", *term.dims
+                        )
                     j = _collect_streaming(plan)
                     if j.height == 0:
                         continue
