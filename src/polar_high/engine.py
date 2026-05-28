@@ -1685,9 +1685,23 @@ class Problem:
                     f"{type(rhs).__name__}"
                 )
 
+            if _profile:
+                _cm_emit(
+                    "family_rhs_evaluated",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+
             # ---- Layer 2 row-factor on RHS (BAKE).
             if _rf is not None and row_count:
                 rhs_vec = rhs_vec * _rf[base_row : base_row + row_count]
+
+            if _profile:
+                _cm_emit(
+                    "family_rhs_l2baked",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
 
             # ---- sense → lb/ub vectors.
             if sense == "<=":
@@ -1713,6 +1727,13 @@ class Problem:
                 np.full(row_count, ord(sc), dtype=np.uint8)
             )
 
+            if _profile:
+                _cm_emit(
+                    "family_senses_built",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+
             # ---- row names.
             if over is None:
                 row_names.append(cname)
@@ -1730,9 +1751,18 @@ class Problem:
                     )["__rn"].to_list()
                 )
 
+            if _profile:
+                _cm_emit(
+                    "family_rownames_built",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+
             # ---- LHS term plans (same semi-join + streaming pattern as
             # write_mps' Stage A code).
             row_index_lf = row_index.lazy()
+            # Each entry: (kind, plan, on_dims) — on_dims is the shared
+            # join keys for "dim" terms, or [] for "scalar" terms.
             term_plans: list[tuple] = []
             for term in expr.terms:
                 if term.dims:
@@ -1754,11 +1784,54 @@ class Problem:
                         rl_a.join(tl_pruned, on=on, how="inner")
                         .select("_rid", "col_id", "coef")
                     )
-                    term_plans.append(("dim", plan))
+                    term_plans.append(("dim", plan, list(on)))
                 else:
                     term_plans.append(
-                        ("scalar", term.lazy.select("col_id", "coef"))
+                        ("scalar", term.lazy.select("col_id", "coef"), [])
                     )
+
+            if _profile:
+                _cm_emit(
+                    "family_term_plans_built",
+                    family=cname,
+                    family_idx=_fam_idx,
+                    lhs_term_count=len(term_plans),
+                )
+                # Optional .explain() dump per family-term (cheap I/O,
+                # gated on env var).  Skipped silently on any failure
+                # so it can't introduce new failure modes.
+                try:
+                    import os as _os_pl
+                    _plans_dir = "/tmp/polar_high_canonicalise_plans"
+                    _os_pl.makedirs(_plans_dir, exist_ok=True)
+                    _safe_cname = "".join(
+                        c if c.isalnum() or c in "._-" else "_"
+                        for c in str(cname)
+                    )
+                    for _i, (_kind, _p, _on) in enumerate(term_plans):
+                        _fname = (
+                            f"{_plans_dir}/{_fam_idx:04d}_"
+                            f"{_safe_cname}_term{_i}.txt"
+                        )
+                        try:
+                            _txt = _p.explain(optimized=True)
+                        except Exception:
+                            try:
+                                _txt = _p.explain(optimized=False)
+                            except Exception:
+                                _txt = "<explain unavailable>"
+                        try:
+                            with open(_fname, "w") as _fh:
+                                _fh.write(
+                                    f"# family={cname} family_idx={_fam_idx}\n"
+                                    f"# term_idx={_i} term_kind={_kind} "
+                                    f"on={_on}\n"
+                                )
+                                _fh.write(_txt)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
             if not term_plans:
                 if _profile:
@@ -1767,6 +1840,7 @@ class Problem:
                         family=cname,
                         family_idx=_fam_idx,
                         fam_nnz=0,
+                        lhs_term_count=0,
                     )
                 continue
 
@@ -1784,9 +1858,33 @@ class Problem:
                 except Exception:
                     return p.collect()
 
-            collected = [_collect_one(p) for _, p in term_plans]
+            # Explicit loop (was a list comprehension) so we can emit
+            # per-term collect_start/collected checkpoints without
+            # changing collection order or semantics.
+            collected: list[pl.DataFrame] = []
+            for _i, (_kind, _p, _on) in enumerate(term_plans):
+                if _profile:
+                    _cm_emit(
+                        "family_term_collect_start",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        term_idx=_i,
+                        term_kind=_kind,
+                        on=_on,
+                    )
+                _j = _collect_one(_p)
+                collected.append(_j)
+                if _profile:
+                    _cm_emit(
+                        "family_term_collected",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        term_idx=_i,
+                        term_kind=_kind,
+                        term_rows=int(_j.height),
+                    )
             fam_nnz = 0
-            for (kind, _), j in zip(term_plans, collected):
+            for (kind, _, _), j in zip(term_plans, collected):
                 if kind == "dim":
                     if j.height == 0:
                         continue
@@ -1828,10 +1926,16 @@ class Problem:
 
             if _profile:
                 _cm_emit(
+                    "family_lhs_scattered",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+                _cm_emit(
                     "family_collected",
                     family=cname,
                     family_idx=_fam_idx,
                     fam_nnz=fam_nnz,
+                    lhs_term_count=len(term_plans),
                 )
 
         n_constraint_rows = next_row
