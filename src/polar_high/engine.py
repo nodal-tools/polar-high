@@ -2920,8 +2920,16 @@ class Problem:
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here
         # matches the row index inside HiGHS.
+        #
+        # HiGHS' pybind11 binding requires ``str`` for passRowName; the
+        # caller may pass ``None`` for rows without an explicit name
+        # (e.g. internal slack constraints emitted by FlexTool's
+        # ``_derived_block`` pipeline).  Fall back to a synthetic
+        # ``row_<idx>`` name so diagnostics still work and the API
+        # contract is satisfied.  The right long-term fix is for the
+        # caller to assign a name to every row before solving.
         for i, nm in enumerate(row_names):
-            h.passRowName(i, nm)
+            h.passRowName(i, nm if nm is not None else f"row_{i}")
 
         # Same logic as col_names above — HiGHS now owns the row name
         # storage; the Python list is ~1.1 GB of redundant strings at
@@ -4162,7 +4170,11 @@ class WarmProblem:
             if n:
                 h.passColName(i, n)
         for i, n in enumerate(row_names):
-            h.passRowName(i, n)
+            # HiGHS' pybind11 binding requires ``str``; the canonical
+            # matrix may carry ``None`` (or ``""``) for unnamed rows.
+            # Fall back to a synthetic ``row_<idx>`` so the API contract
+            # is satisfied and diagnostics remain useful.
+            h.passRowName(i, n if n else f"row_{i}")
 
         self._h = h
         self._n_cols = int(n_cols)
