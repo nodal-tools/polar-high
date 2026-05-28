@@ -290,7 +290,7 @@ class Param:
     Anonymous-only chains have ``_sources is None``.
     """
 
-    __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources")
+    __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources", "_value_scalar")
 
     def __init__(
         self,
@@ -298,6 +298,7 @@ class Param:
         frame: pl.DataFrame | pl.LazyFrame,
         name: str | None = None,
         _sources: list[tuple[Param, int]] | None = None,
+        _value_scalar: float = 1.0,
     ):
         # accept either eager or lazy; store as lazy
         if isinstance(frame, pl.LazyFrame):
@@ -316,6 +317,18 @@ class Param:
         self._frame_cache = None
         self.name = name
         self._sources = _sources
+        # ``_value_scalar`` records the cumulative constant scalar
+        # multiplied into / divided out of ``self.lazy``'s value column
+        # outside the Param-chain factorisation.  Mirrors
+        # :class:`_Term`'s ``coef_scalar``: when a Param composite is
+        # rebuilt by the RHS prune-down by walking ``_sources`` and
+        # joining each atomic Param's ``.lazy``, the scalar accumulated
+        # by ``Param.__mul__(int/float)`` / ``Param.__truediv__
+        # (int/float)`` / ``Param.__neg__`` is folded into the running
+        # value via this field rather than re-walking the source list.
+        # Atomic Params start at 1.0; composite chains multiply scalars
+        # together (or invert for division).
+        self._value_scalar = float(_value_scalar)
 
     def _own_sources(self) -> list[tuple[Param, int]] | None:
         """Return the list of ``(Param, direction)`` sources that this
@@ -349,6 +362,7 @@ class Param:
                 self.dims,
                 self.lazy.with_columns(value=pl.col("value") * float(other)),
                 _sources=self._sources_for_propagation(),
+                _value_scalar=self._value_scalar * float(other),
             )
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
@@ -367,6 +381,7 @@ class Param:
                     *new_dims, "value"
                 ),
                 _sources=merged,
+                _value_scalar=self._value_scalar * other._value_scalar,
             )
         if isinstance(other, (Var, Expr)):
             return other * self
@@ -380,6 +395,7 @@ class Param:
                 self.dims,
                 self.lazy.with_columns(value=pl.col("value") / float(other)),
                 _sources=self._sources_for_propagation(),
+                _value_scalar=self._value_scalar / float(other),
             )
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
@@ -398,18 +414,32 @@ class Param:
                     *new_dims, "value"
                 ),
                 _sources=merged,
+                _value_scalar=self._value_scalar / other._value_scalar,
             )
         return NotImplemented
 
     def _sources_for_propagation(self) -> list[tuple[Param, int]] | None:
-        """Like :meth:`_own_sources` but returns ``None`` for an anonymous
-        Param with no sub-sources — saves an allocation in the common
-        unnamed-Param case."""
+        """Return the constituent ``(Param, direction)`` list that this
+        Param should contribute when merged into a chain via
+        :meth:`__mul__` / :meth:`__truediv__`.
+
+        Both named and anonymous atomic Params return ``[(self, +1)]``
+        so the chain rebuild in the prune-down branches (RHS in
+        :meth:`Problem._build_canonical_matrix`; LHS via
+        :func:`_build_lhs_pruned_plan`) walks every constituent.
+        Previously anonymous atomic Params returned ``None`` and were
+        silently dropped by :func:`_merge_param_sources` — the
+        composite's ``.lazy`` still carried their contribution, but the
+        prune-down rebuilt the chain without them, producing the wrong
+        coefficient/RHS value (off by the anonymous Param's value).
+
+        Returns ``None`` only when ``_sources`` is explicitly ``None``
+        AND ``self`` has nothing to contribute — currently never (the
+        anonymous case now returns ``[(self, +1)]``).  Composite Params
+        already carry their merged ``_sources``."""
         if self._sources is not None:
             return self._sources
-        if self.name is not None:
-            return [(self, 1)]
-        return None
+        return [(self, 1)]
 
     def __neg__(self) -> Param:
         return self * -1.0
@@ -470,6 +500,7 @@ def _build_lhs_pruned_plan(
     var_source: "Var",
     param_sources: list[tuple["Param", int]],
     on: list[str],
+    coef_scalar: float = 1.0,
 ) -> pl.LazyFrame:
     """Rebuild a Var × Param … LHS term as a prune-down chain, mirroring
     the RHS prune-down in :meth:`Problem._build_canonical_matrix`.
@@ -500,9 +531,9 @@ def _build_lhs_pruned_plan(
         ri_keys = row_index_lf.select(var_on).unique()
         var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
         var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
-    acc = var_lf.with_columns(coef=pl.lit(1.0, dtype=pl.Float64)).select(
-        *var_dims, "col_id", "coef"
-    )
+    acc = var_lf.with_columns(
+        coef=pl.lit(float(coef_scalar), dtype=pl.Float64)
+    ).select(*var_dims, "col_id", "coef")
     acc_dims: list[str] = list(var_dims)
     for atomic, direction in param_sources:
         shared = [d for d in acc_dims if d in atomic.dims]
@@ -627,7 +658,9 @@ class Var:
                 .with_columns(coef=pl.lit(float(other)))
                 .select(*self.dims, "col_id", "coef")
             )
-            return Expr([_Term(f, self.dims, var_source=self)])
+            return Expr([
+                _Term(f, self.dims, var_source=self, coef_scalar=float(other))
+            ])
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
@@ -639,7 +672,15 @@ class Var:
                 j = lf.join(other.lazy, how="cross")
             j = j.rename({"value": "coef"}).select(*new_dims, "col_id", "coef")
             psrc = other._sources_for_propagation()
-            return Expr([_Term(j, new_dims, param_sources=psrc, var_source=self)])
+            return Expr([
+                _Term(
+                    j,
+                    new_dims,
+                    param_sources=psrc,
+                    var_source=self,
+                    coef_scalar=other._value_scalar,
+                )
+            ])
         return NotImplemented
 
     __rmul__ = __mul__
@@ -698,7 +739,7 @@ class _Term:
     longer mirror the post-aggregation/filter row set.
     """
 
-    __slots__ = ("lazy", "dims", "param_sources", "var_source")
+    __slots__ = ("lazy", "dims", "param_sources", "var_source", "coef_scalar")
 
     def __init__(
         self,
@@ -706,6 +747,7 @@ class _Term:
         dims: tuple[str, ...],
         param_sources: list[tuple[Param, int]] | None = None,
         var_source: "Var | None" = None,
+        coef_scalar: float = 1.0,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
@@ -713,6 +755,18 @@ class _Term:
         self.dims = tuple(dims)
         self.param_sources = param_sources
         self.var_source = var_source
+        # ``coef_scalar`` records the cumulative constant scalar (negation,
+        # ``Expr * float``, ``Var * float``, ``Expr / float``) folded into
+        # ``coef`` outside the Param-chain factorisation.  The LHS prune-
+        # down (``_build_lhs_pruned_plan``) starts from
+        # ``coef=coef_scalar`` so the rebuilt
+        # ``row_index → Var → P1 → P2 …`` chain reproduces ``term.lazy``'s
+        # signed coefficient.  Param/Var multiplies leave it at 1.0
+        # because their factor is the Param's value column (tracked
+        # separately in ``param_sources``), not a constant scalar.  Sum/
+        # Where/Lag null out ``var_source`` so prune-down doesn't fire on
+        # those terms — ``coef_scalar`` is irrelevant there.
+        self.coef_scalar = float(coef_scalar)
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -752,6 +806,7 @@ class Expr:
                 t.dims,
                 param_sources=t.param_sources,
                 var_source=t.var_source,
+                coef_scalar=-t.coef_scalar,
             )
             for t in _to_expr(other).terms
         ]
@@ -775,6 +830,7 @@ class Expr:
                         t.dims,
                         param_sources=t.param_sources,
                         var_source=t.var_source,
+                        coef_scalar=t.coef_scalar * float(scalar),
                     )
                     for t in self.terms
                 ]
@@ -795,7 +851,8 @@ class Expr:
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
                 new.append(
-                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source)
+                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
+                          coef_scalar=t.coef_scalar * scalar._value_scalar)
                 )
             return Expr(new)
         return NotImplemented
@@ -821,7 +878,8 @@ class Expr:
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
                 new.append(
-                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source)
+                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
+                          coef_scalar=t.coef_scalar / other._value_scalar)
                 )
             return Expr(new)
         return NotImplemented
@@ -1799,7 +1857,15 @@ class Problem:
                     # Each atomic contributes either as a left-joined value
                     # column (multiplied / divided in) or, for scalar
                     # atomics, as a literal scalar factor.
-                    acc = row_index.lazy().with_columns(value=pl.lit(1.0, dtype=pl.Float64))
+                    # Seed the accumulator with rhs._value_scalar so the
+                    # rebuilt chain honours scalar multiplies on the
+                    # composite Param (``Param.__mul__`` / ``__truediv__``
+                    # / ``__neg__`` with int/float).  Atomic Params keep
+                    # ``_value_scalar=1.0`` so this is the identity for
+                    # the common no-scalar chain.
+                    acc = row_index.lazy().with_columns(
+                        value=pl.lit(float(rhs._value_scalar), dtype=pl.Float64)
+                    )
                     for atomic, direction in sources:
                         atomic_on = [d for d in atomic.dims if d in axis_cols]
                         if atomic_on:
@@ -2028,6 +2094,7 @@ class Problem:
                             term.var_source,
                             _lhs_psrc,
                             on,
+                            coef_scalar=term.coef_scalar,
                         ).select("_rid", "col_id", "coef")
                         if _profile:
                             _cm_emit(
@@ -3264,6 +3331,7 @@ class Problem:
                             term.var_source,
                             _lhs_psrc,
                             on,
+                            coef_scalar=term.coef_scalar,
                         ).select("_rid", "col_id", "coef")
                         if _sp_on:
                             _sp_emit(
@@ -4659,6 +4727,7 @@ class WarmProblem:
                             term.var_source,
                             _lhs_psrc,
                             on,
+                            coef_scalar=term.coef_scalar,
                         ).select("_rid", "col_id", "coef", *term.dims)
                         if _sp_on:
                             _sp_emit(
