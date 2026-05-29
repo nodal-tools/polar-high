@@ -528,8 +528,8 @@ def _apply_where_frames(
 def _build_lhs_pruned_plan(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
-    var_source: "Var",
-    param_sources: list[tuple["Param", int]],
+    var_source: Var,
+    param_sources: list[tuple[Param, int]],
     on: list[str],
     coef_scalar: float = 1.0,
     where_frames: tuple[pl.LazyFrame, ...] | None = None,
@@ -828,7 +828,7 @@ class _Term:
         lazy: pl.LazyFrame | pl.DataFrame,
         dims: tuple[str, ...],
         param_sources: list[tuple[Param, int]] | None = None,
-        var_source: "Var | None" = None,
+        var_source: Var | None = None,
         coef_scalar: float = 1.0,
         where_frames: tuple[pl.LazyFrame, ...] | None = None,
     ):
@@ -4815,7 +4815,7 @@ class WarmProblem:
         _fam_tracked_total = 0
         _fam_tracked_families = 0
         for _fam_idx, (cname, proto, over) in enumerate(p._cstrs):
-            expr, sense, rhs = proto.expr, proto.sense, proto.rhs
+            expr, sense = proto.expr, proto.sense
 
             if over is None:
                 row_count = 1

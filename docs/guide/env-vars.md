@@ -44,6 +44,7 @@ deltas to find the phase that allocated.
 | Variable | Default | Set to | What it does |
 |---|---|---|---|
 | `POLAR_HIGH_DISABLE_PRUNE_DOWN` | unset (off — prune-down active) | `1` | Disable the per-atomic prune-down for `Param` chains in `_build_canonical_matrix` (RHS), `_build_lhs_pruned_plan` (LHS), `_solve_streaming` and `WarmProblem._initial_build`. With the var set, every multi-atomic chain falls through to the original merged-lazy semi-join path. Use as a fallback if a future model surfaces a numerical drift on the prune-down path; report the affected scenario so the engine can be fixed and the env var retired. Numerics are identical between the two paths for all currently-tested scenarios. |
+| `POLAR_HIGH_DISABLE_WHERE_PUSHDOWN` | unset (off — pushdown active) | `1` | Disable the pure-filter `Where(expr, frame)` deferral added in v2.3.0. With the var set, every `Where` call eagerly inner-joins `frame` into `t.lazy` and clears the leaf metadata (`var_source`, `coef_scalar`, `where_frames`) exactly as the pre-v2.3.0 path. Use as a fallback if a model surfaces a numerical drift on the pushdown path; the LP matrix is byte-identical between the two paths for all tested scenarios. |
 
 ## Workload tuning
 

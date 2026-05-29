@@ -28,11 +28,8 @@ import os
 
 import numpy as np
 import polars as pl
-import pytest
 
-import polar_high as fp
-from polar_high.engine import Lag, Param, Problem, Sum, Var, Where
-
+from polar_high.engine import Param, Problem, Sum, Where
 
 # --------------------------------------------------------------------- #
 # Helpers                                                               #

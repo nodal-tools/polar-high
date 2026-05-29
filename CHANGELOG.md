@@ -9,6 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.3.0] — 2026-05-29
 
+### Where pushdown (added in the same release window as the prune-down work below)
+
+`Where(expr, frame)` with a pure-filter shape (frame columns are a
+subset of the expression's open dims — no map effect introducing new
+dims) now defers the filter into a new `_Term.where_frames` slot
+instead of inner-joining `frame` into `t.lazy` eagerly. The LHS
+prune-down (`_build_lhs_pruned_plan`) then applies each recorded
+frame at the Var leaf AND at every Param atomic during chain rebuild —
+mirror of the existing row_index pre-prune pattern. Net effect: the
+filter narrows every intermediate, not just the final result.
+
+Pure-filter `Where` now also PRESERVES `var_source` / `param_sources` /
+`coef_scalar` on its output term (today's path cleared them). This
+closes the Where leg of the "Sum/Where/Lag wrapping" limitation
+flagged after the 2026-05-28 audit — LHS prune-down now fires on
+Where-wrapped terms in addition to bare `Var × Param × …` chains.
+Sum / Lag bake `where_frames` into `t.lazy` before consuming it
+(they change row identity); the Sum leg remains future work.
+
+Behaviour-preserving on every tested scenario: the LP matrix is
+byte-identical between the deferred-pushdown path and the env-var-
+disabled (eager-join) path. Validated on FlexTool's DES (RETO-Africa)
+scenario — 5.6M rows × 4.6M cols, same presolve reductions, same
+coefficient ranges. DES itself does not exercise any of the
+pushdown-eligible families (no per-process-profiles, no commodity
+ladder, no investment, no reserves), so no measurable RSS delta is
+expected there; richer scenarios with pure-filter Wheres over
+multi-atomic chains will see the win.
+
+### Added — Where pushdown
+
+- `POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1` — safety fallback env var. When
+  set, every `Where` call eagerly inner-joins `frame` into `t.lazy` and
+  clears the leaf metadata exactly as the pre-v2.3.0 path. Use as an
+  opt-out if a model surfaces unexpected drift on the pushdown path.
+
+- `_Term.where_frames: tuple[pl.LazyFrame, ...] | None` slot — opt-in
+  metadata recording pure-filter `Where` frames so they can be applied
+  at the leaves during chain rebuild. Internal — no public API change.
+
+- `_apply_where_frames(lazy, dims, where_frames)` helper — used by
+  `Sum` / `Lag` to bake pending filters before consuming `t.lazy`,
+  and by consumer fallback paths in `_build_canonical_matrix` /
+  `_solve_streaming` / `WarmProblem._initial_build` when leaf-rebuild
+  prune-down can't fire.
+
+- `tests/test_where_pushdown_parity.py` (11 tests) — parity coverage
+  for pure-filter, map-effect, nested Where, Where-after-Sum,
+  Sum-after-Where, anonymous-Param-chain, scalar-fold, Where-then-mul-
+  Param, disable-guard, shared-empty-extras-nonempty, and RHS-Where-
+  preserved-through-negation.
+
+### Fixed (latent — exposed by the parity sweep)
+
+- `Where(expr, frame)` with `shared == [] and extras != ()` now
+  explicitly cross-joins `frame` instead of silently claiming the
+  extras columns on `_Term.dims` without ever producing them in
+  `t.lazy`. Pre-fix this was a corruption waiting to happen; no
+  known caller relied on the broken behaviour.
+
+### Removed (dead code)
+
+- The `elif isinstance(rhs, (Var, Expr))` / standalone-block negation
+  patterns in `_build_canonical_matrix`, `_solve_streaming`, and
+  `WarmProblem._initial_build` are deleted. `Problem.add_cstr` folds
+  Var/Expr RHS into the LHS via `Expr.__sub__` before storing in
+  `_CstrProto`, so `proto.rhs` only ever reaches those sites as a
+  Param or scalar — the elif branches were unreachable.
+
+### Prune-down (initial v2.3.0 work — merged earlier in the same release window)
+
 Memory cliff fix for `Param`-chain RHS / LHS in `_build_canonical_matrix`
 plus matching coverage in `_solve_streaming` and `WarmProblem._initial_build`.
 On FlexTool's DES (RETO-Africa) scenario the canonicalise stage of the
