@@ -132,10 +132,10 @@ class LpView:
         col_obj = problem.canonicalise().col_obj.copy()
 
         inf = highspy.kHighsInf
-        col_lb_v = np.where(col_lb_h == -inf, -np.inf, col_lb_h).astype(np.float64)
-        col_ub_v = np.where(col_ub_h == inf, np.inf, col_ub_h).astype(np.float64)
-        row_lb_v = np.where(row_lb_h == -inf, -np.inf, row_lb_h).astype(np.float64)
-        row_ub_v = np.where(row_ub_h == inf, np.inf, row_ub_h).astype(np.float64)
+        col_lb_v = np.where(col_lb_h == -inf, -np.inf, col_lb_h).astype(np.float64, copy=False)
+        col_ub_v = np.where(col_ub_h == inf, np.inf, col_ub_h).astype(np.float64, copy=False)
+        row_lb_v = np.where(row_lb_h == -inf, -np.inf, row_lb_h).astype(np.float64, copy=False)
+        row_ub_v = np.where(row_ub_h == inf, np.inf, row_ub_h).astype(np.float64, copy=False)
 
         integrality = col_int if col_int.any() else None
 
@@ -184,9 +184,10 @@ class LpView:
             )
 
         # Reconstruct (row, col) pairs from CSC, then re-sort by row.
-        col_of = np.empty(nnz, dtype=np.int64)
-        for c in range(n_cols):
-            col_of[a_start[c] : a_start[c + 1]] = c
+        # ``np.repeat`` + ``np.diff`` is the vectorised equivalent of the
+        # per-column scatter loop and produces an identically-shaped
+        # int64 array.
+        col_of = np.repeat(np.arange(n_cols, dtype=np.int64), np.diff(a_start))
         row_of = a_index.astype(np.int64)
 
         order = np.lexsort((col_of, row_of))  # primary: row, secondary: col

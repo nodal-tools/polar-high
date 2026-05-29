@@ -80,6 +80,63 @@ def _running_finite_nonzero_min_max(
 
 
 # ---------------------------------------------------------------------------
+# Solve-path memory profiling helper
+#
+# Activated by ``POLAR_HIGH_SOLVE_PROFILE=1``.  Mirrors the
+# ``POLAR_HIGH_WRITE_MPS_PROFILE`` precedent in :meth:`Problem.write_mps`:
+# tab-separated stderr lines, zero overhead when the env var is unset
+# (one ``os.environ.get`` per :meth:`Problem.solve` call, no psutil
+# import, no time.monotonic calls, no stderr output).
+# ---------------------------------------------------------------------------
+
+
+def _make_solve_profile_emitter():
+    """Return ``(emit, enabled)`` where ``emit(phase, **extras)`` writes
+    a ``[solve profile]`` tab-separated line to stderr, or ``(None, False)``
+    when ``POLAR_HIGH_SOLVE_PROFILE`` is unset / psutil is missing.
+
+    Shared by :meth:`Problem._solve_streaming` and
+    :meth:`Problem._build_canonical_matrix` (when the latter is reached
+    via :meth:`Problem._build_lp_arrays` on the non-streaming path).
+    """
+    if os.environ.get("POLAR_HIGH_SOLVE_PROFILE") != "1":
+        return None, False
+    try:
+        import psutil as _ps
+    except ImportError:
+        sys.stderr.write(
+            "[solve profile] psutil not installed — "
+            "profiling disabled (install psutil to enable).\n"
+        )
+        sys.stderr.flush()
+        return None, False
+    _proc = _ps.Process()
+    _state = {
+        "t0": time.monotonic(),
+        "prev_rss_gb": _proc.memory_info().rss / (1024**3),
+    }
+
+    def emit(phase: str, **extras: object) -> None:
+        rss_gb = _proc.memory_info().rss / (1024**3)
+        delta_gb = rss_gb - _state["prev_rss_gb"]
+        _state["prev_rss_gb"] = rss_gb
+        wall_s = time.monotonic() - _state["t0"]
+        parts = [
+            "[solve profile]",
+            f"phase={phase}",
+            f"rss_gb={rss_gb:.2f}",
+            f"delta_gb={delta_gb:+.2f}",
+            f"wall_s={wall_s:.2f}",
+        ]
+        for k, v in extras.items():
+            parts.append(f"{k}={v}")
+        sys.stderr.write("\t".join(parts) + "\n")
+        sys.stderr.flush()
+
+    return emit, True
+
+
+# ---------------------------------------------------------------------------
 # Enum-dtype-aware join helpers
 #
 # polars 1.40 refuses to join two columns of dtype ``pl.Enum`` when the
@@ -233,7 +290,7 @@ class Param:
     Anonymous-only chains have ``_sources is None``.
     """
 
-    __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources")
+    __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources", "_value_scalar")
 
     def __init__(
         self,
@@ -241,6 +298,7 @@ class Param:
         frame: pl.DataFrame | pl.LazyFrame,
         name: str | None = None,
         _sources: list[tuple[Param, int]] | None = None,
+        _value_scalar: float = 1.0,
     ):
         # accept either eager or lazy; store as lazy
         if isinstance(frame, pl.LazyFrame):
@@ -259,6 +317,18 @@ class Param:
         self._frame_cache = None
         self.name = name
         self._sources = _sources
+        # ``_value_scalar`` records the cumulative constant scalar
+        # multiplied into / divided out of ``self.lazy``'s value column
+        # outside the Param-chain factorisation.  Mirrors
+        # :class:`_Term`'s ``coef_scalar``: when a Param composite is
+        # rebuilt by the RHS prune-down by walking ``_sources`` and
+        # joining each atomic Param's ``.lazy``, the scalar accumulated
+        # by ``Param.__mul__(int/float)`` / ``Param.__truediv__
+        # (int/float)`` / ``Param.__neg__`` is folded into the running
+        # value via this field rather than re-walking the source list.
+        # Atomic Params start at 1.0; composite chains multiply scalars
+        # together (or invert for division).
+        self._value_scalar = float(_value_scalar)
 
     def _own_sources(self) -> list[tuple[Param, int]] | None:
         """Return the list of ``(Param, direction)`` sources that this
@@ -292,6 +362,7 @@ class Param:
                 self.dims,
                 self.lazy.with_columns(value=pl.col("value") * float(other)),
                 _sources=self._sources_for_propagation(),
+                _value_scalar=self._value_scalar * float(other),
             )
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
@@ -310,6 +381,7 @@ class Param:
                     *new_dims, "value"
                 ),
                 _sources=merged,
+                _value_scalar=self._value_scalar * other._value_scalar,
             )
         if isinstance(other, (Var, Expr)):
             return other * self
@@ -323,6 +395,7 @@ class Param:
                 self.dims,
                 self.lazy.with_columns(value=pl.col("value") / float(other)),
                 _sources=self._sources_for_propagation(),
+                _value_scalar=self._value_scalar / float(other),
             )
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
@@ -341,18 +414,32 @@ class Param:
                     *new_dims, "value"
                 ),
                 _sources=merged,
+                _value_scalar=self._value_scalar / other._value_scalar,
             )
         return NotImplemented
 
     def _sources_for_propagation(self) -> list[tuple[Param, int]] | None:
-        """Like :meth:`_own_sources` but returns ``None`` for an anonymous
-        Param with no sub-sources — saves an allocation in the common
-        unnamed-Param case."""
+        """Return the constituent ``(Param, direction)`` list that this
+        Param should contribute when merged into a chain via
+        :meth:`__mul__` / :meth:`__truediv__`.
+
+        Both named and anonymous atomic Params return ``[(self, +1)]``
+        so the chain rebuild in the prune-down branches (RHS in
+        :meth:`Problem._build_canonical_matrix`; LHS via
+        :func:`_build_lhs_pruned_plan`) walks every constituent.
+        Previously anonymous atomic Params returned ``None`` and were
+        silently dropped by :func:`_merge_param_sources` — the
+        composite's ``.lazy`` still carried their contribution, but the
+        prune-down rebuilt the chain without them, producing the wrong
+        coefficient/RHS value (off by the anonymous Param's value).
+
+        Returns ``None`` only when ``_sources`` is explicitly ``None``
+        AND ``self`` has nothing to contribute — currently never (the
+        anonymous case now returns ``[(self, +1)]``).  Composite Params
+        already carry their merged ``_sources``."""
         if self._sources is not None:
             return self._sources
-        if self.name is not None:
-            return [(self, 1)]
-        return None
+        return [(self, 1)]
 
     def __neg__(self) -> Param:
         return self * -1.0
@@ -405,6 +492,106 @@ def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
             return plan.collect()
     except Exception:
         return plan.collect()
+
+
+def _build_lhs_pruned_plan(
+    row_index_lf: pl.LazyFrame,
+    axis_cols: list[str],
+    var_source: "Var",
+    param_sources: list[tuple["Param", int]],
+    on: list[str],
+    coef_scalar: float = 1.0,
+) -> pl.LazyFrame:
+    """Rebuild a Var × Param … LHS term as a prune-down chain, mirroring
+    the RHS prune-down in :meth:`Problem._build_canonical_matrix`.
+
+    The fully-merged ``term.lazy`` produced by :meth:`Var.__mul__` +
+    :meth:`Expr.__mul__` is a chain of inner joins ``Var ⋈ P1 ⋈ P2 …``.
+    For wide constraint families with multi-Param chains, that inner
+    join chain can materialise wide intermediates the polars optimizer
+    does not push the row_index semi-join through (the same bug class
+    the RHS prune-down fixes).  Here we rebuild the chain step by step,
+    starting from ``row_index ⋈ Var.frame`` (bounded by the constraint's
+    row_index key set) and joining each atomic Param one at a time —
+    each step's row count is bounded by the row_index projection.
+
+    Returns a lazy plan with columns ``(_rid, col_id, coef)`` ready to
+    collect.  Callers handle the streaming collect + side-vector BAKE
+    pass.  ``on`` is the join key (intersection of term.dims and
+    axis_cols) used to attach the resulting per-cell rows back to
+    row_index — same semantics as the unpruned path's
+    ``row_index ⋈ term.lazy`` final join.
+    """
+    var_dims = list(var_source.dims)
+    var_on = [d for d in var_dims if d in axis_cols]
+    var_lf = var_source.frame.lazy()
+    if var_on:
+        # Pre-prune the Var.frame against the row_index key set so the
+        # very first step is bounded by the constraint's row count.
+        ri_keys = row_index_lf.select(var_on).unique()
+        var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
+        var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
+    acc = var_lf.with_columns(
+        coef=pl.lit(float(coef_scalar), dtype=pl.Float64)
+    ).select(*var_dims, "col_id", "coef")
+    acc_dims: list[str] = list(var_dims)
+    for atomic, direction in param_sources:
+        shared = [d for d in acc_dims if d in atomic.dims]
+        new_dims = list(dict.fromkeys(acc_dims + list(atomic.dims)))
+        atomic_lf = atomic.lazy
+        if shared:
+            # Pre-prune the atomic Param by the accumulator's key set —
+            # mirror of the RHS prune-down's per-atomic semi-join so the
+            # join below stays bounded by ``acc`` height.
+            acc_a, atomic_a = _align_enum_join_keys(acc, atomic_lf, shared)
+            acc_keys = acc_a.select(shared).unique()
+            acc_keys_a, atomic_a2 = _align_enum_join_keys(
+                acc_keys, atomic_a, shared
+            )
+            atomic_pruned = atomic_a2.join(acc_keys_a, on=shared, how="semi")
+            acc_b, atomic_pruned_b = _align_enum_join_keys(
+                acc_a, atomic_pruned, shared
+            )
+            joined = acc_b.join(
+                atomic_pruned_b,
+                on=shared,
+                how="inner",
+                suffix="__lhs_chain",
+            )
+        else:
+            joined = acc.join(atomic_lf, how="cross", suffix="__lhs_chain")
+        # ``value`` is the Param's coefficient column.  Either it was
+        # left unrenamed (no name clash) or, if ``coef`` happened to be
+        # present on the right side already (it never is for a Param
+        # frame — Param frames carry ``(*dims, value)``), the suffixed
+        # name would apply.  The inner-join Param branch above does not
+        # rename ``value`` so the direct reference is correct.
+        if direction >= 0:
+            acc = joined.with_columns(
+                coef=pl.col("coef") * pl.col("value")
+            ).select(*new_dims, "col_id", "coef")
+        else:
+            acc = joined.with_columns(
+                coef=pl.col("coef") / pl.col("value")
+            ).select(*new_dims, "col_id", "coef")
+        acc_dims = new_dims
+    # Final attach to row_index: same shape as the unpruned path.
+    rl_a, acc_a = _align_enum_join_keys(row_index_lf, acc, on)
+    return rl_a.join(acc_a, on=on, how="inner")
+
+
+def _prune_down_disabled() -> bool:
+    """Return True when the user has set POLAR_HIGH_DISABLE_PRUNE_DOWN=1.
+
+    Both the RHS prune-down (composite-Param ``_sources`` walk in
+    :meth:`Problem._build_canonical_matrix`) and the LHS prune-down
+    (``_build_lhs_pruned_plan`` invocations in
+    ``_build_canonical_matrix`` / ``_solve_streaming`` /
+    ``WarmProblem._initial_build``) honour this flag so users can fall
+    back to the original merged-lazy paths verbatim when the prune-down
+    optimisation produces unexpected drift.
+    """
+    return os.environ.get("POLAR_HIGH_DISABLE_PRUNE_DOWN") == "1"
 
 
 def _merge_param_sources(
@@ -462,7 +649,7 @@ class Var:
 
     def to_expr(self) -> Expr:
         f = self.frame.lazy().with_columns(coef=pl.lit(1.0)).select(*self.dims, "col_id", "coef")
-        return Expr([_Term(f, self.dims)])
+        return Expr([_Term(f, self.dims, var_source=self)])
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
@@ -471,7 +658,9 @@ class Var:
                 .with_columns(coef=pl.lit(float(other)))
                 .select(*self.dims, "col_id", "coef")
             )
-            return Expr([_Term(f, self.dims)])
+            return Expr([
+                _Term(f, self.dims, var_source=self, coef_scalar=float(other))
+            ])
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
@@ -483,7 +672,15 @@ class Var:
                 j = lf.join(other.lazy, how="cross")
             j = j.rename({"value": "coef"}).select(*new_dims, "col_id", "coef")
             psrc = other._sources_for_propagation()
-            return Expr([_Term(j, new_dims, param_sources=psrc)])
+            return Expr([
+                _Term(
+                    j,
+                    new_dims,
+                    param_sources=psrc,
+                    var_source=self,
+                    coef_scalar=other._value_scalar,
+                )
+            ])
         return NotImplemented
 
     __rmul__ = __mul__
@@ -526,21 +723,50 @@ class _Term:
     tracking is requested — terms flowing through unnamed Params pay no
     overhead.  The Param object is held by reference so :class:`WarmProblem`
     can read its current value frame at build time.
+
+    ``var_source`` — opt-in metadata used by the LHS Param-chain prune-
+    down path (mirror of the RHS prune-down in
+    ``_build_canonical_matrix``).  Holds the originating :class:`Var`
+    (``Var.frame`` is the col_id source) and the eager Param chain
+    multiplicand list, so the canonical / streaming / warm builders can
+    rebuild a ``row_index → Var → P1 → P2 …`` join chain that prunes one
+    atomic at a time instead of materialising the fully-merged Var×Param×
+    Param… intermediate inside ``term.lazy``.  Set by :meth:`Var.__mul__`
+    / :meth:`Expr.__mul__` and preserved through ``Expr.__sub__`` /
+    ``__neg__`` / scalar multiplies.  Cleared (set to ``None``) by
+    operations that change the term's row identity — :func:`Sum`,
+    :func:`Where`, :func:`Lag` — because the rebuilt chain would no
+    longer mirror the post-aggregation/filter row set.
     """
 
-    __slots__ = ("lazy", "dims", "param_sources")
+    __slots__ = ("lazy", "dims", "param_sources", "var_source", "coef_scalar")
 
     def __init__(
         self,
         lazy: pl.LazyFrame | pl.DataFrame,
         dims: tuple[str, ...],
         param_sources: list[tuple[Param, int]] | None = None,
+        var_source: "Var | None" = None,
+        coef_scalar: float = 1.0,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
         self.lazy = lazy
         self.dims = tuple(dims)
         self.param_sources = param_sources
+        self.var_source = var_source
+        # ``coef_scalar`` records the cumulative constant scalar (negation,
+        # ``Expr * float``, ``Var * float``, ``Expr / float``) folded into
+        # ``coef`` outside the Param-chain factorisation.  The LHS prune-
+        # down (``_build_lhs_pruned_plan``) starts from
+        # ``coef=coef_scalar`` so the rebuilt
+        # ``row_index → Var → P1 → P2 …`` chain reproduces ``term.lazy``'s
+        # signed coefficient.  Param/Var multiplies leave it at 1.0
+        # because their factor is the Param's value column (tracked
+        # separately in ``param_sources``), not a constant scalar.  Sum/
+        # Where/Lag null out ``var_source`` so prune-down doesn't fire on
+        # those terms — ``coef_scalar`` is irrelevant there.
+        self.coef_scalar = float(coef_scalar)
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -575,7 +801,13 @@ class Expr:
 
     def __sub__(self, other):
         neg = [
-            _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims, param_sources=t.param_sources)
+            _Term(
+                t.lazy.with_columns(coef=-pl.col("coef")),
+                t.dims,
+                param_sources=t.param_sources,
+                var_source=t.var_source,
+                coef_scalar=-t.coef_scalar,
+            )
             for t in _to_expr(other).terms
         ]
         return Expr(self.terms + neg)
@@ -597,6 +829,8 @@ class Expr:
                         t.lazy.with_columns(coef=pl.col("coef") * float(scalar)),
                         t.dims,
                         param_sources=t.param_sources,
+                        var_source=t.var_source,
+                        coef_scalar=t.coef_scalar * float(scalar),
                     )
                     for t in self.terms
                 ]
@@ -616,7 +850,10 @@ class Expr:
                     *new_dims, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
-                new.append(_Term(j, new_dims, param_sources=merged))
+                new.append(
+                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
+                          coef_scalar=t.coef_scalar * scalar._value_scalar)
+                )
             return Expr(new)
         return NotImplemented
 
@@ -640,7 +877,10 @@ class Expr:
                     *new_dims, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
-                new.append(_Term(j, new_dims, param_sources=merged))
+                new.append(
+                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
+                          coef_scalar=t.coef_scalar / other._value_scalar)
+                )
             return Expr(new)
         return NotImplemented
 
@@ -1384,7 +1624,17 @@ class Problem:
         from .solvers._highs import run as _highs_run
         from .solvers._lp_view import LpView
 
+        _sp_emit_ns, _sp_on_ns = _make_solve_profile_emitter()
+        if _sp_on_ns:
+            _sp_emit_ns(
+                "nonstreaming_enter",
+                n_vars=len(self._vars),
+                n_cstrs=len(self._cstrs),
+            )
+
         view = LpView.from_problem(self)
+        if _sp_on_ns:
+            _sp_emit_ns("nonstreaming_lpview_built")
         # Per-call ``options`` wins over what was stored on the Problem.
         opts = options if options is not None else self._solver_options
         result = _highs_run(
@@ -1392,6 +1642,8 @@ class Problem:
             options=opts,
             keep_solver=keep_solver,
         )
+        if _sp_on_ns:
+            _sp_emit_ns("nonstreaming_highs_run_done")
 
         # SolverResult → Solution round-trip.  All of these private
         # attributes are populated unconditionally by ``_highs.run``;
@@ -1586,7 +1838,116 @@ class Problem:
                         f"not in over={axis_cols}"
                     )
                 on = list(rhs.dims)
-                if on:
+                # Prefer the prune-down path when the composite RHS Param
+                # tracks its atomic constituents via ``_sources`` (length
+                # >= 2).  Walking the chain one atomic at a time and
+                # semi-joining each atomic to the running accumulator's
+                # key projection keeps the intermediate bounded to
+                # ``row_count`` rows — avoiding the wide Cartesian-on-shared-
+                # dim intermediates that ``Param.__mul__``'s nested inner
+                # joins otherwise materialise (e.g. DES
+                # ``profile_flow_upper_limit`` RHS = profile_value *
+                # process_existing_count * process_availability, where the
+                # first inner join on ``d`` alone exploded to many hundred
+                # MB of (f, p, d, t)-keyed rows).
+                #
+                # Single-Param RHS (``_sources is None`` or len <= 1) and
+                # anonymous chains (``_sources is None``) fall back to the
+                # original merged-lazy + semi-join-prune path verbatim so
+                # we don't perturb existing parity.
+                sources = rhs._sources if isinstance(rhs._sources, list) else None
+                use_prune_down = (
+                    on
+                    and sources is not None
+                    and len(sources) >= 2
+                    and not _prune_down_disabled()
+                )
+                if use_prune_down:
+                    # Start the accumulator from row_index with value=1.0.
+                    # Each atomic contributes either as a left-joined value
+                    # column (multiplied / divided in) or, for scalar
+                    # atomics, as a literal scalar factor.
+                    # Seed the accumulator with rhs._value_scalar so the
+                    # rebuilt chain honours scalar multiplies on the
+                    # composite Param (``Param.__mul__`` / ``__truediv__``
+                    # / ``__neg__`` with int/float).  Atomic Params keep
+                    # ``_value_scalar=1.0`` so this is the identity for
+                    # the common no-scalar chain.
+                    acc = row_index.lazy().with_columns(
+                        value=pl.lit(float(rhs._value_scalar), dtype=pl.Float64)
+                    )
+                    for atomic, direction in sources:
+                        atomic_on = [d for d in atomic.dims if d in axis_cols]
+                        if atomic_on:
+                            # Pre-prune the atomic to only rows whose keys
+                            # exist in the accumulator's projection.  Each
+                            # join is wrapped in _align_enum_join_keys so
+                            # Enum dtype mismatches between row_index keys
+                            # and atomic keys don't silently drop rows.
+                            acc_for_keys, atomic_lazy = _align_enum_join_keys(
+                                acc, atomic.lazy, atomic_on
+                            )
+                            keys_lazy = acc_for_keys.select(atomic_on).unique()
+                            keys_a, atomic_a = _align_enum_join_keys(
+                                keys_lazy, atomic_lazy, atomic_on
+                            )
+                            atomic_pruned = atomic_a.join(
+                                keys_a, on=atomic_on, how="semi"
+                            )
+                            acc_a, atomic_pruned_a = _align_enum_join_keys(
+                                acc_for_keys, atomic_pruned, atomic_on
+                            )
+                            joined = acc_a.join(
+                                atomic_pruned_a,
+                                on=atomic_on,
+                                how="left",
+                                suffix="__rhs_chain",
+                            )
+                            if direction >= 0:
+                                acc = joined.with_columns(
+                                    value=pl.col("value")
+                                    * pl.col("value__rhs_chain")
+                                ).drop("value__rhs_chain")
+                            else:
+                                acc = joined.with_columns(
+                                    value=pl.col("value")
+                                    / pl.col("value__rhs_chain")
+                                ).drop("value__rhs_chain")
+                        else:
+                            # Scalar atomic — fold the constant into the
+                            # running value column directly.
+                            scalar_val = float(atomic.frame["value"][0])
+                            if direction >= 0:
+                                acc = acc.with_columns(
+                                    value=pl.col("value") * scalar_val
+                                )
+                            else:
+                                acc = acc.with_columns(
+                                    value=pl.col("value") / scalar_val
+                                )
+                    if _profile:
+                        _cm_emit(
+                            "family_rhs_pruned_down",
+                            family=cname,
+                            family_idx=_fam_idx,
+                            n_atomics=len(sources),
+                        )
+                    _plan = acc.select("_rid", "value")
+                    j = _collect_streaming(_plan)
+                    if j.height != row_count:
+                        raise ValueError(
+                            f"constraint {cname!r}: rhs Param chain produced "
+                            f"{j.height} rows from row_index (rows={row_count})"
+                            " — likely duplicate keys in one of the atomic "
+                            f"Params {[a.name for a, _ in sources]!r}."
+                        )
+                    rhs_vec = (
+                        j.sort("_rid")["value"]
+                        .fill_null(0.0)
+                        .to_numpy()
+                        .astype(np.float64, copy=False)
+                    )
+                elif on:
                     ri_a, rf_a = _align_enum_join_keys(
                         row_index.lazy(),
                         rhs.lazy,
@@ -1609,7 +1970,7 @@ class Problem:
                         j.sort("_rid")["value"]
                         .fill_null(0.0)
                         .to_numpy()
-                        .astype(np.float64)
+                        .astype(np.float64, copy=False)
                     )
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
@@ -1626,9 +1987,23 @@ class Problem:
                     f"{type(rhs).__name__}"
                 )
 
+            if _profile:
+                _cm_emit(
+                    "family_rhs_evaluated",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+
             # ---- Layer 2 row-factor on RHS (BAKE).
             if _rf is not None and row_count:
                 rhs_vec = rhs_vec * _rf[base_row : base_row + row_count]
+
+            if _profile:
+                _cm_emit(
+                    "family_rhs_l2baked",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
 
             # ---- sense → lb/ub vectors.
             if sense == "<=":
@@ -1654,6 +2029,13 @@ class Problem:
                 np.full(row_count, ord(sc), dtype=np.uint8)
             )
 
+            if _profile:
+                _cm_emit(
+                    "family_senses_built",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+
             # ---- row names.
             if over is None:
                 row_names.append(cname)
@@ -1671,11 +2053,20 @@ class Problem:
                     )["__rn"].to_list()
                 )
 
+            if _profile:
+                _cm_emit(
+                    "family_rownames_built",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+
             # ---- LHS term plans (same semi-join + streaming pattern as
             # write_mps' Stage A code).
             row_index_lf = row_index.lazy()
+            # Each entry: (kind, plan, on_dims) — on_dims is the shared
+            # join keys for "dim" terms, or [] for "scalar" terms.
             term_plans: list[tuple] = []
-            for term in expr.terms:
+            for _term_idx, term in enumerate(expr.terms):
                 if term.dims:
                     missing = [d for d in term.dims if d not in axis_cols]
                     if missing:
@@ -1686,20 +2077,101 @@ class Problem:
                             f"before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(
-                        row_index_lf, term.lazy, on
+                    # Prefer LHS prune-down when the term carries both a
+                    # surviving Var reference and a Param-chain with >= 2
+                    # atomics — mirror of the RHS prune-down above.  Same
+                    # rationale: avoid the wide ``Var ⋈ P1 ⋈ P2 …``
+                    # intermediate that ``term.lazy`` materialises before
+                    # the row_index semi-join can prune it.  Single-Param
+                    # / no-Param / Sum-collapsed terms (var_source is
+                    # None after Sum/Where/Lag) fall through to the
+                    # original semi-join path verbatim.
+                    _lhs_psrc = (
+                        term.param_sources
+                        if isinstance(term.param_sources, list)
+                        else None
                     )
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = (
-                        rl_a.join(tl_pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
+                    _use_lhs_prune = (
+                        term.var_source is not None
+                        and _lhs_psrc is not None
+                        and len(_lhs_psrc) >= 2
+                        and not _prune_down_disabled()
                     )
-                    term_plans.append(("dim", plan))
+                    if _use_lhs_prune:
+                        plan = _build_lhs_pruned_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                            coef_scalar=term.coef_scalar,
+                        ).select("_rid", "col_id", "coef")
+                        if _profile:
+                            _cm_emit(
+                                "family_term_pruned_down",
+                                family=cname,
+                                family_idx=_fam_idx,
+                                term_idx=_term_idx,
+                                n_atomics=len(_lhs_psrc),
+                            )
+                    else:
+                        rl_a, tl_a = _align_enum_join_keys(
+                            row_index_lf, term.lazy, on
+                        )
+                        keys_lazy = rl_a.select(on).unique()
+                        tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                        plan = (
+                            rl_a.join(tl_pruned, on=on, how="inner")
+                            .select("_rid", "col_id", "coef")
+                        )
+                    term_plans.append(("dim", plan, list(on)))
                 else:
                     term_plans.append(
-                        ("scalar", term.lazy.select("col_id", "coef"))
+                        ("scalar", term.lazy.select("col_id", "coef"), [])
                     )
+
+            if _profile:
+                _cm_emit(
+                    "family_term_plans_built",
+                    family=cname,
+                    family_idx=_fam_idx,
+                    lhs_term_count=len(term_plans),
+                )
+                # Optional .explain() dump per family-term (cheap I/O,
+                # gated on env var).  Skipped silently on any failure
+                # so it can't introduce new failure modes.
+                try:
+                    import os as _os_pl
+                    _plans_dir = "/tmp/polar_high_canonicalise_plans"
+                    _os_pl.makedirs(_plans_dir, exist_ok=True)
+                    _safe_cname = "".join(
+                        c if c.isalnum() or c in "._-" else "_"
+                        for c in str(cname)
+                    )
+                    for _i, (_kind, _p, _on) in enumerate(term_plans):
+                        _fname = (
+                            f"{_plans_dir}/{_fam_idx:04d}_"
+                            f"{_safe_cname}_term{_i}.txt"
+                        )
+                        try:
+                            _txt = _p.explain(optimized=True)
+                        except Exception:
+                            try:
+                                _txt = _p.explain(optimized=False)
+                            except Exception:
+                                _txt = "<explain unavailable>"
+                        try:
+                            with open(_fname, "w") as _fh:
+                                _fh.write(
+                                    f"# family={cname} family_idx={_fam_idx}\n"
+                                    f"# term_idx={_i} term_kind={_kind} "
+                                    f"on={_on}\n"
+                                )
+                                _fh.write(_txt)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
             if not term_plans:
                 if _profile:
@@ -1708,6 +2180,7 @@ class Problem:
                         family=cname,
                         family_idx=_fam_idx,
                         fam_nnz=0,
+                        lhs_term_count=0,
                     )
                 continue
 
@@ -1725,16 +2198,40 @@ class Problem:
                 except Exception:
                     return p.collect()
 
-            collected = [_collect_one(p) for _, p in term_plans]
+            # Explicit loop (was a list comprehension) so we can emit
+            # per-term collect_start/collected checkpoints without
+            # changing collection order or semantics.
+            collected: list[pl.DataFrame] = []
+            for _i, (_kind, _p, _on) in enumerate(term_plans):
+                if _profile:
+                    _cm_emit(
+                        "family_term_collect_start",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        term_idx=_i,
+                        term_kind=_kind,
+                        on=_on,
+                    )
+                _j = _collect_one(_p)
+                collected.append(_j)
+                if _profile:
+                    _cm_emit(
+                        "family_term_collected",
+                        family=cname,
+                        family_idx=_fam_idx,
+                        term_idx=_i,
+                        term_kind=_kind,
+                        term_rows=int(_j.height),
+                    )
             fam_nnz = 0
-            for (kind, _), j in zip(term_plans, collected):
+            for (kind, _, _), j in zip(term_plans, collected):
                 if kind == "dim":
                     if j.height == 0:
                         continue
-                    rids_local = j["_rid"].to_numpy().astype(np.int64)
-                    abs_rows = (base_row + rids_local).astype(np.int64)
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
+                    rids_local = j["_rid"].to_numpy().astype(np.int64, copy=False)
+                    abs_rows = (base_row + rids_local).astype(np.int64, copy=False)
+                    cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                    vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                     # BAKE side vectors into LHS values.
                     if _rf is not None:
                         vals = vals * _rf[abs_rows]
@@ -1745,8 +2242,8 @@ class Problem:
                     triple_vals.append(vals)
                     fam_nnz += abs_rows.size
                 else:
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    vals = j["coef"].to_numpy().astype(np.float64)
+                    cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                    vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                     if cids.size == 0:
                         continue
                     rs = np.repeat(
@@ -1769,10 +2266,16 @@ class Problem:
 
             if _profile:
                 _cm_emit(
+                    "family_lhs_scattered",
+                    family=cname,
+                    family_idx=_fam_idx,
+                )
+                _cm_emit(
                     "family_collected",
                     family=cname,
                     family_idx=_fam_idx,
                     fam_nnz=fam_nnz,
+                    lhs_term_count=len(term_plans),
                 )
 
         n_constraint_rows = next_row
@@ -1789,9 +2292,9 @@ class Problem:
                 .group_by(["r", "c"])
                 .agg(pl.col("v").sum())
             )
-            tr = dedup["r"].to_numpy().astype(np.int64)
-            tc = dedup["c"].to_numpy().astype(np.int64)
-            tv = dedup["v"].to_numpy().astype(np.float64)
+            tr = dedup["r"].to_numpy().astype(np.int64, copy=False)
+            tc = dedup["c"].to_numpy().astype(np.int64, copy=False)
+            tv = dedup["v"].to_numpy().astype(np.float64, copy=False)
             del dedup
         else:
             tr = np.zeros(0, dtype=np.int64)
@@ -1833,8 +2336,8 @@ class Problem:
             if f.height == 0:
                 del f
                 continue
-            cids = f["col_id"].to_numpy().astype(np.int64)
-            vals = f["coef"].to_numpy().astype(np.float64)
+            cids = f["col_id"].to_numpy().astype(np.int64, copy=False)
+            vals = f["coef"].to_numpy().astype(np.float64, copy=False)
             if _cf is not None:
                 vals = vals * _cf[cids]
             # np.add.at handles duplicate col_ids across obj terms.
@@ -1847,20 +2350,19 @@ class Problem:
         col_lb = np.zeros(n_cols, dtype=np.float64)
         col_ub = np.full(n_cols, np.inf, dtype=np.float64)
         col_int = np.zeros(n_cols, dtype=np.int8)
+        # ---- Pass 6: col names.  Used by write_mps + (future)
+        # write_lp / diagnostic emitters.  Not gated on emit_names —
+        # the canonical store always carries them; write_mps can
+        # override with generic R/C names at emit time.  Merged with
+        # the bounds/integrality scatter above so each var.frame's
+        # col_id materialisation runs once instead of twice.
+        col_names: list[str] = [""] * n_cols
         for v in self._vars.values():
             ids = v.frame["col_id"].to_numpy()
             col_lb[ids] = float(v.lower)
             col_ub[ids] = float(v.upper)
             if v.integer:
                 col_int[ids] = 1
-
-        # ---- Pass 6: col names.  Used by write_mps + (future)
-        # write_lp / diagnostic emitters.  Not gated on emit_names —
-        # the canonical store always carries them; write_mps can
-        # override with generic R/C names at emit time.
-        col_names: list[str] = [""] * n_cols
-        for v in self._vars.values():
-            ids = v.frame["col_id"].to_numpy()
             if v.dims:
                 tagged = (
                     v.frame.select(
@@ -2366,10 +2868,10 @@ class Problem:
         # adapters; HiGHS specifically wants ``kHighsInf``, so substitute
         # at the boundary.
         inf = highspy.kHighsInf
-        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
-        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
-        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
-        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
+        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64, copy=False)
+        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64, copy=False)
+        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64, copy=False)
+        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64, copy=False)
 
         return (
             col_lb_h,
@@ -2407,6 +2909,16 @@ class Problem:
         _build_only: bool = False,
         tmp_dir: str | os.PathLike | None = None,
     ) -> Solution | None:
+        _sp_emit, _sp_on = _make_solve_profile_emitter()
+        if _sp_on:
+            _sp_emit(
+                "enter",
+                n_vars=len(self._vars),
+                n_cstrs=len(self._cstrs),
+                n_obj_terms=len(self._obj_terms),
+                save_memory=int(save_memory),
+                keep_solver=int(keep_solver),
+            )
         # Build the per-column arrays inside this frame (rather than in
         # the public ``solve`` caller) so they die at the end of the
         # streaming solve rather than living through ``HiGHS.run()`` on
@@ -2420,6 +2932,8 @@ class Problem:
         col_obj = np.zeros(n_cols, dtype=np.float64)
         col_int = np.zeros(n_cols, dtype=np.int8)  # 1 = integer column
         col_names: list[str] = [None] * n_cols  # type: ignore[list-item]
+        if _sp_on:
+            _sp_emit("col_arrays_alloc", n_cols=n_cols)
 
         for v in self._vars.values():
             ids = v.frame["col_id"].to_numpy()
@@ -2451,6 +2965,9 @@ class Problem:
                 cid0 = int(ids[0])
                 col_names[cid0] = v.name
 
+        if _sp_on:
+            _sp_emit("var_loop_done", n_cols=n_cols)
+
         # objective — scatter-add via np.add.at (one numpy op per term,
         # no per-nonzero Python iteration).  np.add.at handles the rare
         # case where a term frame contains duplicate col_ids correctly.
@@ -2471,14 +2988,22 @@ class Problem:
             np.add.at(col_obj, cids, vals)
             del f
 
+        if _sp_on:
+            _sp_emit("obj_terms_collected", n_obj_terms=len(self._obj_terms))
+
         inf = highspy.kHighsInf
 
         # Translate +/-inf in the column bounds to HiGHS's sentinel.
-        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64)
-        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64)
+        col_lb_h = np.where(col_lb == -np.inf, -inf, col_lb).astype(np.float64, copy=False)
+        col_ub_h = np.where(col_ub == np.inf, inf, col_ub).astype(np.float64, copy=False)
         col_obj_h = col_obj.astype(np.float64, copy=False)
 
+        if _sp_on:
+            _sp_emit("col_bounds_translated", n_cols=n_cols)
+
         h = highspy.Highs()
+        if _sp_on:
+            _sp_emit("highs_constructed")
 
         # Apply solver options BEFORE any model state is established —
         # mirrors the non-streaming path (``presolve`` and friends must
@@ -2520,12 +3045,21 @@ class Problem:
                         stacklevel=2,
                     )
 
+        if _sp_on:
+            _sp_emit(
+                "options_applied",
+                n_opts=(len(opts) if opts else 0),
+            )
+
         # Objective sense + offset up front; column data comes next.
         h.changeObjectiveSense(
             highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
         )
         if self._obj_offset:
             h.changeObjectiveOffset(float(self._obj_offset))
+
+        if _sp_on:
+            _sp_emit("obj_meta_set")
 
         # Add all columns in one shot — no nonzeros yet (rows arrive
         # afterwards via addRows).  highspy expects int32 for
@@ -2543,6 +3077,9 @@ class Problem:
             empty_f64,
         )
 
+        if _sp_on:
+            _sp_emit("add_cols_done", n_cols=n_cols)
+
         # Integrality — same vectorized HighsVarType lookup as the
         # passModel path; only set when at least one column is integer.
         if col_int.any():
@@ -2552,10 +3089,16 @@ class Problem:
             all_idx = np.arange(n_cols, dtype=np.int32)
             h.changeColsIntegrality(int(n_cols), all_idx, integ_arr)
 
+        if _sp_on:
+            _sp_emit("integrality_set", n_int_cols=int(col_int.sum()))
+
         # Column names — passColName is per-item but cheap.
         for i, nm in enumerate(col_names):
             if nm is not None:
                 h.passColName(i, nm)
+
+        if _sp_on:
+            _sp_emit("col_names_passed", n_cols=n_cols)
 
         # Under save_memory, HiGHS now owns the canonical name
         # storage, so we can drop the Python-side list.  At N=3000 dense
@@ -2596,6 +3139,9 @@ class Problem:
         del col_lb_h, col_ub_h, col_obj_h
         del col_lb, col_ub, col_obj, col_int
 
+        if _sp_on:
+            _sp_emit("col_arrays_dropped")
+
         # Walk the constraint families one at a time.  For each family
         # we collect that family's term plans, build local COO arrays,
         # convert to row-CSR, and call addRows.  All locals fall out of
@@ -2603,7 +3149,7 @@ class Problem:
         row_names: list[str] = []
         next_row = 0
 
-        for name, proto, over in self._cstrs:
+        for _fam_idx, (name, proto, over) in enumerate(self._cstrs):
             expr, sense, rhs = proto.expr, proto.sense, proto.rhs
 
             if over is None:
@@ -2614,6 +3160,15 @@ class Problem:
                 row_count = over.height
                 axis_cols = list(over.columns)
                 row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_start",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    term_count=len(expr.terms),
+                )
 
             # base_row for this family is ``next_row``; HiGHS appends
             # rows in monotonic order via addRows, so per-family row
@@ -2686,7 +3241,7 @@ class Problem:
                             f"{on!r} — left join from row_index (rows={row_count}) "
                             f"produced {j.height} rows. Sample duplicates:\n{sample}"
                         )
-                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64)
+                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
             elif isinstance(rhs, (Var, Expr)):
@@ -2709,17 +3264,25 @@ class Problem:
 
             if sense == "<=":
                 row_lb = np.full(row_count, -inf, dtype=np.float64)
-                row_ub = np.where(rhs_vec == np.inf, inf, rhs_vec).astype(np.float64)
+                row_ub = np.where(rhs_vec == np.inf, inf, rhs_vec).astype(np.float64, copy=False)
             elif sense == ">=":
-                row_lb = np.where(rhs_vec == -np.inf, -inf, rhs_vec).astype(np.float64)
+                row_lb = np.where(rhs_vec == -np.inf, -inf, rhs_vec).astype(np.float64, copy=False)
                 row_ub = np.full(row_count, inf, dtype=np.float64)
             elif sense == "==":
                 rhs_h = np.where(rhs_vec == -np.inf, -inf, rhs_vec)
-                rhs_h = np.where(rhs_h == np.inf, inf, rhs_h).astype(np.float64)
+                rhs_h = np.where(rhs_h == np.inf, inf, rhs_h).astype(np.float64, copy=False)
                 row_lb = rhs_h
                 row_ub = rhs_h
             else:
                 raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_rhs_built",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                )
 
             # Row names — same polars-side formatting as the
             # non-streaming path; stash for later passRowName loop.
@@ -2746,7 +3309,7 @@ class Problem:
             # this iteration.
             row_index_lf = row_index.lazy()
             term_plans: list[tuple] = []
-            for term in expr.terms:
+            for _term_idx, term in enumerate(expr.terms):
                 if term.dims:
                     missing = [d for d in term.dims if d not in axis_cols]
                     if missing:
@@ -2756,18 +3319,52 @@ class Problem:
                             f"{missing} via Sum() before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
-                    # Semi-join + streaming pattern, mirroring write_mps
-                    # and _build_lp_arrays: prune the term plan against
-                    # the row-index key set so polars can prune Param-
-                    # product join chains rather than materialise a wide
-                    # intermediate.  Same bug class on the LHS as RHS.
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = (
-                        rl_a.join(tl_pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
+                    # Prefer LHS prune-down when the term carries a Var
+                    # reference + Param-chain (>=2 atomics) — mirror of
+                    # _build_canonical_matrix's LHS prune-down branch.
+                    # Single-Param / Sum-collapsed terms (var_source is
+                    # None) keep the original semi-join path verbatim.
+                    _lhs_psrc = (
+                        term.param_sources
+                        if isinstance(term.param_sources, list)
+                        else None
                     )
+                    _use_lhs_prune = (
+                        term.var_source is not None
+                        and _lhs_psrc is not None
+                        and len(_lhs_psrc) >= 2
+                        and not _prune_down_disabled()
+                    )
+                    if _use_lhs_prune:
+                        plan = _build_lhs_pruned_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                            coef_scalar=term.coef_scalar,
+                        ).select("_rid", "col_id", "coef")
+                        if _sp_on:
+                            _sp_emit(
+                                "family_term_pruned_down",
+                                family=name,
+                                family_idx=_fam_idx,
+                                term_idx=_term_idx,
+                                n_atomics=len(_lhs_psrc),
+                            )
+                    else:
+                        rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
+                        # Semi-join + streaming pattern, mirroring write_mps
+                        # and _build_lp_arrays: prune the term plan against
+                        # the row-index key set so polars can prune Param-
+                        # product join chains rather than materialise a wide
+                        # intermediate.  Same bug class on the LHS as RHS.
+                        keys_lazy = rl_a.select(on).unique()
+                        tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                        plan = (
+                            rl_a.join(tl_pruned, on=on, how="inner")
+                            .select("_rid", "col_id", "coef")
+                        )
                     term_plans.append(("dim", plan))
                 else:
                     term_plans.append(("scalar", term.lazy.select("col_id", "coef")))
@@ -2802,9 +3399,9 @@ class Problem:
                     if kind == "dim":
                         if j.height == 0:
                             continue
-                        rids_local = j["_rid"].to_numpy().astype(np.int64)
-                        cids = j["col_id"].to_numpy().astype(np.int64)
-                        vals = j["coef"].to_numpy().astype(np.float64)
+                        rids_local = j["_rid"].to_numpy().astype(np.int64, copy=False)
+                        cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                        vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                         if _rf is not None:
                             vals = vals * _rf[base_row + rids_local]
                         if _cf is not None:
@@ -2813,8 +3410,8 @@ class Problem:
                         fam_cols.append(cids)
                         fam_vals.append(vals)
                     else:  # scalar — tile across the row_count rows
-                        cids = j["col_id"].to_numpy().astype(np.int64)
-                        vals = j["coef"].to_numpy().astype(np.float64)
+                        cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                        vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                         if cids.size == 0:
                             continue
                         tiled_rows = np.repeat(
@@ -2831,6 +3428,15 @@ class Problem:
                         fam_vals.append(tiled_vals)
                 del collected
 
+            if _sp_on:
+                _sp_emit(
+                    "fam_lhs_collected",
+                    family=name,
+                    family_idx=_fam_idx,
+                    term_count=len(term_plans),
+                    n_chunks=len(fam_rows),
+                )
+
             if fam_rows:
                 fr = np.concatenate(fam_rows)
                 fc = np.concatenate(fam_cols)
@@ -2844,12 +3450,20 @@ class Problem:
                 )
                 fr = dedup["r"].to_numpy()
                 fc = dedup["c"].to_numpy()
-                fv = dedup["v"].to_numpy().astype(np.float64)
+                fv = dedup["v"].to_numpy().astype(np.float64, copy=False)
                 del dedup
             else:
                 fr = np.zeros(0, dtype=np.int64)
                 fc = np.zeros(0, dtype=np.int64)
                 fv = np.zeros(0, dtype=np.float64)
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_dedup_done",
+                    family=name,
+                    family_idx=_fam_idx,
+                    nnz=int(fr.size),
+                )
 
             # Convert COO → row-CSR.  HiGHS expects int32 for both
             # ``start`` and ``index`` arrays in addRows; nnz per family
@@ -2872,6 +3486,15 @@ class Problem:
                 val64 = np.zeros(0, dtype=np.float64)
                 starts = np.zeros(row_count + 1, dtype=np.int32)
 
+            if _sp_on:
+                _sp_emit(
+                    "fam_csr_built",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    nnz=nnz,
+                )
+
             # addRows expects ``start`` of length num_new_row (no
             # trailing entry) — slice off the last cumulative count.
             h.addRows(
@@ -2883,6 +3506,15 @@ class Problem:
                 idx32,
                 val64,
             )
+
+            if _sp_on:
+                _sp_emit(
+                    "fam_addRows_done",
+                    family=name,
+                    family_idx=_fam_idx,
+                    row_count=row_count,
+                    nnz=nnz,
+                )
 
             # Update stream-time LP ranges from this family's arrays.
             # Process row_lb / row_ub separately (no concat copy).
@@ -2910,6 +3542,9 @@ class Problem:
             del term_plans, fam_rows, fam_cols, fam_vals, fr, fc, fv, idx32, val64, starts
 
         n_rows = next_row
+
+        if _sp_on:
+            _sp_emit("all_fams_done", n_rows=n_rows, n_fams=len(self._cstrs))
 
         # Materialise the four LP-range tuples (matrix / cost / col_bound /
         # row_bound) for :attr:`Solution.streamed_lp_ranges` — no per-key
@@ -2942,6 +3577,9 @@ class Problem:
         for i, nm in enumerate(row_names):
             h.passRowName(i, nm if nm is not None else f"row_{i}")
 
+        if _sp_on:
+            _sp_emit("row_names_passed", n_rows=n_rows)
+
         # Same logic as col_names above — HiGHS now owns the row name
         # storage; the Python list is ~1.1 GB of redundant strings at
         # N=3000 dense.
@@ -2958,6 +3596,8 @@ class Problem:
         # See :meth:`_release_python_lp_inputs` for the contract.
         if save_memory:
             self._release_python_lp_inputs()
+            if _sp_on:
+                _sp_emit("release_python_lp_inputs_done")
 
             # HiGHS allocator round-trip via disk.  Even after every
             # polar-side reference is dropped, the C++ Highs instance
@@ -3001,8 +3641,12 @@ class Problem:
                 except Exception:
                     pass
                 h.writeModel(mps_path)
+                if _sp_on:
+                    _sp_emit("savemem_writeModel_done", mps_path=mps_path)
                 h.clearModel()
                 del h
+                if _sp_on:
+                    _sp_emit("savemem_highs_cleared")
                 # Best-effort allocator release: glibc's malloc holds
                 # freed arenas on its free-list by default; trim hands
                 # them back to the OS so RSS actually drops.  Linux-
@@ -3066,6 +3710,8 @@ class Problem:
                     except Exception:
                         pass
                 h.readModel(mps_path)
+                if _sp_on:
+                    _sp_emit("savemem_readModel_done", mps_path=mps_path)
                 # Restore the user's requested output_flag for run().
                 if not (opts and "output_flag" in opts):
                     try:
@@ -3080,13 +3726,28 @@ class Problem:
                 if not _caller_owns_mps and os.path.exists(mps_path):
                     os.unlink(mps_path)
 
+        if _sp_on:
+            _sp_emit("before_highs_run", n_rows=n_rows, n_cols=n_cols)
+
         h.run()
+
+        if _sp_on:
+            _sp_emit("after_highs_run")
+
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
         obj_val = h.getObjectiveValue()
         col_value = np.asarray(sol.col_value, dtype=np.float64)
         row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
         col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
+
+        if _sp_on:
+            _sp_emit(
+                "solution_extracted",
+                optimal=int(bool(status_ok)),
+                n_rows=n_rows,
+                n_cols=n_cols,
+            )
 
         if keep_solver:
             sol_highs: highspy.Highs | None = h
@@ -3897,29 +4558,61 @@ class WarmProblem:
         semantics the pre-B3 code maintained inline.
         """
         p = self._p
+        _sp_emit, _sp_on = _make_solve_profile_emitter()
+        if _sp_on:
+            _sp_emit(
+                "initial_build_enter",
+                n_vars=len(p._vars),
+                n_cstrs=len(p._cstrs),
+                n_obj_terms=len(p._obj_terms),
+                n_mutable_params=len(self._mutable_params),
+            )
 
         # ---- Step 1: bulk LP arrays from the canonical matrix. -----
+        # NOTE: internal POLAR_HIGH_WRITE_MPS_PROFILE-gated checkpoints
+        # inside ``_build_canonical_matrix`` fire when that env var is
+        # also set; we mark the boundary here so the [solve profile]
+        # stream brackets the canonicalise cliff cleanly.
+        if _sp_on:
+            _sp_emit("canonicalise_enter")
         m = p.canonicalise()
         n_cols = m.n_cols
         n_rows = m.n_rows
+        if _sp_on:
+            _sp_emit(
+                "canonicalise_returned",
+                n_rows=n_rows,
+                n_cols=n_cols,
+                nnz=int(m.val.size),
+            )
 
         inf = highspy.kHighsInf
-        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64)
-        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64)
-        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64)
-        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64)
+        col_lb_h = np.where(m.col_lb == -np.inf, -inf, m.col_lb).astype(np.float64, copy=False)
+        col_ub_h = np.where(m.col_ub == np.inf, inf, m.col_ub).astype(np.float64, copy=False)
+        row_lb_h = np.where(m.row_lb == -np.inf, -inf, m.row_lb).astype(np.float64, copy=False)
+        row_ub_h = np.where(m.row_ub == np.inf, inf, m.row_ub).astype(np.float64, copy=False)
+        if _sp_on:
+            _sp_emit("bounds_translated", n_cols=n_cols, n_rows=n_rows)
 
         # Populate _var_cols (still needed by update_obj_coef / fix_cols /
         # _resolve_dim_tuples).  Cheap: one int64 array per declared var.
         for v in p._vars.values():
             ids = v.frame["col_id"].to_numpy()
             self._var_cols[v.name] = ids.astype(np.int64)
+        if _sp_on:
+            _sp_emit("var_cols_populated", n_vars=len(p._vars))
 
         # Use the canonical matrix's col_names verbatim.  Unused slots
         # are empty strings (vs the pre-B3 ``None``); ``passColName`` is
         # skipped for those — same observable effect as the old loop.
         col_names: list[str] = list(m.col_names)
         row_names: list[str] = list(m.row_names)
+        if _sp_on:
+            _sp_emit(
+                "names_snapshotted",
+                n_col_names=len(col_names),
+                n_row_names=len(row_names),
+            )
 
         # ---- Step 2: per-cstr metadata + tracked-source second pass.
         # The bulk path doesn't need any of this; both loops only fire
@@ -3935,7 +4628,22 @@ class WarmProblem:
         _cf = p._layer2_col_factor
         track_acc: dict[str, list[dict]] = {}
         next_row = 0
-        for cname, proto, over in p._cstrs:
+        if _sp_on:
+            _sp_emit(
+                "cstr_meta_loop_start",
+                n_cstrs=len(p._cstrs),
+                n_mutable_params=len(self._mutable_params),
+                has_row_factor=int(_rf is not None),
+                has_col_factor=int(_cf is not None),
+            )
+        # Per-family tracked-work counters (only emitted for families
+        # that actually ran the second-pass collect — avoids stderr
+        # flooding when tracked work is sparse).  Counts at the
+        # checkpoint capture the family's cumulative tracked rows so
+        # the ramp is attributable.
+        _fam_tracked_total = 0
+        _fam_tracked_families = 0
+        for _fam_idx, (cname, proto, over) in enumerate(p._cstrs):
             expr, sense, rhs = proto.expr, proto.sense, proto.rhs
 
             if over is None:
@@ -3977,6 +4685,10 @@ class WarmProblem:
                 ]
                 expr = Expr(expr.terms + neg)
 
+            # Per-family tracked-row counter — incremented inside the
+            # term loop so the post-family checkpoint can attribute
+            # rows added by this family to the track_acc accumulator.
+            _fam_tracked_rows = 0
             row_index_lf = row_index.lazy()
             for term in expr.terms:
                 if not term.param_sources:
@@ -4002,21 +4714,57 @@ class WarmProblem:
                             f"before adding."
                         )
                     on = [d for d in term.dims if d in axis_cols]
-                    rl_a, tl_a = _align_enum_join_keys(
-                        row_index_lf, term.lazy, on
+                    # Prefer LHS prune-down when this term carries both a
+                    # Var reference and a multi-atomic Param chain — same
+                    # criteria as _build_canonical_matrix / _solve_streaming.
+                    # Sum-collapsed terms (var_source=None) fall back to
+                    # the original merged-lazy semi-join path verbatim so
+                    # the warm-path output matches the canonical build.
+                    _lhs_psrc = (
+                        term.param_sources
+                        if isinstance(term.param_sources, list)
+                        else None
                     )
-                    keys_lazy = rl_a.select(on).unique()
-                    tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                    plan = rl_a.join(tl_pruned, on=on, how="inner").select(
-                        "_rid", "col_id", "coef", *term.dims
+                    _use_lhs_prune = (
+                        term.var_source is not None
+                        and _lhs_psrc is not None
+                        and len(_lhs_psrc) >= 2
+                        and not _prune_down_disabled()
                     )
+                    if _use_lhs_prune:
+                        plan = _build_lhs_pruned_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                            coef_scalar=term.coef_scalar,
+                        ).select("_rid", "col_id", "coef", *term.dims)
+                        if _sp_on:
+                            _sp_emit(
+                                "family_term_pruned_down",
+                                family=cname,
+                                family_idx=_fam_idx,
+                                term_idx=0,
+                                n_atomics=len(_lhs_psrc),
+                            )
+                    else:
+                        rl_a, tl_a = _align_enum_join_keys(
+                            row_index_lf, term.lazy, on
+                        )
+                        keys_lazy = rl_a.select(on).unique()
+                        tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                        plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                            "_rid", "col_id", "coef", *term.dims
+                        )
                     j = _collect_streaming(plan)
                     if j.height == 0:
                         continue
-                    rids = j["_rid"].to_numpy().astype(np.int64)
-                    cids = j["col_id"].to_numpy().astype(np.int64)
-                    coefs = j["coef"].to_numpy().astype(np.float64)
+                    rids = j["_rid"].to_numpy().astype(np.int64, copy=False)
+                    cids = j["col_id"].to_numpy().astype(np.int64, copy=False)
+                    coefs = j["coef"].to_numpy().astype(np.float64, copy=False)
                     abs_rows = base_row + rids
+                    _fam_tracked_rows += int(coefs.size)
                     # The Param-tracker cache stores the SCALED coef so
                     # subsequent mutate-and-resolve cycles produce values
                     # consistent with what ``_build_canonical_matrix``
@@ -4098,6 +4846,32 @@ class WarmProblem:
                     # skip _param_cells registration.
                     continue
 
+            # Per-family checkpoint — only fires for families that
+            # actually accumulated tracked rows.  Keeps stderr volume
+            # bounded on large LPs where most families have no tracked
+            # terms, while still surfacing the per-family cost when the
+            # ramp is concentrated.
+            if _sp_on and _fam_tracked_rows:
+                _fam_tracked_total += _fam_tracked_rows
+                _fam_tracked_families += 1
+                _sp_emit(
+                    "cstr_family_tracked",
+                    fam_idx=_fam_idx,
+                    family=cname,
+                    row_count=row_count,
+                    tracked_rows=_fam_tracked_rows,
+                    cum_tracked_rows=_fam_tracked_total,
+                )
+
+        if _sp_on:
+            _sp_emit(
+                "cstr_meta_loop_done",
+                n_cstrs=len(p._cstrs),
+                tracked_families=_fam_tracked_families,
+                tracked_rows_total=_fam_tracked_total,
+                track_acc_params=len(track_acc),
+            )
+
         # Consolidate per-Param tracking accumulators.
         for pname, chunks in track_acc.items():
             if not chunks:
@@ -4121,6 +4895,12 @@ class WarmProblem:
                 direction=direction,
                 dim_signature=sig,
                 dim_keys=dim_keys,
+            )
+
+        if _sp_on:
+            _sp_emit(
+                "track_acc_consolidated",
+                n_param_cells=len(self._param_cells),
             )
 
         # ---- Step 3: assemble HighsLp + passModel. ------------------
@@ -4150,8 +4930,18 @@ class WarmProblem:
             kInt = highspy.HighsVarType.kInteger
             integ_arr = np.where(m.col_int, kInt, kCont)
             lp.integrality_ = integ_arr.tolist()
+        if _sp_on:
+            _sp_emit(
+                "lp_assembled",
+                n_cols=int(n_cols),
+                n_rows=int(n_rows),
+                nnz=int(m.val.size),
+                has_integers=int(bool(m.col_int.any())),
+            )
 
         h = highspy.Highs()
+        if _sp_on:
+            _sp_emit("highs_constructed")
         opts = options if options is not None else p._solver_options
         # See the streaming-solve block — tear the global scheduler
         # down before re-applying ``threads`` / ``parallel`` on the
@@ -4175,20 +4965,35 @@ class WarmProblem:
                     warnings.warn(
                         f"HiGHS rejected option {key}={val!r} (status={status!r})", stacklevel=2
                     )
+        if _sp_on:
+            _sp_emit(
+                "highs_options_applied",
+                n_opts=(len(opts) if opts else 0),
+            )
+        if _sp_on:
+            _sp_emit("highs_passmodel_pre", n_cols=int(n_cols), n_rows=int(n_rows))
         h.passModel(lp)
+        if _sp_on:
+            _sp_emit("highs_passmodel_post")
         for i, n in enumerate(col_names):
             # Canonical matrix uses "" for unused col slots; skip those.
             if n:
                 h.passColName(i, n)
+        if _sp_on:
+            _sp_emit("highs_col_names_passed", n_col_names=len(col_names))
         for i, n in enumerate(row_names):
             # HiGHS' pybind11 binding requires ``str``; the canonical
             # matrix may carry ``None`` (or ``""``) for unnamed rows.
             # Fall back to a synthetic ``row_<idx>`` so the API contract
             # is satisfied and diagnostics remain useful.
             h.passRowName(i, n if n else f"row_{i}")
+        if _sp_on:
+            _sp_emit("highs_row_names_passed", n_row_names=len(row_names))
 
         self._h = h
         self._n_cols = int(n_cols)
         self._n_rows = int(n_rows)
         self._col_names = col_names
         self._row_names = row_names
+        if _sp_on:
+            _sp_emit("initial_build_exit", n_cols=int(n_cols), n_rows=int(n_rows))

@@ -196,6 +196,49 @@ def test_split_ranged_rows_expands_pair() -> None:
     assert np.array_equal(split.col_ub, view.col_ub)
 
 
+def test_to_csr_round_trip_matches_csc() -> None:
+    """``LpView.to_csr`` produces row-major ``(start, index, value)`` that
+    enumerates the same (row, col, value) triples as the CSC source.
+
+    Locks the vectorised ``col_of`` construction against the per-column
+    scatter loop it replaced: both must emit identically-shaped int64
+    column-id arrays and the resulting CSR triples must dedup-match the
+    CSC triples by (row, col).
+    """
+    view = _hand_built_ranged_view()
+
+    # CSC triples (col, row, value)
+    csc_triples: list[tuple[int, int, float]] = []
+    for c in range(view.n_cols):
+        lo = int(view.a_start[c])
+        hi = int(view.a_start[c + 1])
+        for k in range(lo, hi):
+            csc_triples.append((c, int(view.a_index[k]), float(view.a_value[k])))
+
+    row_start, row_index, row_value = view.to_csr()
+
+    # Shape sanity
+    assert row_start.shape == (view.n_rows + 1,)
+    assert row_index.shape == (view.a_value.size,)
+    assert row_value.shape == (view.a_value.size,)
+    assert int(row_start[-1]) == int(view.a_value.size)
+    # dtype preservation
+    assert row_start.dtype == view.a_start.dtype
+    assert row_index.dtype == view.a_index.dtype
+
+    # CSR triples (row, col, value)
+    csr_triples: list[tuple[int, int, float]] = []
+    for r in range(view.n_rows):
+        lo = int(row_start[r])
+        hi = int(row_start[r + 1])
+        for k in range(lo, hi):
+            csr_triples.append((r, int(row_index[k]), float(row_value[k])))
+
+    # Same underlying triples (sorted because the two orientations
+    # enumerate them in different sequences).
+    assert sorted((r, c, v) for (c, r, v) in csc_triples) == sorted(csr_triples)
+
+
 def test_from_problem_has_no_side_effects() -> None:
     """Extracting an :class:`LpView` twice from the same Problem yields
     identical arrays, and a subsequent ``p.solve()`` is unaffected."""
