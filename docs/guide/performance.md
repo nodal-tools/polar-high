@@ -125,6 +125,13 @@ For diagnosing memory hot spots in `write_mps` itself, set
 `POLAR_HIGH_WRITE_MPS_PROFILE=1`: per-phase and per-constraint-family
 RSS deltas are emitted to stderr. Zero overhead when unset.
 
+`Problem.solve(save_memory=True)` also writes a spill MPS during its
+disk-roundtrip (item 2 above). It lands in the system temp dir
+(`$TMPDIR` / `/tmp`) by default; pass `tmp_dir=` to redirect it to a
+specific volume (e.g. the same filesystem as the workspace, or a
+per-job scratch directory). The argument is ignored when
+`save_memory=False`.
+
 ## Profiling
 
 `Problem.solve()` is straightforward to profile with `cProfile` or

@@ -80,6 +80,10 @@ final `h.run()`:
    file. This costs ~+90 s wall time at N=3000 dense but eliminates
    the allocator slack `addRows` leaves behind when fed a model
    incrementally — net ~5 GB lower peak in full-HiGHS-solve cells.
+   The spill file lands in the system temp dir (`$TMPDIR` / `/tmp`)
+   by default; pass `solve(save_memory=True, tmp_dir=...)` to redirect
+   it to a specific volume (e.g. the same filesystem as the workspace,
+   or a per-job scratch directory).
 
 After return, a subsequent `Problem.solve()` raises a clear
 `RuntimeError`. WarmProblem-style updates are also unavailable

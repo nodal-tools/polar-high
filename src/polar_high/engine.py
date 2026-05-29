@@ -1259,6 +1259,7 @@ class Problem:
         keep_solver: bool = False,
         streaming: bool = True,
         save_memory: bool = False,
+        tmp_dir: str | os.PathLike | None = None,
     ) -> Solution:
         """Solve the LP and return a :class:`Solution`.
 
@@ -1314,6 +1315,14 @@ class Problem:
             style update is possible).  Honoured only by the streaming
             path; on ``streaming=False`` a warning is emitted and the
             flag is ignored.  Default ``False``.
+        tmp_dir
+            Directory for the temporary MPS file written by the
+            ``save_memory=True`` round-trip.  ``None`` (default) uses
+            the system temp dir (``$TMPDIR`` / ``/tmp``).  Set when the
+            caller wants the spill file on a specific volume (e.g. the
+            same filesystem as its workspace, or a per-job scratch
+            directory) instead of the system default.  Ignored when
+            ``save_memory=False``.
         """
         # Guard against re-entry on a Problem whose LP source has
         # already been dropped — see ``save_memory`` above.  We can
@@ -1339,6 +1348,7 @@ class Problem:
                 options=options,
                 keep_solver=keep_solver,
                 save_memory=save_memory,
+                tmp_dir=tmp_dir,
             )
 
         if save_memory:
@@ -2395,6 +2405,7 @@ class Problem:
         save_memory: bool = False,
         _mps_out_path: str | None = None,
         _build_only: bool = False,
+        tmp_dir: str | os.PathLike | None = None,
     ) -> Solution | None:
         # Build the per-column arrays inside this frame (rather than in
         # the public ``solve`` caller) so they die at the end of the
@@ -2976,7 +2987,7 @@ class Problem:
                 _mps_out_path
                 if _mps_out_path is not None
                 else tempfile.NamedTemporaryFile(
-                    suffix=".mps", delete=False
+                    suffix=".mps", delete=False, dir=tmp_dir
                 ).name
             )
             try:
