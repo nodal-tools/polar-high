@@ -494,6 +494,37 @@ def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
         return plan.collect()
 
 
+def _apply_where_frames(
+    lazy: pl.LazyFrame,
+    dims: tuple[str, ...] | list[str],
+    where_frames: tuple[pl.LazyFrame, ...] | None,
+) -> pl.LazyFrame:
+    """Bake deferred :func:`Where` filter frames into ``lazy``.
+
+    For each frame ``wf`` in ``where_frames`` (typically recorded by the
+    pure-filter branch of :func:`Where`), compute the intersection of
+    ``wf``'s columns with ``dims`` and semi-join on the shared keys.
+    Frames with no shared dim are no-ops (the filter does not constrain
+    this lazy plan's row set).  Used by Sum / Lag / LHS fallback paths
+    to apply pending filters when leaf-rebuild prune-down can't fire.
+    Mirrors :func:`_build_lhs_pruned_plan`'s use of
+    :func:`_align_enum_join_keys` so Enum dtype mismatches don't slip
+    through as silent correctness bugs.
+    """
+    if where_frames is None:
+        return lazy
+    dim_set = set(dims)
+    for wf in where_frames:
+        wf_cols = wf.collect_schema().names()
+        shared = [c for c in wf_cols if c in dim_set]
+        if not shared:
+            continue
+        keys = wf.select(shared).unique()
+        lazy_a, keys_a = _align_enum_join_keys(lazy, keys, shared)
+        lazy = lazy_a.join(keys_a, on=shared, how="semi")
+    return lazy
+
+
 def _build_lhs_pruned_plan(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
@@ -501,6 +532,7 @@ def _build_lhs_pruned_plan(
     param_sources: list[tuple["Param", int]],
     on: list[str],
     coef_scalar: float = 1.0,
+    where_frames: tuple[pl.LazyFrame, ...] | None = None,
 ) -> pl.LazyFrame:
     """Rebuild a Var × Param … LHS term as a prune-down chain, mirroring
     the RHS prune-down in :meth:`Problem._build_canonical_matrix`.
@@ -521,10 +553,22 @@ def _build_lhs_pruned_plan(
     axis_cols) used to attach the resulting per-cell rows back to
     row_index — same semantics as the unpruned path's
     ``row_index ⋈ term.lazy`` final join.
+
+    ``where_frames`` carries deferred filter frames recorded by
+    pure-filter :func:`Where` (see :func:`_apply_where_frames`).  They
+    are baked into the rebuilt chain at two points: against ``var_lf``
+    up front (narrows the seed) and against each atomic accumulator
+    step (narrows mid-chain when a later filter shares a dim that
+    enters via a Param).  Both steps semi-join only — they never alter
+    coef values, only the row set the rebuilt chain spans.
     """
     var_dims = list(var_source.dims)
     var_on = [d for d in var_dims if d in axis_cols]
     var_lf = var_source.frame.lazy()
+    if where_frames is not None:
+        # Apply any where_frames whose shared cols overlap the Var's
+        # dims up front — narrows the seed before row_index pre-prune.
+        var_lf = _apply_where_frames(var_lf, var_dims, where_frames)
     if var_on:
         # Pre-prune the Var.frame against the row_index key set so the
         # very first step is bounded by the constraint's row count.
@@ -575,6 +619,11 @@ def _build_lhs_pruned_plan(
                 coef=pl.col("coef") / pl.col("value")
             ).select(*new_dims, "col_id", "coef")
         acc_dims = new_dims
+        if where_frames is not None:
+            # After each atomic step, narrow the accumulator by any
+            # where_frames that now overlap with new acc_dims — mirror of
+            # the row_index pre-prune so the chain stays bounded.
+            acc = _apply_where_frames(acc, acc_dims, where_frames)
     # Final attach to row_index: same shape as the unpruned path.
     rl_a, acc_a = _align_enum_join_keys(row_index_lf, acc, on)
     return rl_a.join(acc_a, on=on, how="inner")
@@ -592,6 +641,19 @@ def _prune_down_disabled() -> bool:
     optimisation produces unexpected drift.
     """
     return os.environ.get("POLAR_HIGH_DISABLE_PRUNE_DOWN") == "1"
+
+
+def _where_pushdown_disabled() -> bool:
+    """Return True when ``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1``.
+
+    Mirror of :func:`_prune_down_disabled`.  When set, :func:`Where`
+    falls back to its original behaviour — eager inner-join into
+    ``term.lazy`` and ``var_source`` / ``coef_scalar`` / ``where_frames``
+    cleared — so users have a safety hatch if the deferred-filter path
+    drifts.  Sum / Lag still bake any pre-existing ``where_frames`` for
+    correctness; the env-var only controls the pushdown record itself.
+    """
+    return os.environ.get("POLAR_HIGH_DISABLE_WHERE_PUSHDOWN") == "1"
 
 
 def _merge_param_sources(
@@ -733,13 +795,33 @@ class _Term:
     atomic at a time instead of materialising the fully-merged Var×Param×
     Param… intermediate inside ``term.lazy``.  Set by :meth:`Var.__mul__`
     / :meth:`Expr.__mul__` and preserved through ``Expr.__sub__`` /
-    ``__neg__`` / scalar multiplies.  Cleared (set to ``None``) by
-    operations that change the term's row identity — :func:`Sum`,
-    :func:`Where`, :func:`Lag` — because the rebuilt chain would no
-    longer mirror the post-aggregation/filter row set.
+    ``__neg__`` / scalar multiplies / pure-filter :func:`Where`.
+    Cleared (set to ``None``) by operations that change the term's row
+    identity — :func:`Sum`, :func:`Lag`, and the "map effect" branch of
+    :func:`Where` (when the filter frame contributes extra dims) —
+    because the rebuilt chain would no longer mirror the
+    post-aggregation/extension row set.
+
+    ``where_frames`` — opt-in tuple of deferred filter frames recorded by
+    pure-filter :func:`Where` calls (shared cols only, no map effect).
+    Each entry is a :class:`polars.LazyFrame`; the filter is *not* baked
+    into ``lazy`` so downstream prune-down can stay leaf-level.  The
+    canonical / streaming / warm LHS builders bake these against the
+    rebuilt ``row_index → Var → P1 → P2 …`` chain via
+    :func:`_apply_where_frames`.  Stored as a tuple so accidental shared
+    mutation between sibling terms is impossible.  Cleared by
+    :func:`Sum` / :func:`Lag` / map-effect :func:`Where` (after baking)
+    and by fallback paths that materialise ``lazy`` directly.
     """
 
-    __slots__ = ("lazy", "dims", "param_sources", "var_source", "coef_scalar")
+    __slots__ = (
+        "lazy",
+        "dims",
+        "param_sources",
+        "var_source",
+        "coef_scalar",
+        "where_frames",
+    )
 
     def __init__(
         self,
@@ -748,6 +830,7 @@ class _Term:
         param_sources: list[tuple[Param, int]] | None = None,
         var_source: "Var | None" = None,
         coef_scalar: float = 1.0,
+        where_frames: tuple[pl.LazyFrame, ...] | None = None,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
@@ -767,6 +850,11 @@ class _Term:
         # Where/Lag null out ``var_source`` so prune-down doesn't fire on
         # those terms — ``coef_scalar`` is irrelevant there.
         self.coef_scalar = float(coef_scalar)
+        # Normalise to None or a tuple (immutable).
+        if where_frames is None or len(where_frames) == 0:
+            self.where_frames = None
+        else:
+            self.where_frames = tuple(where_frames)
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -807,6 +895,7 @@ class Expr:
                 param_sources=t.param_sources,
                 var_source=t.var_source,
                 coef_scalar=-t.coef_scalar,
+                where_frames=t.where_frames,
             )
             for t in _to_expr(other).terms
         ]
@@ -831,6 +920,7 @@ class Expr:
                         param_sources=t.param_sources,
                         var_source=t.var_source,
                         coef_scalar=t.coef_scalar * float(scalar),
+                        where_frames=t.where_frames,
                     )
                     for t in self.terms
                 ]
@@ -852,7 +942,8 @@ class Expr:
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
                 new.append(
                     _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
-                          coef_scalar=t.coef_scalar * scalar._value_scalar)
+                          coef_scalar=t.coef_scalar * scalar._value_scalar,
+                          where_frames=t.where_frames)
                 )
             return Expr(new)
         return NotImplemented
@@ -879,7 +970,8 @@ class Expr:
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
                 new.append(
                     _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
-                          coef_scalar=t.coef_scalar / other._value_scalar)
+                          coef_scalar=t.coef_scalar / other._value_scalar,
+                          where_frames=t.where_frames)
                 )
             return Expr(new)
         return NotImplemented
@@ -1051,8 +1143,12 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
         if time_dim not in t.dims:
             new_terms.append(t)
             continue
+        # Bake any deferred Where filters before the rename — Lag
+        # changes row identity (time-shift) so the filter must be
+        # applied first.
+        t_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
         carry = [c for c in lag_cols if c in t.dims and c != time_dim and c != lag_col]
-        lagged = t.lazy.rename({time_dim: "_lag_src"})
+        lagged = t_lazy.rename({time_dim: "_lag_src"})
         # Align Enum dtypes on the carry columns (symmetric keys) and on
         # the asymmetric (lag_col, _lag_src) pair.  The asymmetric pair
         # is handled by temporarily renaming so we can reuse the
@@ -1087,6 +1183,15 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
       ``Where(v_flow, flow_to_n)`` where ``flow_to_n`` has columns
       ``(p, source, sink, n)`` adds ``n`` so the term can be bound
       to a constraint indexed by ``(n, t)``).
+
+    The pure-filter case (no extras) does *not* bake the join into
+    ``t.lazy`` — it records ``frame`` into ``_Term.where_frames`` so
+    the LHS prune-down (``_build_lhs_pruned_plan``) can apply it at the
+    leaf-rebuild step (where the row count is bounded by the smaller of
+    ``Var.frame`` and the row_index key set).  ``var_source`` / Param
+    chain / ``coef_scalar`` are preserved.  Set
+    ``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1`` to recover today's
+    behaviour (eager join + clear metadata) verbatim.
     """
     if isinstance(expr, Var):
         expr = expr.to_expr()
@@ -1096,6 +1201,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
     else:
         frame_lf = frame.lazy()
         frame_cols = frame.columns
+    disabled = _where_pushdown_disabled()
     new: list[_Term] = []
     for t in expr.terms:
         # Term schema = dims + (col_id, coef).  Only dims overlap with
@@ -1103,11 +1209,63 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
         term_cols = set(t.dims) | {"col_id", "coef"}
         shared = [c for c in frame_cols if c in term_cols]
         extra = tuple(c for c in frame_cols if c not in term_cols)
-        f = t.lazy
-        if shared:
-            f, frame_lf_a = _align_enum_join_keys(f, frame_lf, shared)
-            f = f.join(frame_lf_a, on=shared, how="inner")
-        new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
+        if disabled:
+            # Safety fallback: today's verbatim behaviour — eager
+            # inner-join + clear all leaf-rebuild metadata.  Latent
+            # ``shared==[] and extras!=()`` bug preserved verbatim too
+            # (no cross-join), since this branch's job is to recover
+            # exact prior semantics.
+            f = t.lazy
+            if shared:
+                f, frame_lf_a = _align_enum_join_keys(f, frame_lf, shared)
+                f = f.join(frame_lf_a, on=shared, how="inner")
+            new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
+            continue
+        if extra:
+            # Map effect — changes the term's row identity in a way the
+            # leaf-rebuild can't preserve.  Eagerly join (today's path)
+            # and clear var_source / coef_scalar / where_frames; keep
+            # param_sources (the Param's contribution is already baked).
+            # Fix latent bug: when ``shared==[]`` but ``extras!=()``,
+            # explicitly cross-join so the extras columns actually
+            # land in the lazy plan (today the columns were claimed in
+            # ``dims`` but never produced — downstream broke).
+            f = t.lazy
+            if shared:
+                f, frame_lf_a = _align_enum_join_keys(f, frame_lf, shared)
+                f = f.join(frame_lf_a, on=shared, how="inner")
+            else:
+                f = f.join(frame_lf, how="cross")
+            new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
+            continue
+        # Pure-filter — defer.  When ``shared`` is empty the filter is a
+        # no-op for this term's row set (no shared keys to constrain
+        # on); pass the term through unchanged.  Otherwise record the
+        # frame into ``where_frames`` so prune-down / fallback can apply
+        # it leaf-level.
+        if not shared:
+            new.append(
+                _Term(
+                    t.lazy,
+                    t.dims,
+                    param_sources=t.param_sources,
+                    var_source=t.var_source,
+                    coef_scalar=t.coef_scalar,
+                    where_frames=t.where_frames,
+                )
+            )
+            continue
+        prev = t.where_frames or ()
+        new.append(
+            _Term(
+                t.lazy,
+                t.dims,
+                param_sources=t.param_sources,
+                var_source=t.var_source,
+                coef_scalar=t.coef_scalar,
+                where_frames=prev + (frame_lf,),
+            )
+        )
     return Expr(new)
 
 
@@ -1119,6 +1277,13 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
 
     ``Sum(expr)`` with ``over=None`` collapses every open dim — useful
     for a scalar (objective term, single-row constraint).
+
+    Any deferred :func:`Where` filters recorded on each term
+    (``t.where_frames``) are baked into ``t.lazy`` *before* the
+    aggregation — Sum collapses dims so the filter could not be
+    applied at the leaf level downstream.  The result clears
+    ``var_source`` / ``where_frames`` (today's behaviour); the
+    per-term ``where`` kwarg is applied on top, unchanged.
     """
     if isinstance(expr, Var):
         expr = expr.to_expr()
@@ -1147,7 +1312,10 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
 
     new_terms: list[_Term] = []
     for t in expr.terms:
-        f = t.lazy
+        # Bake any deferred Where filters before the per-term ``where``
+        # kwarg join — Sum collapses dims, so the filter has to land
+        # at the leaf level.
+        f = _apply_where_frames(t.lazy, t.dims, t.where_frames)
         if where_lf is not None:
             shared = [c for c in where_cols if c in t.dims]
             if shared:
@@ -1974,13 +2142,6 @@ class Problem:
                     )
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
-            elif isinstance(rhs, (Var, Expr)):
-                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [
-                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
-                    for t in rhs_expr.terms
-                ]
-                expr = Expr(expr.terms + neg)
             else:
                 raise TypeError(
                     f"constraint {cname!r}: unsupported rhs type "
@@ -2105,6 +2266,7 @@ class Problem:
                             _lhs_psrc,
                             on,
                             coef_scalar=term.coef_scalar,
+                            where_frames=term.where_frames,
                         ).select("_rid", "col_id", "coef")
                         if _profile:
                             _cm_emit(
@@ -2115,8 +2277,14 @@ class Problem:
                                 n_atomics=len(_lhs_psrc),
                             )
                     else:
+                        # Bake any deferred Where filters before the
+                        # semi-join — fallback path must apply them
+                        # since prune-down isn't firing here.
+                        term_lazy_filtered = _apply_where_frames(
+                            term.lazy, term.dims, term.where_frames
+                        )
                         rl_a, tl_a = _align_enum_join_keys(
-                            row_index_lf, term.lazy, on
+                            row_index_lf, term_lazy_filtered, on
                         )
                         keys_lazy = rl_a.select(on).unique()
                         tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
@@ -3244,12 +3412,6 @@ class Problem:
                     rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
-            elif isinstance(rhs, (Var, Expr)):
-                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [
-                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims) for t in rhs_expr.terms
-                ]
-                expr = Expr(expr.terms + neg)
             else:
                 raise TypeError(f"constraint {name!r}: unsupported rhs type {type(rhs).__name__}")
 
@@ -3343,6 +3505,7 @@ class Problem:
                             _lhs_psrc,
                             on,
                             coef_scalar=term.coef_scalar,
+                            where_frames=term.where_frames,
                         ).select("_rid", "col_id", "coef")
                         if _sp_on:
                             _sp_emit(
@@ -3353,7 +3516,15 @@ class Problem:
                                 n_atomics=len(_lhs_psrc),
                             )
                     else:
-                        rl_a, tl_a = _align_enum_join_keys(row_index_lf, term.lazy, on)
+                        # Bake any deferred Where filters before the
+                        # semi-join — fallback path applies them since
+                        # prune-down isn't firing here.
+                        term_lazy_filtered = _apply_where_frames(
+                            term.lazy, term.dims, term.where_frames
+                        )
+                        rl_a, tl_a = _align_enum_join_keys(
+                            row_index_lf, term_lazy_filtered, on
+                        )
                         # Semi-join + streaming pattern, mirroring write_mps
                         # and _build_lp_arrays: prune the term plan against
                         # the row-index key set so polars can prune Param-
@@ -4675,16 +4846,6 @@ class WarmProblem:
             if not self._mutable_params:
                 continue
 
-            # Var/Expr-on-RHS fold so the second pass walks the same
-            # expanded ``expr.terms`` that the canonical matrix walked.
-            if isinstance(rhs, (Var, Expr)):
-                rhs_expr = rhs.to_expr() if isinstance(rhs, Var) else rhs
-                neg = [
-                    _Term(t.lazy.with_columns(coef=-pl.col("coef")), t.dims)
-                    for t in rhs_expr.terms
-                ]
-                expr = Expr(expr.terms + neg)
-
             # Per-family tracked-row counter — incremented inside the
             # term loop so the post-family checkpoint can attribute
             # rows added by this family to the track_acc accumulator.
@@ -4739,6 +4900,7 @@ class WarmProblem:
                             _lhs_psrc,
                             on,
                             coef_scalar=term.coef_scalar,
+                            where_frames=term.where_frames,
                         ).select("_rid", "col_id", "coef", *term.dims)
                         if _sp_on:
                             _sp_emit(
@@ -4749,8 +4911,14 @@ class WarmProblem:
                                 n_atomics=len(_lhs_psrc),
                             )
                     else:
+                        # Bake any deferred Where filters before the
+                        # semi-join — fallback path applies them since
+                        # prune-down isn't firing here.
+                        term_lazy_filtered = _apply_where_frames(
+                            term.lazy, term.dims, term.where_frames
+                        )
                         rl_a, tl_a = _align_enum_join_keys(
-                            row_index_lf, term.lazy, on
+                            row_index_lf, term_lazy_filtered, on
                         )
                         keys_lazy = rl_a.select(on).unique()
                         tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
