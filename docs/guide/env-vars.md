@@ -25,8 +25,9 @@ exactly zero.
 
 | Variable | Default | Set to | What it does |
 |---|---|---|---|
-| `POLAR_HIGH_WRITE_MPS_PROFILE` | unset (off) | `1` | Print per-phase and per-constraint-family RSS deltas during `Problem.write_mps`. Use when an MPS write OOMs or balloons unexpectedly. |
+| `POLAR_HIGH_WRITE_MPS_PROFILE` | unset (off) | `1` | Print per-phase and per-constraint-family RSS deltas during `Problem.write_mps`. Use when an MPS write OOMs or balloons unexpectedly. Also covers `Problem.canonicalise` — when that runs inside `Problem.solve` / `WarmProblem._initial_build`, set this to see per-family checkpoints from the canonical matrix build. |
 | `POLAR_HIGH_RANGES_PROFILE` | unset (off) | `1` | Print per-family and per-term RSS during autoscale range detection (`autoscale._ranges`). Use when range detection on a large LP shows a peak you cannot localise. |
+| `POLAR_HIGH_SOLVE_PROFILE` | unset (off) | `1` | Print per-phase RSS markers from `Problem.solve` (`_solve_streaming` cold path, ~27 checkpoints) and from `WarmProblem._initial_build` (~18 checkpoints covering the per-family LP-build loop and the HiGHS handoff). Combine with `POLAR_HIGH_WRITE_MPS_PROFILE=1` to also see the per-family canonicalise checkpoints; the two streams interleave by wall time. |
 
 Example — diagnose `write_mps` memory:
 
@@ -37,6 +38,12 @@ POLAR_HIGH_WRITE_MPS_PROFILE=1 python -m my_model.build_and_export 2> mps_profil
 The output is one line per profiling checkpoint with the current RSS
 and the delta since the previous checkpoint. Grep for the largest
 deltas to find the phase that allocated.
+
+## Safety / opt-out
+
+| Variable | Default | Set to | What it does |
+|---|---|---|---|
+| `POLAR_HIGH_DISABLE_PRUNE_DOWN` | unset (off — prune-down active) | `1` | Disable the per-atomic prune-down for `Param` chains in `_build_canonical_matrix` (RHS), `_build_lhs_pruned_plan` (LHS), `_solve_streaming` and `WarmProblem._initial_build`. With the var set, every multi-atomic chain falls through to the original merged-lazy semi-join path. Use as a fallback if a future model surfaces a numerical drift on the prune-down path; report the affected scenario so the engine can be fixed and the env var retired. Numerics are identical between the two paths for all currently-tested scenarios. |
 
 ## Workload tuning
 

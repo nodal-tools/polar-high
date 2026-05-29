@@ -7,6 +7,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.3.0] — 2026-05-29
+
+Memory cliff fix for `Param`-chain RHS / LHS in `_build_canonical_matrix`
+plus matching coverage in `_solve_streaming` and `WarmProblem._initial_build`.
+On FlexTool's DES (RETO-Africa) scenario the canonicalise stage of the
+first solve stalled inside `profile_flow_upper_limit` (1.5 M rows, RHS
+`= profile_value × process_existing_count × process_availability`) — the
+chained inner joins produced a ~2.6 billion-row Cartesian intermediate
+before the row_index semi-join could prune it. The fix walks each
+chain's named atomic Params and pre-prunes them against the constraint's
+row_index keys (projected onto each atomic's own dim subset), bounding
+the intermediate to the constraint row count.
+
+Behaviour-preserving: every solve that completed before still produces
+identical numerics (verified against the FlexTool scenario parity suite,
+139 polar_high tests + the previously-failing flextool scenarios). LP
+matrices are byte-identical between the prune-down path and the
+original merged-lazy path on every covered chain shape; the difference
+is solely intermediate peak memory.
+
+### Added
+
+- `POLAR_HIGH_SOLVE_PROFILE=1` — env-var-gated stderr profile lines
+  covering every meaningful sub-step of `Problem._solve_streaming`
+  (cold path, 27 checkpoints) and `WarmProblem._initial_build` (18
+  checkpoints, including the per-family LP-build loop and the HiGHS
+  handoff). Tab-separated `[solve profile] phase=… rss_gb=… delta_gb=±…
+  wall_s=…` format mirroring the `POLAR_HIGH_WRITE_MPS_PROFILE`
+  precedent. Zero overhead when unset.
+
+- `POLAR_HIGH_DISABLE_PRUNE_DOWN=1` — safety fallback env var. When set,
+  every multi-atomic `Param` chain in RHS / LHS handling falls through
+  to the merged-lazy semi-join path. Use as an opt-out if a future model
+  surfaces an unexpected numerical drift on the prune-down path.
+
+- `Param._value_scalar` and `_Term.coef_scalar` slots — accumulate
+  scalar folds (`Param * float`, `Var * float`, `Expr.__neg__`,
+  `Expr.__sub__`, etc.) so the prune-down rebuild can seed its
+  accumulator with the correct multiplicative constant. Without this
+  tracking the rebuild would silently drop scalar factors that the
+  merged-lazy path carries in the `value` / `coef` column. Internal —
+  no public API change.
+
+- Per-family and per-term checkpoints inside `_build_canonical_matrix`
+  (gated by `POLAR_HIGH_WRITE_MPS_PROFILE=1`). New labels:
+  `family_rhs_evaluated`, `family_rhs_l2baked`, `family_senses_built`,
+  `family_rownames_built`, `family_term_plans_built`,
+  `family_term_collect_start` / `family_term_collected` (per LHS
+  term), `family_rhs_pruned_down` (new prune-down path),
+  `family_lhs_scattered`. Each emits `family=` and `family_idx=`
+  extras so per-family slicing is trivial.
+
+- Reference tests:
+  - `tests/test_canonicalise_param_chain_prune.py` (3 tests) — RHS
+    prune-down parity vs merged-lazy path on synthetic 3-Param chain
+    with disjoint-but-shared dims; covers `Param.__truediv__`.
+  - `tests/test_lhs_param_chain_prune.py` (3 tests) — LHS prune-down
+    parity at all three call sites (`_build_canonical_matrix`,
+    `_solve_streaming`, `WarmProblem._initial_build`).
+  - `tests/test_prune_down_scalar_anonymous_fix.py` (6 tests) —
+    anonymous-Param-in-chain handling, scalar-fold tracking, sign
+    propagation through `Expr.__neg__` / `__sub__`, and the disable
+    env-var fallback.
+  - `tests/test_lp_view.py` test for `to_csr` post-vectorisation
+    (zero-copy CSR round-trip parity).
+
+### Changed
+
+- `_build_canonical_matrix` RHS handling (engine.py): when
+  `rhs._sources` is a chain of length ≥ 2 and the composite has dim
+  columns, walk the atomics one at a time. Each atomic is semi-joined
+  against the running accumulator's key projection (semi-join order:
+  acc keys → atomic, NOT the other way around — atomic frame is the
+  pre-pruned side). Final accumulator collects via the existing
+  streaming fallback chain. Single-Param / scalar / `Var`-or-`Expr`-on-RHS
+  branches unchanged.
+
+- `_build_lhs_pruned_plan` (new helper) + three LHS call sites
+  (`_build_canonical_matrix` L1664-1692, `_solve_streaming` L2738-2763,
+  `WarmProblem._initial_build` L3969-4002): when `term.param_sources`
+  has length ≥ 2 AND `term.var_source` is set (i.e. the term has a
+  direct Var anchor — not wrapped in `Sum` / `Where` / `Lag` which
+  clear `var_source` to preserve safety), rebuild the LHS plan as
+  `row_index ⋈ pruned_var ⋈ pruned_param_1 ⋈ pruned_param_2 …` with
+  each factor pre-pruned via semi-join. Sum / Where / Lag wrapped
+  terms fall back to the original path.
+
+- `_lp_view.to_csr` row index construction: replaced a Python
+  `for c in range(n_cols): col_of[a_start[c]:a_start[c+1]] = c`
+  loop with `np.repeat(np.arange(n_cols), np.diff(a_start))`.
+  Output identical (verified in `test_lp_view.py`); about 100× faster
+  on a sparse 5 M-row LP.
+
+- `_build_canonical_matrix` variable loop: merged the two consecutive
+  loops over `self._vars.values()` (col bounds / integrality and
+  `col_names` construction) into a single pass. Each
+  `v.frame["col_id"].to_numpy()` materialises once instead of twice.
+
+- ~32 `.astype(np.int64)` / `.astype(np.float64)` call sites on
+  freshly-allocated numpy arrays (from `.to_numpy()`, `np.where`,
+  `np.repeat`, `np.tile`, `np.concatenate`) gained `copy=False`.
+  Affected: `_build_canonical_matrix` per-family scatter (`dim` and
+  `scalar` branches), global / family dedup, objective-term collect,
+  HiGHS bound translations in `_build_lp_arrays` / `_solve_streaming`
+  / `_initial_build`, RHS `np.where` row_lb/row_ub translations,
+  tracked-source scatter in `WarmProblem`, and `_lp_view.from_problem`
+  bound round-trip.
+
+### Fixed
+
+- Anonymous `Param` instances (no `name`, no `_sources`) were silently
+  dropped from `_merge_param_sources` output when participating in a
+  chain with named Params. The prune-down rebuild then walked only the
+  named atomics, missing the anonymous one's contribution. Fixed:
+  `_sources_for_propagation` now returns `[(self, +1)]` for anonymous
+  atomics so the chain rebuild walks every constituent.
+
+- Scalar folds (`Param * float`, `Var * float`, `Expr * float`,
+  `Expr.__neg__`, `Expr.__sub__`) collapsed constants into the
+  `value` / `coef` column without recording them in `_sources` /
+  `param_sources`. The prune-down rebuild had no way to see the
+  scalars and produced numerically-different LP coefficients (DES
+  scenario parity tests caught this as a ~2 % objective drift on
+  `test_fullYear_roll_matches_v3320_golden`). Fixed via the new
+  `Param._value_scalar` / `_Term.coef_scalar` slots; affected algebra
+  ops propagate the scalar through to the prune-down accumulator.
+
+### Performance
+
+- Canonicalise of FlexTool DES (RETO-Africa) on a 64 GB box:
+  - Before: stalled inside `profile_flow_upper_limit` RHS evaluation
+    after ~10 seconds, RSS climbing from 12.7 GB toward a peak of ~38 GB
+    that exceeded available memory in some configurations.
+  - After: all 9 constraint families canonicalise in 27 seconds total;
+    `_initial_build` exits at 49 seconds; peak RSS during the in-process
+    HiGHS solve path is 23.3 GB. With `--save-memory` (subprocess
+    HiGHS), peak is 15.2 GB.
+
+- Wall-time impact of the perf quick-wins (`copy=False`, vectorised
+  `to_csr`, merged var-loop): 5-15 % wall-time win on the
+  canonicalise + HiGHS-handoff portion of large LPs. Memory peak win
+  is small (5-10 %) — these are a separate stack from the prune-down
+  fix and apply per-cell rather than per-chain.
+
+### Notes
+
+- The fix is behaviour-preserving on every currently-tested scenario.
+  If a future model surfaces a numerical drift, set
+  `POLAR_HIGH_DISABLE_PRUNE_DOWN=1` as a workaround and report the
+  scenario so the engine can be fixed.
+- The LHS prune-down activates only on terms with a direct Var anchor
+  (not wrapped in `Sum` / `Where` / `Lag`). Sum-wrapped LHS chains
+  fall back to the merged-lazy path; this is intentional for safety.
+  See `specs/block_coo_evaluation_handoff.md` for the planned follow-on
+  that handles those cases via a different mechanism.
+- See `specs/where_pushdown_handoff.md` for the next architectural
+  step (push `Where(...)` filter keys through the lazy plan tree the
+  same way row_index keys are pushed today).
+
 ## [2.2.0] — 2026-05-28
 
 GLPK-style refactor of the Layer 2 scaling pipeline and the matrix
