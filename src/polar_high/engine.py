@@ -643,6 +643,336 @@ def _prune_down_disabled() -> bool:
     return os.environ.get("POLAR_HIGH_DISABLE_PRUNE_DOWN") == "1"
 
 
+def _block_coo_disabled() -> bool:
+    """Return True when ``POLAR_HIGH_DISABLE_BLOCK_COO=1``.
+
+    Mirror of :func:`_prune_down_disabled`.  When set, the block-COO LHS
+    evaluation arm (:func:`_block_coo_classify` /
+    :func:`_build_block_coo_plan` in
+    :meth:`Problem._build_canonical_matrix`) is skipped entirely and the
+    term falls through to the existing LHS prune-down / fallback paths
+    verbatim.  Block-COO is bit-identical to the polars path, so this
+    flag exists only as an escape hatch / parity-test lever, not because
+    the two paths can disagree numerically.
+    """
+    return os.environ.get("POLAR_HIGH_DISABLE_BLOCK_COO") == "1"
+
+
+def _block_coo_enabled() -> bool:
+    """Return True only when ``POLAR_HIGH_ENABLE_BLOCK_COO=1`` (default
+    off).
+
+    Block-COO defaults OFF.  The non-Sum arm wired here has no memory
+    advantage over the shipped LHS prune-down (no reduction → every factor
+    must reach grid resolution before the multiply) and it collects
+    eagerly, so it must NOT silently affect real solves until the valuable
+    Sum-reduction case (Phase C, deferred) lands.  Users opt in explicitly
+    with ``POLAR_HIGH_ENABLE_BLOCK_COO=1``; :func:`_block_coo_disabled`
+    (``POLAR_HIGH_DISABLE_BLOCK_COO=1``) remains a hard override for
+    forward-compat once the arm is on by default.  See
+    ``specs/block_coo_DECISIONS.md`` D3/D4.
+    """
+    return os.environ.get("POLAR_HIGH_ENABLE_BLOCK_COO") == "1"
+
+
+def _block_coo_min_dense() -> int:
+    """Dense-axis cardinality threshold for firing block-COO.
+
+    Read from ``POLAR_HIGH_BLOCK_COO_MIN_DENSE`` (env), fallback 100.
+    A malformed value falls back to 100 rather than raising — the gate
+    is a heuristic, not a correctness lever (correctness is guaranteed by
+    :func:`_block_coo_classify`'s conservative shape checks).
+    """
+    raw = os.environ.get("POLAR_HIGH_BLOCK_COO_MIN_DENSE")
+    if raw is None:
+        return 100
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 100
+    return v if v > 0 else 100
+
+
+def _block_coo_classify(
+    term: _Term,
+    axis_cols: list[str],
+    on: list[str],
+) -> dict | None:
+    """Classify whether a non-Sum ``Var × Param-chain`` LHS term is
+    block-COO evaluable.  Returns a small spec ``dict`` if it is, else
+    ``None`` (caller falls back to the existing path).
+
+    A term is block-evaluable iff ALL of:
+
+    * ``term.var_source is not None`` — guarantees a non-Sum / non-Lag /
+      non-map-Where term (those clear ``var_source``), so there is an
+      unreduced ``Var × P1 × P2 …`` chain to slice.
+    * ``term.param_sources`` is a non-empty list of ``(Param, dir)``.
+    * Every Param's dims are a subset of ``var.dims ∪ axis_cols`` — no
+      foreign dim that the block alignment can't account for.
+    * There is a non-empty "dense" dim set ``D`` = the dims present in
+      EVERY factor (the Var AND every Param), whose total cardinality is
+      ``>= _block_coo_min_dense()``.  Cardinality is estimated as the Var
+      frame height (an upper bound on the distinct dense-key count, since
+      the Var carries one row per ``(*var.dims)`` cell and ``D ⊆
+      var.dims``); this is the cheap correct option — an over-estimate
+      only risks firing block-COO on a term that is actually cheaper in
+      polars (a perf, never a correctness, concern).
+
+    Conservative by construction: any shape the block loop cannot
+    reproduce bit-identically must return ``None`` here.  False negatives
+    (fall back, slower) are fine; false positives are correctness bugs.
+    """
+    var = term.var_source
+    if var is None:
+        return None
+    psrc = term.param_sources
+    if not isinstance(psrc, list) or len(psrc) == 0:
+        return None
+
+    var_dims = list(var.dims)
+    var_dim_set = set(var_dims)
+    axis_set = set(axis_cols)
+    allowed = var_dim_set | axis_set
+
+    # Every Param must carry a (Param, direction) pair with a real Param.
+    for entry in psrc:
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            return None
+        atomic, direction = entry
+        if not isinstance(atomic, Param):
+            return None
+        if direction not in (1, -1):
+            # Only the +1 numerator / -1 denominator directions are
+            # reproduced by the block multiply loop.
+            return None
+        if not set(atomic.dims).issubset(allowed):
+            # Foreign dim — block alignment can't account for it.
+            return None
+
+    # The block-COO seed carries only the Var's dims; the final attach to
+    # row_index joins on ``on``.  If a join key in ``on`` came from a Param
+    # rather than the Var (e.g. ``Var(p,d) × Pa(d,t)`` where ``t ∈ on`` but
+    # ``t ∉ var.dims``), the seed would lack that column and the final join
+    # would mis-key.  The polars prune-down path widens its accumulator
+    # through the chain so it keeps such dims; block-COO does not, so we
+    # conservatively fall back when ``on`` is not a subset of ``var.dims``.
+    if not set(on).issubset(var_dim_set):
+        return None
+
+    # Dense set: dims present in EVERY factor (Var AND every Param).
+    dense = set(var_dims)
+    for atomic, _direction in psrc:
+        dense &= set(atomic.dims)
+    if not dense:
+        return None
+    # Canonical dense order = var-dim order restricted to dense set.
+    dense_dims = [d for d in var_dims if d in dense]
+    if not dense_dims:
+        return None
+
+    # Cardinality upper-bound = Var frame height (one row per var cell;
+    # dense ⊆ var.dims so distinct dense keys <= var height).
+    try:
+        dense_card = int(var.frame.height)
+    except Exception:
+        return None
+    if dense_card < _block_coo_min_dense():
+        return None
+
+    non_dense_dims = [d for d in var_dims if d not in dense]
+    return {
+        "var_dims": var_dims,
+        "dense_dims": dense_dims,
+        "non_dense_dims": non_dense_dims,
+        "dense_card": dense_card,
+        "on": list(on),
+    }
+
+
+def _build_block_coo_plan(
+    row_index_lf: pl.LazyFrame,
+    axis_cols: list[str],
+    var_source: Var,
+    param_sources: list[tuple[Param, int]],
+    on: list[str],
+    coef_scalar: float,
+    where_frames: tuple[pl.LazyFrame, ...] | None,
+    dense_spec: dict,
+) -> pl.DataFrame:
+    """Evaluate a non-Sum ``Var × Param-chain`` LHS term via block-COO.
+
+    Produces an eager :class:`polars.DataFrame` with columns
+    ``(_rid, col_id, coef)`` — identical in shape to
+    :func:`_build_lhs_pruned_plan`'s output, so the existing emission
+    code in :meth:`Problem._build_canonical_matrix` consumes it
+    unchanged.
+
+    Algorithm (mirrors :func:`_build_lhs_pruned_plan`'s leaf discipline —
+    per-leaf Enum alignment + row_index pre-prune — but does the final
+    coefficient multiply in numpy on contiguous, key-aligned value
+    buffers instead of carrying value columns through wide joins):
+
+    1. Bake ``where_frames`` onto the Var seed and pre-prune the Var
+       against ``row_index_lf``'s key set (semi-join), exactly as the
+       prune helper.  Then re-apply ``where_frames`` after the seed is
+       widened (no widening happens here — the seed keeps only var dims —
+       but the pre-prune narrows it).
+    2. Assemble ONE aligned accumulator by mirroring the polars
+       prune-down chain's join sequence EXACTLY: starting from the pruned
+       Var seed, **inner-join** each atomic Param's ``value`` (renamed
+       uniquely ``__bc_val_{i}``) onto the accumulator on the shared key
+       (after the same Enum-align + semi-join-narrow the prune helper
+       does).  The inner join means a SPARSE Param drops the unmatched
+       rows — identical to the polars chain — so this NEVER crashes on
+       missing/sparse coefficient data.  The surviving row set + order are
+       therefore identical to :func:`_build_lhs_pruned_plan`'s.
+    3. Read each ``__bc_val_{i}`` column into a contiguous numpy buffer
+       and multiply in the SAME left-to-right order as the chain rebuild
+       (seed ``coef_scalar``, then ``*value`` for direction ``>= 0`` /
+       ``/value`` for direction ``< 0``).  Same IEEE-double ops, same
+       order, same row set ⇒ bit-identical to the polars path.  Only the
+       final arithmetic moves from polars to numpy.
+    4. Final inner-join to ``row_index_lf`` on ``on`` (Enum-aligned) to
+       attach ``_rid``; return selecting ``_rid, col_id, coef``.
+
+    Step 3 is vectorised over the whole aligned frame (one ufunc per
+    factor) rather than looping Python over RLE blocks: because every
+    value column rode the same join chain, the i-th row of every buffer
+    refers to the same surviving cell, so a single elementwise
+    ``coef *= value`` reproduces the per-cell chain product exactly.
+    ``dense_spec`` records the block geometry for the profile emitter.
+
+    Crash-free by construction: there is no left-join + raise-on-null any
+    more.  A sparse Param simply contributes fewer surviving rows via its
+    inner join — precisely what the polars prune-down chain does — so a
+    missing coefficient is dropped, not fatal.
+    """
+    var_dims = list(var_source.dims)
+    var_on = [d for d in var_dims if d in axis_cols]
+
+    # --- Step 1: bake where_frames + pre-prune the Var seed.
+    var_lf = var_source.frame.lazy()
+    if where_frames is not None:
+        var_lf = _apply_where_frames(var_lf, var_dims, where_frames)
+    if var_on:
+        ri_keys = row_index_lf.select(var_on).unique()
+        var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
+        var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
+    # where_frames may share a dim that only enters via a Param; for a
+    # non-Sum chain every Param dim is a subset of var.dims ∪ axis_cols
+    # (classifier guarantee) and the seed already spans var.dims, so a
+    # second bake against var_dims is the complete set — mirror the
+    # prune helper's "re-apply after widening" defensively.
+    if where_frames is not None:
+        var_lf = _apply_where_frames(var_lf, var_dims, where_frames)
+
+    seed = var_lf.select(*var_dims, "col_id")
+
+    # --- Step 2: assemble ONE aligned frame by mirroring the polars
+    # prune-down chain's join sequence EXACTLY, then read the value
+    # columns into numpy.  The crucial parity property: the surviving row
+    # set (and the per-factor value carried on each row) must be identical
+    # to what ``_build_lhs_pruned_plan`` produces, so that the only thing
+    # that moves from polars to numpy is the final arithmetic.
+    #
+    # The prune helper's chain is, per atomic ``(atomic, direction)``:
+    #   * pre-prune the atomic by the accumulator's shared-key set (semi),
+    #   * **inner-join** the atomic onto the accumulator on the shared key,
+    #   * carry the Param's ``value``.
+    # An INNER join is what makes a SPARSE Param drop the unmatched seed
+    # rows (instead of crashing on a null).  We reproduce that here:
+    # rather than left-join + raise-on-null, we inner-join each Param's
+    # ``value`` (renamed uniquely as ``__bc_val_{i}``) onto a running
+    # accumulator.  The accumulator's row set therefore shrinks exactly as
+    # the polars chain's would, and never carries a null value column.
+    #
+    # We keep ``col_id`` on the accumulator throughout and never widen
+    # past var dims (every Param dim ⊆ var.dims ∪ axis_cols by the
+    # classifier guarantee, and the dense/shared dims that drive the join
+    # are all ⊆ var.dims), so the accumulator stays ``(*var_dims, col_id,
+    # __bc_val_0, …)``.
+    dense_dims = list(dense_spec["dense_dims"])
+    non_dense_dims = list(dense_spec["non_dense_dims"])
+    sort_keys = non_dense_dims + dense_dims
+
+    acc = seed
+    val_cols: list[str] = []
+    for i, (atomic, _direction) in enumerate(param_sources):
+        shared = [d for d in var_dims if d in atomic.dims]
+        val_col = f"__bc_val_{i}"
+        atomic_lf = atomic.lazy.rename({"value": val_col})
+        if shared:
+            # Pre-prune the atomic Param by the accumulator's key set
+            # (semi-join) then inner-join its value — mirror of the prune
+            # helper's per-atomic discipline, with the SAME inner-join
+            # drop semantics for sparse Params.
+            acc_a, atomic_a = _align_enum_join_keys(acc, atomic_lf, shared)
+            acc_keys = acc_a.select(shared).unique()
+            acc_keys_a, atomic_a2 = _align_enum_join_keys(
+                acc_keys, atomic_a, shared
+            )
+            atomic_pruned = atomic_a2.join(acc_keys_a, on=shared, how="semi")
+            acc_b, atomic_pruned_b = _align_enum_join_keys(
+                acc_a, atomic_pruned, shared
+            )
+            acc = acc_b.join(
+                atomic_pruned_b,
+                on=shared,
+                how="inner",
+                suffix="__bc_chain",
+            )
+        else:
+            # No shared dim — the chain cross-joins the Param.  This is
+            # bit-identical to a per-row broadcast of every Param value;
+            # the classifier admits only foreign-free Params, but a
+            # multi-row no-shared Param would cross-multiply the row set
+            # (exactly as the polars chain's cross-join would).  We mirror
+            # polars rather than special-casing: a cross-join carries the
+            # value onto every accumulator row.
+            acc = acc.join(atomic_lf, how="cross", suffix="__bc_chain")
+        val_cols.append(val_col)
+
+    # Canonical sort so the numpy multiply is deterministic and the
+    # surviving-row order is pinned (independent of polars's join order).
+    acc_sorted = acc.sort(sort_keys).collect()
+
+    n = acc_sorted.height
+    if n == 0:
+        # Nothing survived the chain (empty seed or a sparse Param dropped
+        # every row) — emit an empty (_rid, col_id, coef) frame matching
+        # the prune helper's output schema.
+        return pl.DataFrame(
+            {
+                "_rid": pl.Series("_rid", [], dtype=pl.Int64),
+                "col_id": pl.Series("col_id", [], dtype=pl.Int64),
+                "coef": pl.Series("coef", [], dtype=pl.Float64),
+            }
+        )
+
+    # --- Step 3: numpy multiply in chain order on the aligned buffers.
+    # Every value column lives on the SAME row as its ``col_id`` (they
+    # rode the same join chain), so the i-th row of every buffer refers to
+    # the same surviving cell — a single elementwise op per factor
+    # reproduces the per-cell chain product, in the SAME left-to-right
+    # order and with the SAME IEEE-double ops as the polars chain.
+    coef = np.full(n, float(coef_scalar), dtype=np.float64)
+    for (_atomic, direction), val_col in zip(param_sources, val_cols):
+        vals = acc_sorted[val_col].to_numpy().astype(np.float64, copy=False)
+        if direction >= 0:
+            coef = coef * vals
+        else:
+            coef = coef / vals
+
+    # --- Step 4: attach _rid via row_index inner-join on ``on``.
+    result = acc_sorted.select(*var_dims, "col_id").with_columns(
+        coef=pl.Series("coef", coef, dtype=pl.Float64)
+    )
+    ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
+    joined_ri = ri_a.join(res_a, on=on, how="inner")
+    return joined_ri.select("_rid", "col_id", "coef").collect()
+
+
 def _where_pushdown_disabled() -> bool:
     """Return True when ``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1``.
 
@@ -2258,7 +2588,59 @@ class Problem:
                         and len(_lhs_psrc) >= 2
                         and not _prune_down_disabled()
                     )
-                    if _use_lhs_prune:
+                    # Block-COO is a sibling arm for dense-axis non-Sum
+                    # Var×Param chains — it key-aligns factors and does the
+                    # final multiply in numpy on contiguous value buffers
+                    # while staying bit-identical (same factor order, same
+                    # row set, same IEEE-double ops).  It defaults OFF
+                    # (opt-in via POLAR_HIGH_ENABLE_BLOCK_COO=1): the
+                    # non-Sum arm is performance-neutral vs the shipped
+                    # prune-down (no reduction → all factors reach grid
+                    # resolution) and collects eagerly, so it must not
+                    # silently affect real solves before the valuable Phase
+                    # C Sum-reduction case lands (see DECISIONS D3/D4).
+                    # Conservatively gated by the classifier; any shape it
+                    # can't reproduce exactly returns None → fall through to
+                    # prune-down / fallback unchanged.  (Sites 2/3 —
+                    # streaming / warm — are left on the prune-down path; a
+                    # separate task wires them.)
+                    _block_spec = None
+                    if _block_coo_enabled() and not _block_coo_disabled():
+                        _block_spec = _block_coo_classify(term, axis_cols, on)
+                    _use_block_coo = _block_spec is not None
+                    if _use_block_coo:
+                        _t_blk0 = time.monotonic()
+                        # Block-COO collects eagerly inside the helper; wrap
+                        # the result lazy so the shared per-term collect loop
+                        # (_collect_one) consumes it like every other plan.
+                        plan = _build_block_coo_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                            term.coef_scalar,
+                            term.where_frames,
+                            _block_spec,
+                        )
+                        if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+                            _blk_wall = time.monotonic() - _t_blk0
+                            _n_rows = int(plan.height)
+                            _dense = _block_spec["dense_dims"]
+                            _nb = _block_spec["dense_card"]
+                            _avg = (_n_rows / _nb) if _nb else 0.0
+                            sys.stderr.write(
+                                f"[block_coo profile]\tphase=block_coo_term"
+                                f"\tfamily={cname}\tfamily_idx={_fam_idx}"
+                                f"\tterm_idx={_term_idx}"
+                                f"\tdense_dims={','.join(_dense)}"
+                                f"\tn_blocks={_nb}"
+                                f"\tavg_block_size={_avg:.2f}"
+                                f"\twall_s={_blk_wall:.4f}\n"
+                            )
+                            sys.stderr.flush()
+                        plan = plan.lazy()
+                    elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
                             axis_cols,
