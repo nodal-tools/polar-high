@@ -283,6 +283,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _block_coo_disabled,
         _build_block_coo_plan,
         _build_sum_block_coo_plan,
+        _emit_block_coo_path,
         _sum_block_coo_classify,
         _SumBlockCooFallback,
         _verify_dense_sorted,
@@ -428,6 +429,195 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         if _l2_cf is not None:
             vals = vals * np.abs(_l2_cf[col_id])
         return _reduce_abs(vals)
+
+    def _rhs_chain_bounded_coef(
+        over_grid, axis_cols_l: list[str], rhs_param, cname: str
+    ) -> np.ndarray | None:
+        """Bounded, no-Var positional product of the RHS Param chain over
+        the constraint's pre-sorted ``over`` grid (Phase D-2).
+
+        Returns the per-row ``rhs_coef`` numpy array (length
+        ``over.height``, one entry per constraint row ``_rid`` in the
+        grid's row order) WITHOUT materialising the full Param product —
+        or ``None`` to decline (caller falls through to the existing
+        merged-lazy / semi-join streaming path unchanged).
+
+        The RHS chain carries NO Var/col_id: the "spine" is ``over``
+        itself (already lexicographically sorted with the declared
+        ``dense_axes`` as the trailing keys — the same dense_axes contract
+        block-COO's LHS seed obeys).  We seed ``rhs_coef`` with
+        ``rhs._value_scalar`` (the composite's accumulated constant) and
+        multiply each ``(atomic, direction)`` in ``rhs._sources`` order,
+        aligning each atomic to the grid by the SAME broadcast cases the
+        block-COO LHS builder uses:
+
+        * **lead-only** (atomic dims ⊆ non-dense): one value per leading
+          block, ``np.repeat`` over the dense run;
+        * **dense-only** (atomic dims == dense_axes): one dense vector
+          shared by every block, ``np.tile`` across blocks;
+        * **lead+dense** (atomic spans both): positional ``maintain_order``
+          left-join on the atomic's full dim set (no re-sort).
+
+        The multiply order / op sequence (``*`` for ``direction >= 0``,
+        ``/`` for ``< 0``, seeded with ``_value_scalar``) reproduces the
+        canonical builder's RHS prune-down (``_build_canonical_matrix``)
+        IEEE-double-for-double, so the resulting ``rhs_coef`` per ``_rid``
+        is bit-identical to the value the streaming path would have
+        collected.  Returning ``None`` is always safe (false decline costs
+        memory, never correctness).
+        """
+        # --- Eligibility gates.  Anything outside the bit-identical
+        # positional regime declines.
+        if (
+            not dense_axes
+            or rhs_param.dims == ()
+            or _block_coo_disabled()
+        ):
+            return None
+        sources = (
+            rhs_param._sources
+            if isinstance(rhs_param._sources, list)
+            else None
+        )
+        if not sources:
+            return None
+        dense_dims = list(dense_axes)
+        # The over grid must END WITH the declared dense axes in order
+        # (the dense suffix contract); else positional slicing is invalid.
+        if len(dense_dims) > len(axis_cols_l):
+            return None
+        if tuple(axis_cols_l[-len(dense_dims):]) != tuple(dense_dims):
+            return None
+        non_dense_dims = [d for d in axis_cols_l if d not in set(dense_dims)]
+        # Every atomic's dims must be a subset of the over dims (so it
+        # aligns onto the grid; a dim outside ``over`` would broadcast in a
+        # way this positional builder cannot reproduce bit-identically).
+        for atomic, _direction in sources:
+            for d in atomic.dims:
+                if d not in axis_cols_l:
+                    return None
+
+        # --- Verify the dense-sort contract on the over grid (loud error
+        # on violation — same guard block-COO's LHS seed runs).
+        _verify_dense_sorted(
+            over_grid, non_dense_dims, dense_dims, cname
+        )
+
+        n = int(over_grid.height)
+        if n == 0:
+            return np.empty(0, dtype=np.float64)
+
+        # Completeness guard: the grid is dense-complete (every leading
+        # block holds the full, identically-ordered dense set) iff
+        # ``n == n_lead * n_dense``.  No deferred Where can carve an RHS
+        # chain (Params carry no where_frames), so the sort + this count is
+        # the full sufficient test — same reasoning as the LHS builder.
+        n_dense = (
+            over_grid.select(dense_dims).n_unique() if dense_dims else 1
+        )
+        n_lead = (
+            over_grid.select(non_dense_dims).n_unique()
+            if non_dense_dims
+            else 1
+        )
+        if n != n_lead * n_dense:
+            return None
+
+        coef = np.full(n, float(rhs_param._value_scalar), dtype=np.float64)
+        non_dense_set = set(non_dense_dims)
+        dense_set = set(dense_dims)
+
+        # Distinct lead-key table (one row per block, in grid block order).
+        # Sorted grid ⇒ unique(maintain_order) yields blocks in laid-out
+        # order — identical to the LHS builder's ``lead_table``.
+        lead_table = None
+        if non_dense_dims:
+            lead_table = over_grid.select(non_dense_dims).unique(
+                maintain_order=True
+            )
+            if lead_table.height != n_lead:
+                return None
+
+        for atomic, direction in sources:
+            # Shared dims in over-dim order == the atomic's dims, ordered
+            # (every atomic dim ⊆ over dims, verified above).
+            shared = [d for d in axis_cols_l if d in atomic.dims]
+            if not shared:
+                # Scalar atomic (no dim) — fold the constant directly.
+                f = atomic.frame
+                if "value" not in f.columns or f.height == 0:
+                    return None
+                scalar_val = float(f["value"][0])
+                if direction >= 0:
+                    coef = coef * scalar_val
+                else:
+                    coef = coef / scalar_val
+                continue
+
+            shared_set = set(shared)
+            has_lead = bool(shared_set & non_dense_set)
+            has_dense = bool(shared_set & dense_set)
+
+            if has_lead and not has_dense:
+                # lead-only: one value per leading block; repeat over dense.
+                lt_a, at_a = _align(lead_table.lazy(), atomic.lazy, shared)
+                aligned = lt_a.join(
+                    at_a, on=shared, how="left", maintain_order="left"
+                ).collect()
+                if (
+                    aligned.height != n_lead
+                    or aligned["value"].null_count() > 0
+                ):
+                    return None
+                block_vals = (
+                    aligned["value"].to_numpy().astype(np.float64, copy=False)
+                )
+                repeated = np.repeat(block_vals, n_dense)
+                if direction >= 0:
+                    coef = coef * repeated
+                else:
+                    coef = coef / repeated
+
+            elif has_dense and not has_lead and shared == dense_dims:
+                # dense-only: one dense vector shared by every block; tile.
+                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                if atomic_df.height != n_dense:
+                    return None
+                dense_vals = (
+                    atomic_df["value"]
+                    .to_numpy()
+                    .astype(np.float64, copy=False)
+                )
+                tiled = np.tile(dense_vals, n_lead)
+                if direction >= 0:
+                    coef = coef * tiled
+                else:
+                    coef = coef / tiled
+
+            elif has_dense:
+                # lead-subset + dense: positional maintain_order left-join
+                # on the full shared dims (no re-sort), read aligned values.
+                grid_a, at_a = _align(over_grid.lazy(), atomic.lazy, shared)
+                aligned = grid_a.join(
+                    at_a, on=shared, how="left", maintain_order="left"
+                ).collect()
+                if aligned.height != n or aligned["value"].null_count() > 0:
+                    return None
+                vals = (
+                    aligned["value"].to_numpy().astype(np.float64, copy=False)
+                )
+                if direction >= 0:
+                    coef = coef * vals
+                else:
+                    coef = coef / vals
+
+            else:
+                # Shared overlaps neither lead nor dense — impossible under
+                # the dim⊆over guard, but decline defensively.
+                return None
+
+        _emit_block_coo_path("rhs_positional")
+        return coef
 
     def _update_cost(lo: float | None, hi: float | None) -> None:
         nonlocal cost_lo, cost_hi
@@ -586,24 +776,60 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             if hi > rhs_hi:
                                 rhs_hi = hi
                 else:
-                    over_rid = over.with_columns(
-                        _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
+                    # ---- Bounded RHS Param-chain fast path (Phase D-2).
+                    # The dominant DES autoscale spike is THIS readout: the
+                    # multi-Param RHS chain (e.g. profile_flow_upper_limit's
+                    # ``profile · existing_count · availability``) gets
+                    # MATERIALISED by the merged-lazy left-join below because
+                    # the polars streaming engine can't push the row-key
+                    # semi-join into a 3+ Param product.  When the chain is
+                    # positionally alignable on the constraint's pre-sorted
+                    # dense-trailing ``over`` grid, build ``rhs_coef`` per
+                    # ``_rid`` via the no-Var bounded numpy product instead —
+                    # bit-identical to what the streaming collect would read,
+                    # so the reported magnitude is BYTE-IDENTICAL.  ``_rid`` is
+                    # exactly the grid's positional row index (0..n-1), so the
+                    # row-factor index is ``base_row + arange(n)`` — the same
+                    # ``_l2_rf[base_row + _rid]`` the streaming branch applies.
+                    # Anything not positionally alignable returns ``None`` and
+                    # drops through to the existing merged-lazy path unchanged.
+                    rhs_coef = _rhs_chain_bounded_coef(
+                        over, list(over.columns), rhs, cname
                     )
-                    ri_a, rf_a = _align(over_rid.lazy(), rhs.lazy, on)
-                    keys = ri_a.select(on).unique()
-                    rf_pruned = rf_a.join(keys, on=on, how="semi")
-                    plan = ri_a.join(rf_pruned, on=on, how="left").select("_rid", "value")
-                    j = _collect_streaming(plan)
-                    if j.height > 0:
-                        rids = j["_rid"].to_numpy().astype(np.int64)
-                        vals = j["value"].fill_null(0.0).to_numpy().astype(np.float64)
-                        vals = vals * np.abs(_l2_rf[base_row + rids])
-                        lo, hi = _reduce_abs(vals)
-                        if lo is not None:
-                            if lo < rhs_lo:
-                                rhs_lo = lo
-                            if hi > rhs_hi:
-                                rhs_hi = hi
+                    if rhs_coef is not None:
+                        if rhs_coef.size > 0:
+                            rids = np.arange(rhs_coef.size, dtype=np.int64)
+                            vals = rhs_coef * np.abs(_l2_rf[base_row + rids])
+                            lo, hi = _reduce_abs(vals)
+                            if lo is not None:
+                                if lo < rhs_lo:
+                                    rhs_lo = lo
+                                if hi > rhs_hi:
+                                    rhs_hi = hi
+                        if _profile:
+                            _emit(
+                                "rhs_bounded", family=cname,
+                                rhs_bound="1",
+                            )
+                    else:
+                        over_rid = over.with_columns(
+                            _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
+                        )
+                        ri_a, rf_a = _align(over_rid.lazy(), rhs.lazy, on)
+                        keys = ri_a.select(on).unique()
+                        rf_pruned = rf_a.join(keys, on=on, how="semi")
+                        plan = ri_a.join(rf_pruned, on=on, how="left").select("_rid", "value")
+                        j = _collect_streaming(plan)
+                        if j.height > 0:
+                            rids = j["_rid"].to_numpy().astype(np.int64)
+                            vals = j["value"].fill_null(0.0).to_numpy().astype(np.float64)
+                            vals = vals * np.abs(_l2_rf[base_row + rids])
+                            lo, hi = _reduce_abs(vals)
+                            if lo is not None:
+                                if lo < rhs_lo:
+                                    rhs_lo = lo
+                                if hi > rhs_hi:
+                                    rhs_hi = hi
             else:
                 # Dimless Param: a single scalar value broadcast across
                 # the family rows.  Apply row_factor slice same as the
