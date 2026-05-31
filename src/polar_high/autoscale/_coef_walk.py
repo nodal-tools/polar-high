@@ -82,6 +82,8 @@ from ..engine import (
     SumBlockMeta,
     Var,
     _align_enum_join_keys,
+    _apply_where_frames,
+    _apply_where_map_frames,
     _block_coo_classify,
     _block_coo_disabled,
     _build_block_coo_plan,
@@ -671,6 +673,49 @@ def _lhs_prune_down_collect(
     return plan.select("_rid", "col_id", "coef").collect()
 
 
+def _deferred_where_map_frames(
+    reduced: pl.LazyFrame,
+    reduced_dims: tuple[str, ...],
+    where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None,
+) -> tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None:
+    """Filter ``where_map_frames`` to the entries still DEFERRED on the
+    reduced lazy plan — the post-``Sum`` map-effect Wheres whose introduced
+    dim(s) the reduced plan does not yet physically carry.
+
+    ``recipe.where_map_frames`` (taken from the :class:`SumBlockMeta`)
+    carries BOTH:
+
+    * **pre-Sum** map frames — baked into the seed and then reduced by the
+      ``Sum``'s group_by, so their extras are already accounted for in
+      ``reduced`` (either surviving as a kept column, or summed out and no
+      longer claimed by ``reduced_dims``); re-applying their inner-join
+      would FAN OUT rows (a double-apply bug), and
+    * **post-Sum** map frames — recorded by a map-effect :func:`Where`
+      AFTER the ``Sum`` (the D1 forwarding path).  Their extras are claimed
+      by the term's ``dims`` (``reduced_dims``) but NOT yet physically in
+      ``reduced``'s schema; these are the ONLY ones the reduced plan must
+      still bake to reconstruct the block-COO path's coefficient support.
+
+    An entry is deferred iff it introduces at least one extra that is BOTH
+    claimed by ``reduced_dims`` AND absent from ``reduced``'s physical
+    schema.  A pre-Sum map whose extra survived sits in the schema; one
+    whose extra was summed out is not in ``reduced_dims`` — either way it is
+    correctly skipped, so no transform already baked into ``reduced`` is
+    re-applied.  Returns ``None`` when nothing is deferred (the common
+    case), so :func:`_apply_where_map_frames` is a no-op.
+    """
+    if where_map_frames is None:
+        return None
+    schema_cols = set(reduced.collect_schema().names())
+    rdim_set = set(reduced_dims)
+    deferred = tuple(
+        (mf, extras)
+        for (mf, extras) in where_map_frames
+        if any(c in rdim_set and c not in schema_cols for c in extras)
+    )
+    return deferred or None
+
+
 def _reduced_lazy_collect(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
@@ -679,14 +724,41 @@ def _reduced_lazy_collect(
     """Attach ``_rid`` to the term's OWN reduced lazy plan and collect
     ``(_rid, col_id, coef)`` for the batch.
 
-    Used as the Sum backstop when the Sum block-COO classifier declines:
-    the reduced coefficient (the post-Sum group_by result) is already
-    materialised in ``recipe.reduced_lazy`` (the term's ``.lazy``), so we
-    inner-join the batch ``row_index_lf`` on the kept axis dims to attach
-    ``_rid``, restricting the output (and the collect) to the batch's
-    rows.  Reduced groups are already complete in the reduced plan, so no
-    group is split across batches.  This is byte-identical to the engine's
-    "emit the reduced ``term.lazy`` verbatim" fallback.
+    Used as the Sum backstop when the Sum block-COO classifier declines or
+    raises :class:`_SumBlockCooFallback`: the reduced coefficient (the
+    post-``Sum`` group_by result) is materialised in
+    ``recipe.reduced_lazy`` (the term's ``.lazy``).  We inner-join the
+    batch ``row_index_lf`` on the kept axis dims to attach ``_rid``,
+    restricting the output (and the collect) to the batch's rows.  Reduced
+    groups are already complete in the reduced plan, so no group is split
+    across batches.
+
+    Deferred recipe transforms
+    --------------------------
+    ``reduced_lazy`` carries the coefficient values, but a map-effect
+    :func:`Where` applied AFTER the ``Sum`` (the D1 forwarding path) leaves
+    its introduced dim(s) DEFERRED in ``recipe.where_map_frames`` — they
+    are claimed by ``reduced_dims`` (so the ``_rid`` ``on``-key references
+    them) yet NOT physically present in ``reduced_lazy``.  We must
+    reconstruct the SAME coefficient support the block-COO path would, so
+    before the ``_rid`` join we:
+
+    * bake the deferred map-effect frames via :func:`_apply_where_map_frames`
+      (the SAME helper the block-COO Sum builders use — reused, not
+      reimplemented) to MATERIALISE the introduced dim(s); only the
+      genuinely-deferred frames are applied (see
+      :func:`_deferred_where_map_frames`) so a pre-``Sum`` map already baked
+      into ``reduced_lazy`` is never re-applied (which would fan rows out),
+      and
+    * apply ``where_frames`` via :func:`_apply_where_frames` (an
+      order-preserving, idempotent semi-join on the columns physically
+      present), so a pure-filter :func:`Where`-after-``Sum`` constrains the
+      same row set the block-COO path would.  Filters already reflected in
+      ``reduced_lazy`` semi-join to a no-op, so applying the full set is
+      safe.
+
+    With the deferred dims materialised this is byte-identical to the
+    block-COO Sum path's emission for the batch's rows.
     """
     reduced = recipe.reduced_lazy
     if reduced is None:
@@ -696,6 +768,17 @@ def _reduced_lazy_collect(
             "so the term's reduced lazy plan is captured."
         )
     rdims = recipe.reduced_dims or ()
+    # Apply the deferred pure-filter Wheres (idempotent semi-join on the
+    # columns currently present) BEFORE the map bake, mirroring the Sum
+    # builders' ``where_frames`` → ``where_map_frames`` order.
+    reduced = _apply_where_frames(reduced, rdims, recipe.where_frames)
+    # Bake ONLY the genuinely-deferred map-effect frames so the introduced
+    # dim(s) (e.g. ``n``) the ``_rid`` ``on``-key needs are materialised.
+    deferred_map = _deferred_where_map_frames(
+        reduced, rdims, recipe.where_map_frames
+    )
+    if deferred_map is not None:
+        reduced, _red_dims = _apply_where_map_frames(reduced, rdims, deferred_map)
     on = [d for d in rdims if d in axis_cols]
     ri_a, red_a = _align_enum_join_keys(row_index_lf, reduced, on)
     plan = ri_a.join(red_a, on=on, how="inner").select("_rid", "col_id", "coef")

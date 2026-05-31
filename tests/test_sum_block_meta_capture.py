@@ -19,6 +19,7 @@ import itertools
 
 import numpy as np
 import polars as pl
+import pytest
 
 from polar_high.engine import Param, Problem, Sum, SumBlockMeta, Where
 
@@ -159,6 +160,225 @@ def test_nested_sum_does_not_carry_stale_recipe():
     # the guard also blocks stale recipes if a future op preserved it).
     second = Sum(first, over=("x",))
     assert second.terms[0].sum_block_meta is None
+
+
+# ---------------------------------------------------------------------------
+# D1: the recipe is now FORWARDED through post-Sum Expr-algebra ops.
+
+
+def _sum_relabel():
+    """A block-eligible ``Sum(v * P_unit * P_step, over=('p','s'))`` whose
+    surviving open dims are ``(d, t)`` — the plain relabel shape (no map
+    effect).  Returns ``(sum_expr, v, P_unit, P_step)``."""
+    ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11], [100, 101, 102]
+    rows = list(itertools.product(ps, ss, ds, ts))
+    prob = Problem()
+    var_index = pl.DataFrame(
+        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
+         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+    )
+    v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 3.0]}),
+                   name="P_unit")
+    dt = list(itertools.product(ds, ts))
+    P_step = Param(("d", "t"), pl.DataFrame(
+        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
+         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    sum_expr = Sum(v * P_unit * P_step, over=("p", "s"))
+    assert sum_expr.terms[0].sum_block_meta is not None
+    return sum_expr, v, P_unit, P_step
+
+
+def test_neg_sum_carries_meta():
+    """``-Sum(v*P, over=...)`` must carry the recipe with ``coef_scalar``
+    negated and ``reduce_dims`` / ``keep`` unchanged."""
+    sum_expr, v, P_unit, P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+
+    neg = (-sum_expr).terms[0]
+    meta = neg.sum_block_meta
+    assert isinstance(meta, SumBlockMeta), "-Sum must FORWARD the recipe"
+    assert meta.coef_scalar == -base.coef_scalar
+    assert meta.reduce_dims == base.reduce_dims == ("p", "s")
+    assert meta.keep == base.keep
+    assert meta.var_source is v
+    # Param chain unchanged by a bare negation.
+    assert [p for (p, _d) in meta.param_sources] == [
+        p for (p, _d) in base.param_sources
+    ]
+
+
+def test_scalar_mul_sum_carries_meta():
+    """``Sum(...) * 3.0`` must carry the recipe with ``coef_scalar`` ×3."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+
+    scaled = (sum_expr * 3.0).terms[0]
+    meta = scaled.sum_block_meta
+    assert isinstance(meta, SumBlockMeta)
+    assert meta.coef_scalar == base.coef_scalar * 3.0
+    assert meta.reduce_dims == base.reduce_dims
+    assert meta.keep == base.keep
+
+    # And the same through scalar division.
+    halved = (sum_expr / 2.0).terms[0]
+    assert halved.sum_block_meta is not None
+    assert halved.sum_block_meta.coef_scalar == base.coef_scalar / 2.0
+
+
+def test_sub_sum_carries_meta_negated():
+    """``other_expr - Sum(...)`` negates the subtracted side's recipe
+    ``coef_scalar``; the self side is untouched.  This is the headline
+    ``-Sum(...)`` production constraint shape."""
+    sum_expr, v, _P_unit, _P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+
+    # A bare-Var Expr on the self side, minus the Sum term (the subtracted,
+    # negated side carries the recipe).
+    other = v.to_expr()
+    diff = other - sum_expr
+    metas = [t.sum_block_meta for t in diff.terms if t.sum_block_meta is not None]
+    assert len(metas) == 1, "only the subtracted Sum term carries a recipe"
+    assert metas[0].coef_scalar == -base.coef_scalar
+    assert metas[0].keep == base.keep
+    assert metas[0].reduce_dims == base.reduce_dims
+    # The self-side bare-Var term is untouched (no recipe, positive coef).
+    self_terms = [t for t in diff.terms if t.sum_block_meta is None]
+    assert len(self_terms) == 1
+    assert self_terms[0].coef_scalar == 1.0
+
+
+def test_param_mul_after_sum_existing_dim_carries():
+    """Post-Sum ``* P`` where ``P.dims ⊆ keep`` (and disjoint from
+    ``reduce_dims``) carries the recipe with the Param appended to
+    ``param_sources`` and its constant folded into ``coef_scalar``."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+    assert base.keep == ("d", "t")
+
+    dt = list(itertools.product([10, 11], [100, 101, 102]))
+    # P_extra keyed on (d, t) — subset of keep, disjoint from reduce_dims.
+    P_extra = Param(("d", "t"), pl.DataFrame(
+        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
+         "value": np.linspace(1.0, 2.0, len(dt))}), name="P_extra")
+
+    out = (sum_expr * P_extra).terms[0]
+    meta = out.sum_block_meta
+    assert isinstance(meta, SumBlockMeta), "SAFE post-Sum Param mul must carry"
+    captured = [p for (p, _d) in meta.param_sources]
+    assert P_extra in captured, "the multiplied Param must be appended"
+    assert len(meta.param_sources) == len(base.param_sources) + 1
+    # Direction +1 for multiply.
+    assert meta.param_sources[-1] == (P_extra, 1)
+    assert meta.keep == base.keep and meta.reduce_dims == base.reduce_dims
+
+
+def test_param_div_after_sum_existing_dim_carries_negated_dir():
+    """Post-Sum ``/ P`` (SAFE) appends the Param with direction -1."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+    dt = list(itertools.product([10, 11], [100, 101, 102]))
+    P_extra = Param(("d", "t"), pl.DataFrame(
+        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
+         "value": np.linspace(1.0, 2.0, len(dt))}), name="P_extra")
+
+    out = (sum_expr / P_extra).terms[0]
+    meta = out.sum_block_meta
+    assert isinstance(meta, SumBlockMeta)
+    assert meta.param_sources[-1] == (P_extra, -1)
+    assert len(meta.param_sources) == len(base.param_sources) + 1
+
+
+def test_param_mul_after_sum_new_dim_declines():
+    """Post-Sum ``* P`` where ``P`` introduces a dim NOT in ``keep`` must
+    DECLINE: ``sum_block_meta is None`` AND a loud marker is emitted."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    # P_new keyed on a brand-new dim 'z' (absent from keep=(d,t)).
+    P_new = Param(("z",), pl.DataFrame({"z": [0, 1], "value": [4.0, 5.0]}),
+                  name="P_new")
+
+    with pytest.warns(UserWarning, match=r"sum-block-meta DECLINE"):
+        out = (sum_expr * P_new).terms[0]
+    assert out.sum_block_meta is None, "introducing a new dim must DECLINE"
+
+
+def test_param_mul_after_sum_reintroduces_summed_dim_declines():
+    """Post-Sum ``* P`` whose dim re-introduces a SUMMED dim
+    (``∩ reduce_dims``) must DECLINE."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    # 'p' is in reduce_dims=(p,s) — re-introducing it must decline.
+    P_p = Param(("p",), pl.DataFrame({"p": [0, 1], "value": [7.0, 9.0]}),
+                name="P_p")
+    with pytest.warns(UserWarning, match=r"sum-block-meta DECLINE"):
+        out = (sum_expr * P_p).terms[0]
+    assert out.sum_block_meta is None
+
+
+def test_where_pure_after_sum_carries_meta():
+    """A pure-filter ``Where`` after a Sum carries the recipe with the
+    filter recorded into the recipe's ``where_frames`` (no dim change)."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+    base_wf = len(base.where_frames or ())
+
+    # Pure filter on a kept dim (d) — shared, no extras.
+    filt = pl.DataFrame({"d": [10]})
+    out = Where(sum_expr, filt).terms[0]
+    meta = out.sum_block_meta
+    assert isinstance(meta, SumBlockMeta), "pure-filter Where must carry"
+    assert meta.keep == base.keep and meta.reduce_dims == base.reduce_dims
+    assert len(meta.where_frames or ()) == base_wf + 1
+
+
+def test_where_map_after_sum_carries_meta():
+    """A map-effect ``Where`` after a Sum carries the recipe with the
+    map frame recorded and ``keep`` grown by the introduced dim."""
+    sum_expr, _v, _P_unit, _P_step = _sum_relabel()
+    base = sum_expr.terms[0].sum_block_meta
+    assert base.keep == ("d", "t")
+    base_wmf = len(base.where_map_frames or ())
+
+    # Map frame (d) -> e introduces a new open dim 'e'.
+    map_de = pl.DataFrame({"d": [10, 11], "e": ["e0", "e1"]})
+    out = Where(sum_expr, map_de).terms[0]
+    meta = out.sum_block_meta
+    assert isinstance(meta, SumBlockMeta), "map-effect Where must carry"
+    assert "e" in meta.keep, "keep must grow by the introduced dim"
+    assert set(meta.keep) == {"d", "t", "e"}
+    assert len(meta.where_map_frames or ()) == base_wmf + 1
+    # Frame entry shape matches the (LazyFrame, frozenset) classifier
+    # contract.
+    last_frame, last_extras = meta.where_map_frames[-1]
+    assert isinstance(last_extras, frozenset)
+    assert last_extras == frozenset({"e"})
+    assert meta.reduce_dims == base.reduce_dims
+
+
+def test_double_sum_collapse_all_forwards_meta():
+    """``Sum(Sum(v*P, over=(...all...)), over=None)`` — the outer collapse-
+    all over an already-collapsed term forwards the recipe verbatim."""
+    ps, ds, ts = [0, 1], [10, 11], [100, 101]
+    rows = list(itertools.product(ps, ds, ts))
+    prob = Problem()
+    var_index = pl.DataFrame(
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
+         "t": [r[2] for r in rows]}
+    )
+    v = prob.add_var("v", ("p", "d", "t"), var_index, lower=0.0, upper=1e6)
+    P = Param(("p", "d", "t"), pl.DataFrame(
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
+         "t": [r[2] for r in rows], "value": np.linspace(0.1, 1.0, len(rows))}),
+        name="P")
+    # Inner Sum collapses EVERY open dim -> scalar term (dims == ()).
+    inner = Sum(v * P, over=("p", "d", "t"))
+    assert inner.terms[0].dims == ()
+    assert inner.terms[0].sum_block_meta is not None
+    # Outer collapse-all over an already-collapsed term.
+    outer = Sum(inner, over=None)
+    out_term = outer.terms[0]
+    assert out_term.dims == ()
+    assert out_term.sum_block_meta is not None, "collapse-all must FORWARD"
+    assert out_term.sum_block_meta.keep == ()
 
 
 def _matrix_arrays(m):

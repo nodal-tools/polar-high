@@ -29,7 +29,7 @@ import os
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import highspy
 import numpy as np
@@ -2141,6 +2141,77 @@ class SumBlockMeta:
     keep: tuple[str, ...]
 
 
+def _forward_sum_block_meta_param_mul(
+    meta: SumBlockMeta,
+    q: Param,
+    *,
+    flip: bool,
+) -> SumBlockMeta | None:
+    """D1: forward a ``SumBlockMeta`` recipe through a post-Sum
+    ``Expr * Param`` (``flip=False``) or ``Expr / Param`` (``flip=True``).
+
+    The captured recipe rebuilds the pre-Sum ``Var × P1 × P2 …`` chain on
+    the Var grid and reduces it in-block, so a Param multiplied AFTER the
+    Sum can only ride along when its rows align with the rows the recipe
+    already produces — i.e. its dims sit inside the surviving ``keep`` set
+    and do NOT touch a summed-out ``reduce_dims`` (which would re-introduce
+    a collapsed axis the recipe can no longer broadcast over).
+
+    SAFE — ``set(q.dims) ⊆ set(meta.keep)`` AND
+    ``set(q.dims) ∩ set(meta.reduce_dims) == ∅``: append ``q``'s atomic
+    ``(Param, direction)`` constituents to ``param_sources`` (flipping
+    direction for division, mirroring :func:`_merge_param_sources`) and
+    fold ``q``'s folded constant ``_value_scalar`` into ``coef_scalar``
+    exactly as the live Param arm folds it into ``_Term.coef_scalar``.
+    Returns the forwarded recipe.
+
+    DECLINE (option b) — ``q`` introduces a new dim (``⊄ keep``) or
+    re-introduces a summed dim (``∩ reduce_dims``): the recipe cannot be
+    reconstructed bit-equivalently, so return ``None`` (the term takes the
+    bounded fallback) AND emit a loud, always-on marker naming the
+    offending shape for a future "option a" dim-extending builder.
+    """
+    q_dims = set(q.dims)
+    keep_set = set(meta.keep)
+    reduce_set = set(meta.reduce_dims)
+    if q_dims.issubset(keep_set) and not (q_dims & reduce_set):
+        psrc_other = q._sources_for_propagation()
+        merged = _merge_param_sources(
+            list(meta.param_sources), psrc_other, flip_other=flip
+        )
+        new_scalar = (
+            meta.coef_scalar / q._value_scalar
+            if flip
+            else meta.coef_scalar * q._value_scalar
+        )
+        return replace(
+            meta,
+            param_sources=tuple(merged) if merged is not None else (),
+            coef_scalar=new_scalar,
+        )
+    # DECLINE — emit the always-on marker, then drop the recipe.
+    import warnings
+
+    op = "Expr / Param" if flip else "Expr * Param"
+    new_dims = sorted(q_dims - keep_set)
+    reintroduced = sorted(q_dims & reduce_set)
+    qname = q.name if q.name is not None else "<anonymous>"
+    warnings.warn(
+        "[sum-block-meta DECLINE] post-Sum "
+        f"{op} drops the block-COO reconstruction recipe: Param "
+        f"{qname!r} dims={tuple(q.dims)!r} "
+        f"introduces new dim(s)={new_dims!r} (not in keep) "
+        f"and/or re-introduces summed dim(s)={reintroduced!r} "
+        f"(in reduce_dims); term keep={meta.keep!r} "
+        f"reduce_dims={meta.reduce_dims!r}. The term reverts to the "
+        "bounded fallback. To carry it, extend the block builder with a "
+        "dim-extending branch (\"option a\") for this Param shape.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return None
+
+
 class _Term:
     """One additive term inside an Expr.
 
@@ -2302,19 +2373,15 @@ class Expr:
         return Expr(self.terms + _to_expr(other).terms)
 
     def __sub__(self, other):
-        neg = [
-            _Term(
-                t.lazy.with_columns(coef=-pl.col("coef")),
-                t.dims,
-                param_sources=t.param_sources,
-                var_source=t.var_source,
-                coef_scalar=-t.coef_scalar,
-                where_frames=t.where_frames,
-                where_map_frames=t.where_map_frames,
-            )
-            for t in _to_expr(other).terms
-        ]
-        return Expr(self.terms + neg)
+        # D1: route through ``self + (-other)`` so the subtracted operand's
+        # terms inherit the scalar-``__mul__`` (×-1) recipe forwarding —
+        # negating ``coef`` AND ``coef_scalar`` AND the recipe's
+        # ``coef_scalar`` — instead of rebuilding the terms here and
+        # dropping ``sum_block_meta``.  ``__add__`` concatenates verbatim,
+        # so the ``self`` side is untouched.  Behaviourally identical to the
+        # prior open-coded negate (``coef``/``coef_scalar`` negated, every
+        # other field preserved).
+        return self + (-_to_expr(other))
 
     def __radd__(self, other):
         return _to_expr(other) + self
@@ -2327,16 +2394,30 @@ class Expr:
 
     def __mul__(self, scalar):
         if isinstance(scalar, (int, float)):
+            s = float(scalar)
             return Expr(
                 [
                     _Term(
-                        t.lazy.with_columns(coef=pl.col("coef") * float(scalar)),
+                        t.lazy.with_columns(coef=pl.col("coef") * s),
                         t.dims,
                         param_sources=t.param_sources,
                         var_source=t.var_source,
-                        coef_scalar=t.coef_scalar * float(scalar),
+                        coef_scalar=t.coef_scalar * s,
                         where_frames=t.where_frames,
                         where_map_frames=t.where_map_frames,
+                        # D1: a constant scalar folds into the recipe's
+                        # ``coef_scalar`` exactly as it folds into
+                        # ``_Term.coef_scalar`` (the walk seeds
+                        # ``coef = coef_scalar``), so the rebuilt chain stays
+                        # byte-identical — forward the recipe.
+                        sum_block_meta=(
+                            replace(
+                                t.sum_block_meta,
+                                coef_scalar=t.sum_block_meta.coef_scalar * s,
+                            )
+                            if t.sum_block_meta is not None
+                            else None
+                        ),
                     )
                     for t in self.terms
                 ]
@@ -2366,11 +2447,23 @@ class Expr:
                     *select_cols, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
+                # D1: forward the block-COO reconstruction recipe through
+                # the post-Sum Param multiply when ``scalar`` rides existing
+                # kept rows (SAFE); else DECLINE (drop the recipe + emit the
+                # loud marker).
+                fwd_meta = (
+                    _forward_sum_block_meta_param_mul(
+                        t.sum_block_meta, scalar, flip=False
+                    )
+                    if t.sum_block_meta is not None
+                    else None
+                )
                 new.append(
                     _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
                           coef_scalar=t.coef_scalar * scalar._value_scalar,
                           where_frames=t.where_frames,
-                          where_map_frames=out_where_map_frames)
+                          where_map_frames=out_where_map_frames,
+                          sum_block_meta=fwd_meta)
                 )
             return Expr(new)
         return NotImplemented
@@ -2401,11 +2494,21 @@ class Expr:
                     *select_cols, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
+                # D1: forward the block-COO recipe through the post-Sum
+                # Param divide (direction flipped) when SAFE; else DECLINE.
+                fwd_meta = (
+                    _forward_sum_block_meta_param_mul(
+                        t.sum_block_meta, other, flip=True
+                    )
+                    if t.sum_block_meta is not None
+                    else None
+                )
                 new.append(
                     _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
                           coef_scalar=t.coef_scalar / other._value_scalar,
                           where_frames=t.where_frames,
-                          where_map_frames=out_where_map_frames)
+                          where_map_frames=out_where_map_frames,
+                          sum_block_meta=fwd_meta)
                 )
             return Expr(new)
         return NotImplemented
@@ -2682,6 +2785,21 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
             # first iff their dims overlap any pending extras (see
             # :func:`_bake_map_before_mul`).
             prev_map = t.where_map_frames or ()
+            # D1: forward the block-COO recipe through a post-Sum map-effect
+            # Where (the nodeBalance ``n``-introduction is supported).
+            # Record the same ``(frame_lf, frozenset(extras))`` the
+            # classifier consumes and grow ``keep`` by the extras so the
+            # rebuilt open-dim set still partitions into keep ∪ reduce_dims.
+            fwd_meta = None
+            if t.sum_block_meta is not None:
+                m = t.sum_block_meta
+                fwd_meta = replace(
+                    m,
+                    where_map_frames=(m.where_map_frames or ())
+                    + ((frame_lf, frozenset(extra)),),
+                    keep=tuple(m.keep)
+                    + tuple(d for d in extra if d not in m.keep),
+                )
             new.append(
                 _Term(
                     t.lazy,
@@ -2691,6 +2809,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                     coef_scalar=t.coef_scalar,
                     where_frames=t.where_frames,
                     where_map_frames=prev_map + ((frame_lf, frozenset(extra)),),
+                    sum_block_meta=fwd_meta,
                 )
             )
             continue
@@ -2700,6 +2819,8 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
         # frame into ``where_frames`` so prune-down / fallback can apply
         # it leaf-level.
         if not shared:
+            # D1: no-op filter for this term's row set — forward the recipe
+            # verbatim (the term itself is passed through unchanged).
             new.append(
                 _Term(
                     t.lazy,
@@ -2709,10 +2830,20 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                     coef_scalar=t.coef_scalar,
                     where_frames=t.where_frames,
                     where_map_frames=t.where_map_frames,
+                    sum_block_meta=t.sum_block_meta,
                 )
             )
             continue
         prev = t.where_frames or ()
+        # D1: forward the block-COO recipe through a post-Sum pure-filter
+        # Where, recording the filter into the recipe's ``where_frames`` so
+        # the in-block rebuild applies it leaf-level (no dim change).
+        fwd_meta = None
+        if t.sum_block_meta is not None:
+            m = t.sum_block_meta
+            fwd_meta = replace(
+                m, where_frames=(m.where_frames or ()) + (frame_lf,)
+            )
         new.append(
             _Term(
                 t.lazy,
@@ -2722,6 +2853,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                 coef_scalar=t.coef_scalar,
                 where_frames=prev + (frame_lf,),
                 where_map_frames=t.where_map_frames,
+                sum_block_meta=fwd_meta,
             )
         )
     return Expr(new)
@@ -2830,7 +2962,18 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
             )
         else:
             f = f.group_by("col_id").agg(pl.col("coef").sum())
-        new_terms.append(_Term(f, keep, param_sources=psrc, sum_block_meta=block_meta))
+        # D1: collapse-all preserve.  When the resolved ``over`` is EMPTY
+        # this Sum is a no-op relabel over an already-collapsed term (e.g.
+        # ``set_objective``'s outer ``Sum(expr, over=None)`` over already-
+        # scalar objective terms) — forward the incoming recipe verbatim
+        # instead of dropping it.  A re-reducing outer Sum (non-empty
+        # ``over``) over a meta-bearing term still drops the recipe: the
+        # capture guard above blocks re-capture, and this forward clause is
+        # gated on ``not over`` so it fires ONLY for the no-op collapse.
+        out_meta = block_meta if block_meta is not None else (
+            t.sum_block_meta if not over else None
+        )
+        new_terms.append(_Term(f, keep, param_sources=psrc, sum_block_meta=out_meta))
     return Expr(new_terms)
 
 

@@ -123,6 +123,27 @@ def _ref_minmax_column(term, scale) -> tuple[float | None, float | None]:
     return _reduce_abs(_scale_vals(rids, cids, coef, scale))
 
 
+def _ref_histogram_column(term, scale, classify):
+    """Whole-collect log2 histogram over a column-spine (objective) term —
+    the reference for the column-mode :class:`Log2HistogramReducer`."""
+    df = term.frame.lazy().select("col_id", "coef").collect()
+    cids = df["col_id"].to_numpy().astype(np.int64)
+    coef = df["coef"].to_numpy().astype(np.float64)
+    rids = np.full(cids.size, -1, dtype=np.int64)
+    vals = np.abs(_scale_vals(rids, cids, coef, scale))
+    acc: dict = {}
+    for v, c in zip(vals.tolist(), cids.tolist()):
+        if not math.isfinite(v) or v <= 0:
+            continue
+        bkey = classify(int(c))
+        if bkey is None:
+            continue
+        lv = math.log2(v)
+        ps, pn, pmin, pmax = acc.get(bkey, (0.0, 0, math.inf, 0.0))
+        acc[bkey] = (ps + lv, pn + 1, min(pmin, v), max(pmax, v))
+    return acc
+
+
 def _ref_histogram_constraint(term, over, scale, classify):
     """Whole-collect log2 histogram (sum_log2, count, min, max) per bucket
     key, over the full chain — the reference for Log2HistogramReducer."""
@@ -742,3 +763,318 @@ def test_memory_bounded_by_batch():
         f"small-batch peak {peak_small} not bounded below whole-batch "
         f"peak {peak_whole} (n={n})"
     )
+
+
+# ---------------------------------------------------------------------------
+# D1: post-Sum Expr-algebra now FORWARDS the recipe, so these shapes route
+# to the WALK (recipe present) instead of the collect fallback.
+
+
+def _build_neg_sum_relabel():
+    """A ``-Sum(v * P_unit * P_step, over=('p','s'))`` LHS — the headline
+    ``-Sum(...)`` production constraint shape.  Before D1 the negation
+    dropped the recipe; now it rides through with ``coef_scalar`` negated."""
+    prob = Problem(dense_axes=("d", "t"))
+    ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11], [100, 101, 102]
+    rows = list(itertools.product(ps, ss, ds, ts))
+    var_index = pl.DataFrame(
+        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
+         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+    )
+    v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}),
+                   name="P_unit")
+    dt = list(itertools.product(ds, ts))
+    P_step = Param(("d", "t"), pl.DataFrame(
+        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
+         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    nb = -Sum(v * P_unit * P_step, over=("p", "s"))
+    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(
+        ["d", "t"]
+    )
+    prob.add_cstr("nb", over=nb_over, sense="<=",
+                  lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
+    return prob, nb_over
+
+
+def test_neg_sum_relabel_parity():
+    prob, over = _build_neg_sum_relabel()
+    term = prob._cstrs[0][1].expr.terms[0]
+    rf, cf = _side_vectors(over.height, prob._next_col)
+    scale = (rf, 0, cf)
+    recipe = CoefWalkRecipe.from_term(term)
+    # D1: the negated Sum routes to the WALK (recipe present), not collect.
+    assert recipe.sum_block_meta is not None
+    assert recipe.var_source is not None
+    ref = _ref_minmax_constraint(term, over, scale)
+    for bs in BATCH_SIZES:
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def test_double_sum_objective_parity():
+    """``Sum(Sum(v * P, over=(...)), over=None)`` — the objective collapse-
+    all shape ``set_objective`` builds.  The outer no-op collapse forwards
+    the recipe, so the column-mode walk routes to the WALK; assert log2
+    histogram parity to the whole-collect reference."""
+    prob = Problem(dense_axes=("d", "t"))
+    ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101]
+    cells = list(itertools.product(ps, ds, ts))
+    idx = pl.DataFrame(
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
+         "t": [c[2] for c in cells]}
+    )
+    v = prob.add_var("v", ("p", "d", "t"), idx, lower=0.0, upper=1e6)
+    Pcost = Param(("p", "d", "t"), pl.DataFrame(
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
+         "t": [c[2] for c in cells],
+         "value": np.linspace(1e-3, 1e2, len(cells))}), name="Pcost")
+    # Inner Sum collapses every Var dim -> a scalar (dims == ()) objective
+    # term; the outer Sum(over=None) is the no-op collapse-all relabel.
+    inner = Sum(v * Pcost, over=("p", "d", "t"))
+    assert inner.terms[0].dims == ()
+    obj = Sum(inner, over=None)
+    term = obj.terms[0]
+    assert term.dims == ()
+    # D1: collapse-all forwarded the recipe -> column-mode walk path.
+    recipe = CoefWalkRecipe.from_term(term)
+    assert recipe.sum_block_meta is not None
+    assert recipe.var_source is not None
+
+    # Column spine = the Var grid (one row per col_id).
+    spine = v.frame
+    n_cols = prob._next_col
+    _, cf = _side_vectors(0, n_cols)
+    scale = (None, 0, cf)  # objective: col factor only
+
+    def classify(cid):
+        return "even" if cid % 2 == 0 else "odd"
+
+    ref = _ref_histogram_column(term, scale, classify)
+    # The walk routes the forwarded recipe through the in-block rebuild,
+    # whose summation order differs from the whole-collect reference — so
+    # count / min / max are EXACT and the log2 sum matches within FP
+    # reassociation tolerance (mirrors test_vpp_histogram_batched_fp_tol).
+    (got,) = bounded_coefficient_walk(
+        spine, recipe, scale, [Log2HistogramReducer(scale, classify)],
+        batch_rows=spine.height, dense_axes=("d", "t"),
+    )
+    assert set(got) == set(ref)
+    for k in ref:
+        rs, rn, rmin, rmax = ref[k]
+        gs, gn, gmin, gmax = got[k]
+        assert gn == rn
+        assert gmin == rmin and gmax == rmax
+        assert gs == pytest.approx(rs, rel=1e-12, abs=1e-9)
+
+
+def test_where_after_sum_parity():
+    """``Where(Sum(v * P_unit * P_step, over=('p','s')), filter)`` — a
+    pure-filter Where AFTER a Sum forwards the recipe with the filter
+    recorded into ``where_frames``; the walk must match the whole-collect
+    reference byte-for-byte across every batch size and route to the WALK
+    (recipe present), not the collect fallback."""
+    prob = Problem(dense_axes=("d", "t"))
+    ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11, 12], [100, 101, 102]
+    rows = list(itertools.product(ps, ss, ds, ts))
+    var_index = pl.DataFrame(
+        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
+         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+    )
+    v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}),
+                   name="P_unit")
+    dt = list(itertools.product(ds, ts))
+    P_step = Param(("d", "t"), pl.DataFrame(
+        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
+         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    nb = Sum(v * P_unit * P_step, over=("p", "s"))
+    # Pure-filter Where AFTER the Sum: keep only d in {10, 11} (shared dim,
+    # no map extras) — recorded into the recipe's ``where_frames``.
+    filt = pl.DataFrame({"d": [10, 11]})
+    nbw = Where(nb, filt)
+    term = nbw.terms[0]
+    # D1: the pure-filter Where forwarded the recipe with the filter
+    # recorded into the recipe's ``where_frames``.
+    assert term.sum_block_meta is not None
+    assert len(term.sum_block_meta.where_frames or ()) == 1
+
+    over = term.frame.select(list(term.dims)).unique().sort(["d", "t"])
+    rf, cf = _side_vectors(over.height, prob._next_col)
+    scale = (rf, 0, cf)
+    recipe = CoefWalkRecipe.from_term(term)
+    # D1: the Where-after-Sum term routes to the WALK (recipe present).
+    assert recipe.sum_block_meta is not None
+    assert recipe.var_source is not None
+    ref = _ref_minmax_constraint(term, over, scale)
+    for bs in BATCH_SIZES:
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def _build_map_where_after_sum():
+    """``Where(Sum(v * P_unit * P_step, over=('s',)), p_to_n)`` — a
+    MAP-EFFECT Where applied AFTER a Sum.  The Sum keeps ``(p, d, t)``; the
+    post-Sum Where maps the kept dim ``p`` to a NEW node dim ``n`` (the
+    ``nodeBalance`` ``(source,sink)→n`` shape, but with the map introduced
+    after the reduction — the D1 forwarding path).
+
+    The map's introduced dim ``n`` is DEFERRED in ``meta.where_map_frames``
+    and NOT physically carried by the reduced ``term.lazy``
+    (``(p, d, t, col_id, coef)``).  The Var grid (36 rows) sits below the
+    default block-COO min-dense gate (100), so the Sum block-COO classifier
+    DECLINES for every batch and the walk routes through the reduced-lazy
+    fallback (:func:`_reduced_lazy_collect`) — the path that must bake the
+    deferred map to materialise ``n`` before the ``_rid`` join.  Returns the
+    term, the ``(n, d, t)`` constraint grid, and the map frame (for the
+    reference build)."""
+    prob = Problem(dense_axes=("d", "t"))
+    ps, ss, ds, ts = [0, 1, 2], ["s0", "s1"], [10, 11], [100, 101, 102]
+    rows = list(itertools.product(ps, ss, ds, ts))
+    var_index = pl.DataFrame(
+        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
+         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+    )
+    v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0, 7.0]}),
+                   name="P_unit")
+    dt = list(itertools.product(ds, ts))
+    P_step = Param(("d", "t"), pl.DataFrame(
+        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
+         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    # Sum over ``s`` only → keep (p, d, t).
+    nb = Sum(v * P_unit * P_step, over=("s",))
+    # Map the kept dim ``p`` to a new node dim ``n`` (fan-in: p0,p2 -> nA).
+    p_to_n = pl.DataFrame({"p": ps, "n": ["nA", "nB", "nA"]})
+    nbw = Where(nb, p_to_n)
+    term = nbw.terms[0]
+    # The constraint grid is the post-map (n, d, t) cells.
+    over = (
+        term.lazy.join(p_to_n.lazy(), on="p", how="inner")
+        .select("n", "d", "t").unique().sort(["n", "d", "t"]).collect()
+    )
+    return prob, term, over, p_to_n
+
+
+def _ref_minmax_map_after_sum(term, over, p_to_n, scale):
+    """Reference for a map-after-Sum term: materialise the deferred map
+    (inner-join the reduced ``term.lazy`` to ``p_to_n`` to introduce ``n``),
+    attach ``_rid`` via the (n, d, t) grid, apply scale, reduce — the
+    whole-collect the bounded walk's reduced-lazy fallback must match."""
+    over_rid = over.with_columns(
+        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
+    )
+    materialised = term.lazy.join(p_to_n.lazy(), on="p", how="inner")
+    on = [d for d in term.dims if d in over.columns]
+    df = (
+        over_rid.lazy()
+        .join(materialised, on=on, how="inner")
+        .select("_rid", "col_id", "coef")
+        .collect()
+    )
+    if df.height == 0:
+        return None, None
+    rids = df["_rid"].to_numpy().astype(np.int64)
+    cids = df["col_id"].to_numpy().astype(np.int64)
+    coef = df["coef"].to_numpy().astype(np.float64)
+    return _reduce_abs(_scale_vals(rids, cids, coef, scale))
+
+
+def test_map_where_after_sum_parity(recwarn):
+    """A MAP-EFFECT ``Where`` AFTER a ``Sum`` introduces a new dim (``n``)
+    via a mapping frame (the ``nodeBalance`` shape).  The walk routes the
+    forwarded recipe through the reduced-lazy fallback, which must bake the
+    deferred map to materialise ``n`` before the ``_rid`` join.
+
+    Min/max is order-independent (:class:`MinMaxAbsReducer`), so the
+    reduced-lazy fallback reproduces the deferred-map support EXACTLY — we
+    assert BYTE-IDENTITY to the whole-collect reference across EVERY
+    ``batch_rows`` (including the smallest), proving the fallback path is
+    exercised and correct at every batch size, with NO warning or crash."""
+    prob, term, over, p_to_n = _build_map_where_after_sum()
+    # D1: the map-after-Sum term routes to the WALK with the recipe present
+    # and the introduced dim DEFERRED (not physically in the reduced lazy).
+    recipe = CoefWalkRecipe.from_term(term)
+    assert recipe.sum_block_meta is not None
+    assert recipe.var_source is not None
+    assert recipe.sum_block_meta.where_map_frames is not None
+    assert "n" in recipe.reduced_dims
+    assert "n" not in recipe.reduced_lazy.collect_schema().names()
+
+    rf, cf = _side_vectors(over.height, prob._next_col)
+    scale = (rf, 0, cf)
+    ref = _ref_minmax_map_after_sum(term, over, p_to_n, scale)
+    # The reference must be a real (non-empty) reduction — guard against a
+    # vacuously-passing (None, None) on both sides.
+    assert ref != (None, None)
+    for bs in BATCH_SIZES:
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+    # No warning surfaced by the fallback bake.
+    assert len(recwarn) == 0, [str(w.message) for w in recwarn]
+
+
+def test_map_where_after_sum_histogram_parity():
+    """Log2-histogram parity for the map-after-Sum reduced-lazy fallback.
+    Count / min / max combine exactly; the log2 sum matches the
+    whole-collect within FP reassociation (the same tolerance the other
+    batched-histogram tests use) — confirming the materialised-``n`` support
+    is the right one for the bucketed readout too."""
+    prob, term, over, p_to_n = _build_map_where_after_sum()
+    recipe = CoefWalkRecipe.from_term(term)
+    rf, cf = _side_vectors(over.height, prob._next_col)
+    scale = (rf, 0, cf)
+
+    def classify(cid):
+        return cid % 3
+
+    # Reference histogram over the materialised-n whole-collect.
+    over_rid = over.with_columns(
+        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
+    )
+    materialised = term.lazy.join(p_to_n.lazy(), on="p", how="inner")
+    on = [d for d in term.dims if d in over.columns]
+    df = (
+        over_rid.lazy()
+        .join(materialised, on=on, how="inner")
+        .select("_rid", "col_id", "coef")
+        .collect()
+    )
+    rids = df["_rid"].to_numpy().astype(np.int64)
+    cids = df["col_id"].to_numpy().astype(np.int64)
+    coef = df["coef"].to_numpy().astype(np.float64)
+    vals = np.abs(_scale_vals(rids, cids, coef, scale))
+    ref: dict = {}
+    for vval, c in zip(vals.tolist(), cids.tolist()):
+        if not math.isfinite(vval) or vval <= 0:
+            continue
+        bkey = classify(int(c))
+        ps_, pn_, pmin_, pmax_ = ref.get(bkey, (0.0, 0, math.inf, 0.0))
+        ref[bkey] = (
+            ps_ + math.log2(vval), pn_ + 1, min(pmin_, vval), max(pmax_, vval)
+        )
+    assert ref  # non-empty reference
+
+    for bs in BATCH_SIZES:
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [Log2HistogramReducer(scale, classify)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert set(got) == set(ref), f"batch_rows={bs}"
+        for k in ref:
+            rs, rn, rmin, rmax = ref[k]
+            gs, gn, gmin, gmax = got[k]
+            assert gn == rn, f"batch_rows={bs} bucket={k}"
+            assert gmin == rmin and gmax == rmax, f"batch_rows={bs} bucket={k}"
+            assert gs == pytest.approx(rs, rel=1e-12, abs=1e-9), (
+                f"batch_rows={bs} bucket={k}"
+            )
