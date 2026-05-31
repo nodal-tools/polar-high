@@ -413,3 +413,197 @@ def test_ranges_via_streaming_honors_side_vectors() -> None:
     # (apply_layer2 mutates Var.lower/upper directly; the side vectors
     # don't enter the bound reduce path).  Unchanged from baseline.
     assert scaled.bound == pytest.approx(base.bound)
+
+
+# ----------------------------------------------------------------------
+# Phase D-3 — bounded OBJECTIVE Param-chain readout (no deep-product
+# materialisation) + final sweep documentation
+# ----------------------------------------------------------------------
+
+
+def _deep_objective_problem() -> tuple[Problem, np.ndarray]:
+    """Build a Problem whose OBJECTIVE is a deep
+    ``Sum(Var(p,d,t) × P_pdt × P_dt × P_p, over=(p,d,t))`` product over a
+    dense ``(d,t)`` suffix, with side vectors installed.
+
+    Returns ``(problem, col_factor)``.  The Var grid is pre-sorted by
+    ``(p, d, t)`` so it honours the ``dense_axes=("d","t")`` suffix
+    contract that gates the bounded relabel path.
+    """
+    P, D, Tn = 3, 4, 5
+    pp = np.repeat(np.arange(P), D * Tn)
+    dd = np.tile(np.repeat(np.arange(D), Tn), P)
+    tt = np.tile(np.arange(Tn), P * D)
+    idx = pl.DataFrame({"p": pp, "d": dd, "t": tt}).sort(["p", "d", "t"])
+
+    pb = Problem()
+    pb.declare_dense_axes(("d", "t"))
+    x = pb.add_var("x", dims=("p", "d", "t"), index=idx, lower=0.0, upper=10.0)
+
+    # Three Params spanning the lead-only, dense-only, and lead+dense
+    # alignment cases so the positional builder exercises every arm.
+    rng = np.random.default_rng(7)
+    p_pdt = Param(
+        ("p", "d", "t"),
+        idx.with_columns(
+            value=pl.Series(
+                "value",
+                np.linspace(1e-2, 1e2, P * D * Tn) * (1.0 + rng.random(P * D * Tn)),
+            )
+        ),
+    )
+    dt_idx = pl.DataFrame(
+        {"d": np.repeat(np.arange(D), Tn), "t": np.tile(np.arange(Tn), D)}
+    ).sort(["d", "t"])
+    p_dt = Param(
+        ("d", "t"),
+        dt_idx.with_columns(
+            value=pl.Series("value", np.linspace(0.5, 5.0, D * Tn))
+        ),
+    )
+    p_p = Param(
+        ("p",),
+        pl.DataFrame({"p": np.arange(P), "value": np.array([1e3, 1e-3, 7.0])}),
+    )
+
+    # Pass the raw Var×Param×Param×Param product; ``set_objective`` applies
+    # the single collapsing ``Sum(over=None)`` itself, which captures the
+    # ``sum_block_meta`` recipe the bounded relabel path consumes.  Wrapping
+    # in an explicit ``Sum`` here would nest two reductions and the inner
+    # Sum's recipe would be dropped by the nested-Sum guard.
+    pb.set_objective(x * p_pdt * p_dt * p_p, sense="min")
+
+    # Side vectors: distinct per-column factors so a missing multiply or a
+    # mis-aligned col_id is visible in the magnitude range.
+    n_cols = int(pb._next_col)
+    cf = np.linspace(0.25, 4.0, n_cols).astype(np.float64)
+    pb._layer2_col_factor = cf
+    # Objective readout uses no row factor; install a row vector anyway so
+    # the side-vectors-on cost branch (gated on ``_l2_cf is not None``) and
+    # the rest of the readout behave as in production.
+    pb._layer2_row_factor = np.ones(0, dtype=np.float64)
+    return pb, cf
+
+
+def test_obj_chain_bounded_is_byte_identical(capsys) -> None:
+    """A deep ``Var × Param × Param × Param`` OBJECTIVE over dense
+    ``(d,t)`` must report a BYTE-IDENTICAL cost range via the bounded
+    relabel path (Phase D-3) and via the disabled-block-COO streaming
+    path, and the bounded branch must actually fire (no deep-product
+    materialisation)."""
+    from polar_high.autoscale._ranges import _ranges_via_streaming
+
+    cfg = _config()
+
+    # --- Bounded path (block-COO enabled) with the path profiler on so we
+    # can confirm the ``obj_positional`` arm fired.
+    pb, _cf = _deep_objective_problem()
+    _os.environ.pop("POLAR_HIGH_DISABLE_BLOCK_COO", None)
+    _os.environ["POLAR_HIGH_BLOCK_COO_PROFILE"] = "1"
+    try:
+        bounded = _ranges_via_streaming(pb, cfg)
+    finally:
+        _os.environ.pop("POLAR_HIGH_BLOCK_COO_PROFILE", None)
+    captured = capsys.readouterr()
+    assert "path=obj_positional" in captured.err, (
+        "bounded objective relabel arm did not fire; the deep "
+        f"Var×Param×Param×Param product was materialised.  stderr:\n"
+        f"{captured.err}"
+    )
+
+    # --- Reference path: same Problem, block-COO disabled ⇒ the cost loop
+    # collects (col_id, coef) from the group_by-wrapped deep product.
+    pb_ref, _cf_ref = _deep_objective_problem()
+    _os.environ["POLAR_HIGH_DISABLE_BLOCK_COO"] = "1"
+    try:
+        reference = _ranges_via_streaming(pb_ref, cfg)
+    finally:
+        _os.environ.pop("POLAR_HIGH_DISABLE_BLOCK_COO", None)
+
+    # BYTE-IDENTICAL: the relabel groups are single-element so the bounded
+    # per-cell product equals the group_by-summed coef bit-for-bit.
+    assert bounded.cost == reference.cost, (
+        f"bounded cost range {bounded.cost} != reference {reference.cost}"
+    )
+    assert math.isclose(
+        bounded.cost[0], reference.cost[0], rel_tol=0.0, abs_tol=0.0
+    )
+    assert math.isclose(
+        bounded.cost[1], reference.cost[1], rel_tol=0.0, abs_tol=0.0
+    )
+    # Whole report identical (matrix/bound/rhs unaffected, same trigger).
+    assert bounded == reference
+
+    # The cost range must be non-trivial (the deep chain spans many
+    # decades) — guards against the path silently emitting NaN/empty.
+    assert not math.isnan(bounded.cost[0])
+    assert bounded.cost[1] > bounded.cost[0]
+
+
+def test_obj_chain_bounded_declines_without_side_vectors(capsys) -> None:
+    """Without side vectors the cost loop uses the single-column ``_agg``
+    streaming aggregate (already O(1)-peak); the bounded relabel path is
+    side-vectors-only and must NOT fire."""
+    from polar_high.autoscale._ranges import _ranges_via_streaming
+
+    pb, _cf = _deep_objective_problem()
+    pb._layer2_col_factor = None
+    pb._layer2_row_factor = None
+
+    _os.environ["POLAR_HIGH_BLOCK_COO_PROFILE"] = "1"
+    try:
+        report = _ranges_via_streaming(pb, _config())
+    finally:
+        _os.environ.pop("POLAR_HIGH_BLOCK_COO_PROFILE", None)
+    captured = capsys.readouterr()
+    assert "path=obj_positional" not in captured.err
+    assert report.cost is not None
+    assert not math.isnan(report.cost[0])
+
+
+def test_ranges_streaming_collect_sweep_is_bounded_or_cheap() -> None:
+    """Pin the Phase D conclusion: every ``.collect`` reachable from
+    :func:`_ranges_via_streaming` is EITHER bounded by a block-COO /
+    positional builder OR provably cheap (a single-column streaming
+    aggregate / a scalar reduce).  This is an executable record of the
+    sweep so a future edit that re-introduces a deep-product collect on
+    the reachable range path trips a named assertion.
+
+    Each entry: (closure-or-helper name, classification, why-bounded).
+    """
+    import inspect
+
+    from polar_high.autoscale import _ranges as _rmod
+
+    src = inspect.getsource(_rmod._ranges_via_streaming)
+
+    # The four bounded / cheap collect sites in the streaming readout.
+    # ``_agg``           — single-column ``select(abs).filter`` streaming
+    #                      aggregate; polars streams a one-column scan, no
+    #                      wide join (cheap, side-vectors-OFF path only).
+    # ``_obj_chain_bounded`` — Phase D-3: objective relabel positional
+    #                      product, no deep Var×Param materialisation.
+    # ``_rhs_chain_bounded_coef`` — Phase D-2: RHS Param chain positional
+    #                      product.
+    # ``_build_block_coo_plan`` / ``_build_sum_block_coo_plan`` — Phase
+    #                      D-1: LHS block-COO builders.
+    for name in (
+        "_agg",
+        "_obj_chain_bounded",
+        "_rhs_chain_bounded_coef",
+        "_build_block_coo_plan",
+        "_build_sum_block_coo_plan",
+    ):
+        assert name in src, (
+            f"{name} no longer referenced in _ranges_via_streaming — the "
+            f"Phase-D bounded sweep record is stale; re-audit the collects."
+        )
+
+    # The objective side-vectors-ON branch must route through the bounded
+    # helper BEFORE any ``_collect_streaming`` of the grouped product.
+    obj_bounded_at = src.index("_obj_chain_bounded(t)")
+    obj_collect_at = src.index('plan = t_lazy.select("col_id", "coef")')
+    assert obj_bounded_at < obj_collect_at, (
+        "the bounded objective helper must be attempted before the "
+        "deep-product streaming collect fallback."
+    )

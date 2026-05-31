@@ -619,6 +619,185 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _emit_block_coo_path("rhs_positional")
         return coef
 
+    def _obj_chain_bounded(term) -> tuple[float | None, float | None] | None:
+        """Bounded min/max(abs(post-Layer-2 objective coef)) for a
+        ``Sum(Var × Param-chain, over=ALL)`` objective term (Phase D-3) —
+        WITHOUT materialising the deep ``Var × P1 × P2 …`` product.
+
+        An objective term reaches ``_obj_terms`` via
+        ``set_objective`` → ``Sum(expr, over=None)``, which collapses every
+        open dim with ``group_by("col_id").agg(coef.sum())`` wrapped around
+        the fully-merged ``Var × Param × Param …`` inner-join chain.  The
+        side-vectors-on cost loop below collects ``(col_id, coef)`` from
+        that grouped plan; the polars streaming engine must MATERIALISE the
+        deep unreduced product before the group-by reduces it — the same
+        peak Phase D-1/D-2 removed on the LHS / RHS.
+
+        ``Sum(over=None)`` clears ``var_source`` but captures the full
+        reconstruction recipe in ``term.sum_block_meta`` (originating Var,
+        the complete un-survivor-filtered Param chain, ``reduce_dims`` =
+        all open dims, ``keep`` = ``()``).  When ``reduce_dims ⊆ var.dims``
+        the Sum is a pure RELABEL: ``col_id`` is a function of the Var
+        instance, so every ``col_id`` group is SINGLE-ELEMENT — the
+        group-by-sum performs NO summation and the reduced coef equals the
+        per-cell product coef.  We therefore rebuild that per-cell product
+        with block-COO's bounded *positional* per-block slice-multiply on
+        the pre-sorted Var grid (mirror of
+        :func:`_build_sum_block_coo_relabel` Steps 1-4 / the D-2 RHS chain
+        builder), emit ``(col_id, coef)`` with NO ``_rid`` attach (the
+        objective has no constraint row), then apply ``|_l2_cf[col_id]|``
+        and :func:`_reduce_abs` — BYTE-IDENTICAL to the streaming readout.
+
+        Returns the ``(lo, hi)`` magnitude pair, or ``None`` to decline
+        (caller falls through to the existing streaming collect unchanged).
+        Declining is always safe — a false decline costs memory, never
+        correctness.  Only fires on the side-vectors-on path (``_l2_cf is
+        not None``); ``_l2_cf`` is captured from the enclosing scope.
+        """
+        # --- Eligibility gates.  Anything outside the bit-identical
+        # positional relabel regime declines.
+        if not dense_axes or _block_coo_disabled():
+            return None
+        meta = getattr(term, "sum_block_meta", None)
+        if meta is None:
+            return None
+        # The bounded product reproduces the per-cell coef only when the
+        # Sum is a pure relabel (no coef combining) and no deferred Where
+        # carves / extends the grid — exactly the conditions under which a
+        # col_id group is single-element and the seed stays dense-complete.
+        if meta.where_frames is not None or meta.where_map_frames is not None:
+            return None
+        var = meta.var_source
+        if var is None:
+            return None
+        psrc = list(meta.param_sources)
+        if not psrc:
+            return None
+        var_dims = list(var.dims)
+        var_dim_set = set(var_dims)
+        # Relabel contract: every reduced dim is a Var dim (single-element
+        # col_id groups).  For an objective ``reduce_dims`` is the full open
+        # set; with no map extras the open set is exactly ``var.dims``.
+        if not set(meta.reduce_dims).issubset(var_dim_set):
+            return None
+        # Suffix contract: the Var's dims must END WITH ``dense_axes`` in
+        # declared order so block-COO can slice the dense suffix.
+        dense_dims = list(dense_axes)
+        if len(dense_dims) > len(var_dims):
+            return None
+        if tuple(var_dims[-len(dense_dims):]) != tuple(dense_dims):
+            return None
+        non_dense_dims = [d for d in var_dims if d not in set(dense_dims)]
+        # Every Param's dims must be a subset of the Var's dims (the seed
+        # carries only Var dims; a foreign dim cannot align positionally).
+        for atomic, direction in psrc:
+            if not isinstance(atomic, _Param):
+                return None
+            if direction not in (1, -1):
+                return None
+            if not set(atomic.dims).issubset(var_dim_set):
+                return None
+
+        # --- Verify the dense-sort contract on the Var grid (loud error on
+        # violation — same guard block-COO's seed runs).
+        _verify_dense_sorted(
+            var.frame, non_dense_dims, dense_dims,
+            getattr(var, "name", None),
+        )
+
+        seed = var.frame.select(*var_dims, "col_id")
+        n = int(seed.height)
+        if n == 0:
+            return None, None
+
+        # Completeness guard: the grid is dense-complete (every leading
+        # block holds the full, identically-ordered dense set) iff
+        # ``n == n_lead * n_dense`` on the pre-sorted seed (no where_frames
+        # to carve it — guarded above).
+        n_dense = seed.select(dense_dims).n_unique() if dense_dims else 1
+        n_lead = (
+            seed.select(non_dense_dims).n_unique() if non_dense_dims else 1
+        )
+        if n != n_lead * n_dense:
+            return None
+
+        coef = np.full(n, float(meta.coef_scalar), dtype=np.float64)
+        non_dense_set = set(non_dense_dims)
+        dense_set = set(dense_dims)
+
+        lead_table = None
+        if non_dense_dims:
+            lead_table = seed.select(non_dense_dims).unique(
+                maintain_order=True
+            )
+            if lead_table.height != n_lead:
+                return None
+
+        for atomic, direction in psrc:
+            shared = [d for d in var_dims if d in atomic.dims]
+            if not shared:
+                return None
+            shared_set = set(shared)
+            has_lead = bool(shared_set & non_dense_set)
+            has_dense = bool(shared_set & dense_set)
+
+            if has_lead and not has_dense:
+                lt_a, at_a = _align(lead_table.lazy(), atomic.lazy, shared)
+                aligned = lt_a.join(
+                    at_a, on=shared, how="left", maintain_order="left"
+                ).collect()
+                if (
+                    aligned.height != n_lead
+                    or aligned["value"].null_count() > 0
+                ):
+                    return None
+                block_vals = (
+                    aligned["value"].to_numpy().astype(np.float64, copy=False)
+                )
+                repeated = np.repeat(block_vals, n_dense)
+                if direction >= 0:
+                    coef = coef * repeated
+                else:
+                    coef = coef / repeated
+
+            elif has_dense and not has_lead and shared == dense_dims:
+                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                if atomic_df.height != n_dense:
+                    return None
+                dense_vals = (
+                    atomic_df["value"]
+                    .to_numpy()
+                    .astype(np.float64, copy=False)
+                )
+                tiled = np.tile(dense_vals, n_lead)
+                if direction >= 0:
+                    coef = coef * tiled
+                else:
+                    coef = coef / tiled
+
+            elif has_dense:
+                seed_a, at_a = _align(seed.lazy(), atomic.lazy, shared)
+                aligned = seed_a.join(
+                    at_a, on=shared, how="left", maintain_order="left"
+                ).collect()
+                if aligned.height != n or aligned["value"].null_count() > 0:
+                    return None
+                vals = (
+                    aligned["value"].to_numpy().astype(np.float64, copy=False)
+                )
+                if direction >= 0:
+                    coef = coef * vals
+                else:
+                    coef = coef / vals
+
+            else:
+                return None
+
+        cids = seed["col_id"].to_numpy().astype(np.int64)
+        vals = coef * np.abs(_l2_cf[cids])
+        _emit_block_coo_path("obj_positional")
+        return _reduce_abs(vals)
+
     def _update_cost(lo: float | None, hi: float | None) -> None:
         nonlocal cost_lo, cost_hi
         if lo is None or hi is None:
@@ -662,15 +841,31 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         if _l2_cf is None:
             lo, hi = _agg(t_lazy, "coef")
         else:
-            plan = t_lazy.select("col_id", "coef")
-            df = _collect_streaming(plan)
-            if df.height == 0:
-                lo, hi = None, None
+            # ---- Bounded objective Param-chain fast path (Phase D-3).
+            # ``Sum(over=None)`` wraps a deep ``Var × Param × Param …``
+            # product in a ``group_by("col_id")`` reduce; collecting
+            # ``(col_id, coef)`` MATERIALISES that product before the
+            # group-by.  When the recipe is a pure relabel over the
+            # constraint-free Var grid, rebuild the per-cell product via
+            # the bounded positional slice-multiply (no ``_rid`` attach,
+            # no group-by) — BYTE-IDENTICAL to the streaming readout.
+            # Anything outside that regime returns ``None`` and drops
+            # through to the existing collect unchanged.
+            _obj_bounded = _obj_chain_bounded(t)
+            if _obj_bounded is not None:
+                lo, hi = _obj_bounded
+                if _profile:
+                    _emit("obj_term_bounded", term_idx=ti, bounded="1")
             else:
-                cids = df["col_id"].to_numpy().astype(np.int64)
-                vals = df["coef"].to_numpy().astype(np.float64)
-                vals = vals * np.abs(_l2_cf[cids])
-                lo, hi = _reduce_abs(vals)
+                plan = t_lazy.select("col_id", "coef")
+                df = _collect_streaming(plan)
+                if df.height == 0:
+                    lo, hi = None, None
+                else:
+                    cids = df["col_id"].to_numpy().astype(np.int64)
+                    vals = df["coef"].to_numpy().astype(np.float64)
+                    vals = vals * np.abs(_l2_cf[cids])
+                    lo, hi = _reduce_abs(vals)
         _update_cost(lo, hi)
         if _profile:
             _emit("obj_term_done", term_idx=ti)
