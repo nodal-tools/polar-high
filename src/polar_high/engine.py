@@ -525,6 +525,90 @@ def _apply_where_frames(
     return lazy
 
 
+def _apply_where_map_frames(
+    lazy: pl.LazyFrame,
+    dims: tuple[str, ...] | list[str],
+    where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None,
+) -> tuple[pl.LazyFrame, tuple[str, ...]]:
+    """Bake deferred map-effect :func:`Where` frames into ``lazy``.
+
+    Each entry is ``(map_frame_lf, extras_frozenset)`` recorded by the
+    map-effect branch of :func:`Where` (a frame whose columns introduce
+    new open dims the expr did not carry, e.g. ``flow_to_n`` mapping
+    ``(p, source, sink) → n``).  For each entry we inner-join the map
+    frame onto ``lazy`` on the columns physically present in ``lazy``
+    (filter + duplicate per matching row, exactly what the eager
+    map-Where did), extending ``dims`` with the entry's extras in the
+    frame's column order.  Returns ``(new_lazy, new_dims)``.
+
+    Mirror of :func:`_apply_where_frames` but inner-join (not semi) and
+    dim-extending.  Used by Sum / Lag / consumer-fallback paths and by
+    :func:`_build_lhs_pruned_plan`'s final assembly step.  No-op (returns
+    ``lazy`` plus ``tuple(dims)``) when ``where_map_frames`` is ``None``
+    — the common case.
+
+    The ``shared`` set is computed against the lazy plan's ACTUAL schema,
+    not the claimed ``dims``: at deferral time the dim claim is recorded
+    in ``_Term.dims`` but ``lazy`` does not yet physically carry the
+    extras column until this bake.  When a frame shares no column with
+    the lazy plan but has non-empty extras, we cross-join so the extras
+    columns actually land (mirror of the latent-bug fix in
+    :func:`Where`'s eager map-effect branch).
+    """
+    if where_map_frames is None:
+        return lazy, tuple(dims)
+    current_dims = list(dims)
+    lazy_cols = set(lazy.collect_schema().names())
+    for mf, extras in where_map_frames:
+        mf_cols = mf.collect_schema().names()
+        shared = [c for c in mf_cols if c in lazy_cols]
+        if shared:
+            lazy_a, mf_a = _align_enum_join_keys(lazy, mf, shared)
+            lazy = lazy_a.join(mf_a, on=shared, how="inner")
+        elif extras:
+            lazy = lazy.join(mf, how="cross")
+        # Preserve frame-column order — extras is an (unordered)
+        # frozenset, so re-iterate the frame's column list.
+        ordered_extras = [c for c in mf_cols if c in extras]
+        for c in ordered_extras:
+            if c not in current_dims:
+                current_dims.append(c)
+        for c in mf_cols:
+            lazy_cols.add(c)
+    return lazy, tuple(current_dims)
+
+
+def _bake_map_before_mul(
+    t: _Term,
+    factor_dims: tuple[str, ...],
+) -> tuple[pl.LazyFrame, tuple[str, ...], tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None]:
+    """Decide whether a Param multiply must bake the term's pending
+    map-effect Where frames before the join.
+
+    A deferred map-effect frame leaves ``t.dims`` claiming the extras
+    columns, but ``t.lazy`` does not physically carry them yet.  If the
+    multiplying factor's dims overlap any of those pending extras, the
+    post-Where dim set is the source of truth for ``shared`` — we MUST
+    bake the map frames first so ``t.lazy`` carries the extras columns
+    before the Param join (correctness).  Otherwise the deferral
+    propagates through unchanged (the win — the leaf-rebuild can still
+    defer the map-join).
+
+    Returns ``(use_lazy, use_dims, out_where_map_frames)``.
+    """
+    if t.where_map_frames is None:
+        return t.lazy, t.dims, None
+    pending_extras: frozenset[str] = frozenset().union(
+        *(extras for (_, extras) in t.where_map_frames)
+    )
+    if pending_extras and (set(factor_dims) & pending_extras):
+        baked_lazy, baked_dims = _apply_where_map_frames(
+            t.lazy, t.dims, t.where_map_frames
+        )
+        return baked_lazy, baked_dims, None
+    return t.lazy, t.dims, t.where_map_frames
+
+
 def _build_lhs_pruned_plan(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
@@ -533,6 +617,7 @@ def _build_lhs_pruned_plan(
     on: list[str],
     coef_scalar: float = 1.0,
     where_frames: tuple[pl.LazyFrame, ...] | None = None,
+    where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None = None,
 ) -> pl.LazyFrame:
     """Rebuild a Var × Param … LHS term as a prune-down chain, mirroring
     the RHS prune-down in :meth:`Problem._build_canonical_matrix`.
@@ -561,14 +646,32 @@ def _build_lhs_pruned_plan(
     step (narrows mid-chain when a later filter shares a dim that
     enters via a Param).  Both steps semi-join only — they never alter
     coef values, only the row set the rebuilt chain spans.
+
+    ``where_map_frames`` carries deferred *map-effect* :func:`Where`
+    frames.  Each entry is ``(frame_lf, extras_frozenset)``.  Their
+    shared cols narrow the seed AND each per-atomic accumulator via
+    semi-join (exactly like ``where_frames``); the dim-extending
+    inner-join (which produces the extras columns) is applied via
+    :func:`_apply_where_map_frames` AFTER the chain rebuild, just before
+    the final row_index attach — at which point ``on`` may include the
+    extras columns (they are now present in the accumulator).
     """
     var_dims = list(var_source.dims)
     var_on = [d for d in var_dims if d in axis_cols]
     var_lf = var_source.frame.lazy()
+    # Map-effect frames: their dim-extending inner-join is applied after
+    # the chain rebuild via _apply_where_map_frames.  Up front we only
+    # use the frame components to narrow the seed by their shared cols
+    # (mirror of where_frames) so the rebuilt chain stays bounded.
+    _map_semi = (
+        tuple(f for (f, _) in where_map_frames) if where_map_frames else ()
+    )
     if where_frames is not None:
         # Apply any where_frames whose shared cols overlap the Var's
         # dims up front — narrows the seed before row_index pre-prune.
         var_lf = _apply_where_frames(var_lf, var_dims, where_frames)
+    if _map_semi:
+        var_lf = _apply_where_frames(var_lf, var_dims, _map_semi)
     if var_on:
         # Pre-prune the Var.frame against the row_index key set so the
         # very first step is bounded by the constraint's row count.
@@ -624,6 +727,17 @@ def _build_lhs_pruned_plan(
             # where_frames that now overlap with new acc_dims — mirror of
             # the row_index pre-prune so the chain stays bounded.
             acc = _apply_where_frames(acc, acc_dims, where_frames)
+        if _map_semi:
+            # Same per-atomic semi-join narrowing for the map-effect
+            # frames — their dim-extending inner-join lands AFTER the
+            # chain (below) so the extras columns appear at the leaf.
+            acc = _apply_where_frames(acc, acc_dims, _map_semi)
+    if where_map_frames is not None:
+        # Bake the map-effect inner-joins: produces the extras dim
+        # columns and extends acc_dims with them, so the final attach's
+        # ``on`` (which may now include extras) finds the columns.
+        acc, acc_dims_t = _apply_where_map_frames(acc, acc_dims, where_map_frames)
+        acc_dims = list(acc_dims_t)
     # Final attach to row_index: same shape as the unpruned path.
     rl_a, acc_a = _align_enum_join_keys(row_index_lf, acc, on)
     return rl_a.join(acc_a, on=on, how="inner")
@@ -1484,6 +1598,21 @@ class _Term:
     mutation between sibling terms is impossible.  Cleared by
     :func:`Sum` / :func:`Lag` / map-effect :func:`Where` (after baking)
     and by fallback paths that materialise ``lazy`` directly.
+
+    ``where_map_frames`` — opt-in tuple of deferred *map-effect*
+    :func:`Where` frames.  Each entry is ``(frame_lf, extras_frozenset)``
+    where ``extras_frozenset`` is the set of frame columns NOT in the
+    term's dims at the time of the Where call (the new open dims the
+    frame introduces, e.g. ``flow_to_n`` mapping ``(p, source, sink) →
+    n``).  Like ``where_frames``, the inner-join is *not* baked into
+    ``lazy`` — instead the term's dims are extended with the extras at
+    the Where call while ``var_source`` / ``param_sources`` /
+    ``coef_scalar`` / ``where_frames`` are PRESERVED, so the LHS
+    prune-down (and, later, block-COO) can still reach the leaves.  The
+    dim-extending inner-join is baked via :func:`_apply_where_map_frames`
+    at leaf-rebuild time (``_build_lhs_pruned_plan``) or at Sum / Lag /
+    consumer-fallback.  Stored as a tuple of immutable
+    ``(LazyFrame, frozenset)`` pairs.
     """
 
     __slots__ = (
@@ -1493,6 +1622,7 @@ class _Term:
         "var_source",
         "coef_scalar",
         "where_frames",
+        "where_map_frames",
     )
 
     def __init__(
@@ -1503,6 +1633,7 @@ class _Term:
         var_source: Var | None = None,
         coef_scalar: float = 1.0,
         where_frames: tuple[pl.LazyFrame, ...] | None = None,
+        where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None = None,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
@@ -1527,6 +1658,10 @@ class _Term:
             self.where_frames = None
         else:
             self.where_frames = tuple(where_frames)
+        if where_map_frames is None or len(where_map_frames) == 0:
+            self.where_map_frames = None
+        else:
+            self.where_map_frames = tuple(where_map_frames)
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -1568,6 +1703,7 @@ class Expr:
                 var_source=t.var_source,
                 coef_scalar=-t.coef_scalar,
                 where_frames=t.where_frames,
+                where_map_frames=t.where_map_frames,
             )
             for t in _to_expr(other).terms
         ]
@@ -1593,6 +1729,7 @@ class Expr:
                         var_source=t.var_source,
                         coef_scalar=t.coef_scalar * float(scalar),
                         where_frames=t.where_frames,
+                        where_map_frames=t.where_map_frames,
                     )
                     for t in self.terms
                 ]
@@ -1601,21 +1738,32 @@ class Expr:
             psrc_other = scalar._sources_for_propagation()
             new = []
             for t in self.terms:
-                shared = [d for d in t.dims if d in scalar.dims]
-                new_dims = tuple(dict.fromkeys(t.dims + scalar.dims))
+                use_lazy, use_dims, out_where_map_frames = _bake_map_before_mul(
+                    t, scalar.dims
+                )
+                # ``use_lazy`` may not physically carry every entry of
+                # ``use_dims`` when extras are still deferred — compute
+                # ``shared`` and the final ``.select`` against the
+                # physical column set so we never touch a missing column.
+                lazy_cols = set(use_lazy.collect_schema().names())
+                shared = [d for d in use_dims if d in scalar.dims and d in lazy_cols]
+                new_dims = tuple(dict.fromkeys(tuple(use_dims) + scalar.dims))
                 if shared:
-                    left_lf, right_lf = _align_enum_join_keys(t.lazy, scalar.lazy, shared)
+                    left_lf, right_lf = _align_enum_join_keys(use_lazy, scalar.lazy, shared)
                     j = left_lf.join(right_lf, on=shared, how="inner")
                 else:
-                    j = t.lazy.join(scalar.lazy, how="cross")
+                    j = use_lazy.join(scalar.lazy, how="cross")
+                joined_cols = set(j.collect_schema().names())
+                select_cols = [d for d in new_dims if d in joined_cols]
                 j = j.with_columns(coef=pl.col("coef") * pl.col("value")).select(
-                    *new_dims, "col_id", "coef"
+                    *select_cols, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=False)
                 new.append(
                     _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
                           coef_scalar=t.coef_scalar * scalar._value_scalar,
-                          where_frames=t.where_frames)
+                          where_frames=t.where_frames,
+                          where_map_frames=out_where_map_frames)
                 )
             return Expr(new)
         return NotImplemented
@@ -1629,21 +1777,28 @@ class Expr:
             psrc_other = other._sources_for_propagation()
             new = []
             for t in self.terms:
-                shared = [d for d in t.dims if d in other.dims]
-                new_dims = tuple(dict.fromkeys(t.dims + other.dims))
+                use_lazy, use_dims, out_where_map_frames = _bake_map_before_mul(
+                    t, other.dims
+                )
+                lazy_cols = set(use_lazy.collect_schema().names())
+                shared = [d for d in use_dims if d in other.dims and d in lazy_cols]
+                new_dims = tuple(dict.fromkeys(tuple(use_dims) + other.dims))
                 if shared:
-                    left_lf, right_lf = _align_enum_join_keys(t.lazy, other.lazy, shared)
+                    left_lf, right_lf = _align_enum_join_keys(use_lazy, other.lazy, shared)
                     j = left_lf.join(right_lf, on=shared, how="inner")
                 else:
-                    j = t.lazy.join(other.lazy, how="cross")
+                    j = use_lazy.join(other.lazy, how="cross")
+                joined_cols = set(j.collect_schema().names())
+                select_cols = [d for d in new_dims if d in joined_cols]
                 j = j.with_columns(coef=pl.col("coef") / pl.col("value")).select(
-                    *new_dims, "col_id", "coef"
+                    *select_cols, "col_id", "coef"
                 )
                 merged = _merge_param_sources(t.param_sources, psrc_other, flip_other=True)
                 new.append(
                     _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
                           coef_scalar=t.coef_scalar / other._value_scalar,
-                          where_frames=t.where_frames)
+                          where_frames=t.where_frames,
+                          where_map_frames=out_where_map_frames)
                 )
             return Expr(new)
         return NotImplemented
@@ -1817,9 +1972,11 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
             continue
         # Bake any deferred Where filters before the rename — Lag
         # changes row identity (time-shift) so the filter must be
-        # applied first.
+        # applied first.  Both pure-filter and map-effect frames bake
+        # here; the map-effect bake extends the term's dims with extras.
         t_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
-        carry = [c for c in lag_cols if c in t.dims and c != time_dim and c != lag_col]
+        t_lazy, term_dims = _apply_where_map_frames(t_lazy, t.dims, t.where_map_frames)
+        carry = [c for c in lag_cols if c in term_dims and c != time_dim and c != lag_col]
         lagged = t_lazy.rename({time_dim: "_lag_src"})
         # Align Enum dtypes on the carry columns (symmetric keys) and on
         # the asymmetric (lag_col, _lag_src) pair.  The asymmetric pair
@@ -1836,8 +1993,8 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
         )
         new_terms.append(
             _Term(
-                j.select(*[d for d in t.dims if d != time_dim], time_dim, "col_id", "coef"),
-                t.dims,
+                j.select(*[d for d in term_dims if d != time_dim], time_dim, "col_id", "coef"),
+                term_dims,
                 param_sources=t.param_sources,
             )
         )
@@ -1861,9 +2018,21 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
     the LHS prune-down (``_build_lhs_pruned_plan``) can apply it at the
     leaf-rebuild step (where the row count is bounded by the smaller of
     ``Var.frame`` and the row_index key set).  ``var_source`` / Param
-    chain / ``coef_scalar`` are preserved.  Set
-    ``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1`` to recover today's
-    behaviour (eager join + clear metadata) verbatim.
+    chain / ``coef_scalar`` are preserved.
+
+    The map-effect case (extras non-empty) ALSO defers: ``frame`` is
+    recorded into ``_Term.where_map_frames`` as ``(frame_lf,
+    frozenset(extras))``, the term's dims are extended with the extras,
+    and ``var_source`` / Param chain / ``coef_scalar`` / ``where_frames``
+    are preserved.  The deferred inner-join (which produces the extras
+    dim columns) is baked at leaf-rebuild time (or at Sum / Lag /
+    consumer fallback) via :func:`_apply_where_map_frames`.  Param
+    multiplies AFTER the map-effect Where bake first iff their dims
+    overlap any pending extras (correctness); otherwise the deferral
+    propagates through.
+
+    Set ``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1`` to recover today's
+    behaviour (eager join + clear metadata) verbatim for BOTH branches.
     """
     if isinstance(expr, Var):
         expr = expr.to_expr()
@@ -1894,21 +2063,29 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
             new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
             continue
         if extra:
-            # Map effect — changes the term's row identity in a way the
-            # leaf-rebuild can't preserve.  Eagerly join (today's path)
-            # and clear var_source / coef_scalar / where_frames; keep
-            # param_sources (the Param's contribution is already baked).
-            # Fix latent bug: when ``shared==[]`` but ``extras!=()``,
-            # explicitly cross-join so the extras columns actually
-            # land in the lazy plan (today the columns were claimed in
-            # ``dims`` but never produced — downstream broke).
-            f = t.lazy
-            if shared:
-                f, frame_lf_a = _align_enum_join_keys(f, frame_lf, shared)
-                f = f.join(frame_lf_a, on=shared, how="inner")
-            else:
-                f = f.join(frame_lf, how="cross")
-            new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
+            # Map effect — the frame introduces new open dims (extras).
+            # DEFER (pushdown enabled): record ``(frame_lf,
+            # frozenset(extras))`` into ``where_map_frames``, extend the
+            # term's dims with the extras, and PRESERVE
+            # ``var_source`` / ``param_sources`` / ``coef_scalar`` /
+            # ``where_frames`` so the LHS prune-down (and, later,
+            # block-COO) can still reach the leaves.  The dim-extending
+            # inner-join is baked at leaf-rebuild / Sum / Lag / fallback
+            # via :func:`_apply_where_map_frames`.  Param multiplies bake
+            # first iff their dims overlap any pending extras (see
+            # :func:`_bake_map_before_mul`).
+            prev_map = t.where_map_frames or ()
+            new.append(
+                _Term(
+                    t.lazy,
+                    t.dims + extra,
+                    param_sources=t.param_sources,
+                    var_source=t.var_source,
+                    coef_scalar=t.coef_scalar,
+                    where_frames=t.where_frames,
+                    where_map_frames=prev_map + ((frame_lf, frozenset(extra)),),
+                )
+            )
             continue
         # Pure-filter — defer.  When ``shared`` is empty the filter is a
         # no-op for this term's row set (no shared keys to constrain
@@ -1924,6 +2101,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                     var_source=t.var_source,
                     coef_scalar=t.coef_scalar,
                     where_frames=t.where_frames,
+                    where_map_frames=t.where_map_frames,
                 )
             )
             continue
@@ -1936,6 +2114,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                 var_source=t.var_source,
                 coef_scalar=t.coef_scalar,
                 where_frames=prev + (frame_lf,),
+                where_map_frames=t.where_map_frames,
             )
         )
     return Expr(new)
@@ -1986,15 +2165,18 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
     for t in expr.terms:
         # Bake any deferred Where filters before the per-term ``where``
         # kwarg join — Sum collapses dims, so the filter has to land
-        # at the leaf level.
+        # at the leaf level.  Pure-filter frames first (semi-join), then
+        # map-effect frames (inner-join, dim-extending) — the latter
+        # produces the extras columns that ``term_dims`` claims.
         f = _apply_where_frames(t.lazy, t.dims, t.where_frames)
+        f, term_dims = _apply_where_map_frames(f, t.dims, t.where_map_frames)
         if where_lf is not None:
-            shared = [c for c in where_cols if c in t.dims]
+            shared = [c for c in where_cols if c in term_dims]
             if shared:
                 where_sub = where_lf.select(shared).unique()
                 f, where_sub = _align_enum_join_keys(f, where_sub, shared)
                 f = f.join(where_sub, on=shared, how="inner")
-        keep = tuple(d for d in t.dims if d not in over)
+        keep = tuple(d for d in term_dims if d not in over)
         # If the Sum collapses any of the source-Param's dim columns,
         # multiple cells (with different param values) get merged into
         # one — we can no longer recover the per-cell param contribution
@@ -2994,6 +3176,17 @@ class Problem:
                         _block_spec = _block_coo_classify(
                             term, axis_cols, on, self._dense_axes
                         )
+                    # A deferred map-effect Where (non-None
+                    # where_map_frames) introduces extras dims that the
+                    # block-COO seed (Var dims only) cannot carry.  The
+                    # classifier already declines such terms (``on`` then
+                    # includes an extra ∉ var.dims), but guard explicitly:
+                    # bake-before-block keeps the path byte-identical and
+                    # routes the term to the prune / fallback arms which
+                    # handle where_map_frames.  Phase C-3 will teach
+                    # block-COO to assemble the map-join itself.
+                    if term.where_map_frames is not None:
+                        _block_spec = None
                     _use_block_coo = _block_spec is not None
                     if _use_block_coo:
                         # Verify the client's dense_axes sort contract on
@@ -3046,6 +3239,7 @@ class Problem:
                             on,
                             coef_scalar=term.coef_scalar,
                             where_frames=term.where_frames,
+                            where_map_frames=term.where_map_frames,
                         ).select("_rid", "col_id", "coef")
                         if _profile:
                             _cm_emit(
@@ -3058,9 +3252,14 @@ class Problem:
                     else:
                         # Bake any deferred Where filters before the
                         # semi-join — fallback path must apply them
-                        # since prune-down isn't firing here.
+                        # since prune-down isn't firing here.  Pure-filter
+                        # first, then map-effect (dim-extending) so the
+                        # plan carries the extras columns ``on`` may need.
                         term_lazy_filtered = _apply_where_frames(
                             term.lazy, term.dims, term.where_frames
+                        )
+                        term_lazy_filtered, _ = _apply_where_map_frames(
+                            term_lazy_filtered, term.dims, term.where_map_frames
                         )
                         rl_a, tl_a = _align_enum_join_keys(
                             row_index_lf, term_lazy_filtered, on
@@ -3279,7 +3478,16 @@ class Problem:
         # convention; orchestrator principle #4).
         col_obj = np.zeros(n_cols, dtype=np.float64)
         for t in self._obj_terms:
-            f = t.lazy.collect()
+            # Bake any deferred Where pushdown frames before the collect.
+            # Objective terms flow through Sum(over=None), which already
+            # bakes both slots, so this is a defensive no-op on the
+            # production path — but it keeps the bake-before-consume
+            # invariant uniform across every ``term.lazy`` consumer.
+            _obj_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
+            _obj_lazy, _ = _apply_where_map_frames(
+                _obj_lazy, t.dims, t.where_map_frames
+            )
+            f = _obj_lazy.collect()
             if f.height == 0:
                 del f
                 continue
@@ -3927,7 +4135,13 @@ class Problem:
         # only — there is no row_factor entry for the cost row.
         _cf_obj = self._layer2_col_factor
         for t in self._obj_terms:
-            f = t.lazy.collect()
+            # Defensive bake-before-consume (see _build_canonical_matrix
+            # objective loop) — Sum(over=None) already bakes both slots.
+            _obj_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
+            _obj_lazy, _ = _apply_where_map_frames(
+                _obj_lazy, t.dims, t.where_map_frames
+            )
+            f = _obj_lazy.collect()
             cids = f["col_id"].to_numpy()
             vals = f["coef"].to_numpy()
             if _cf_obj is not None:
@@ -4296,6 +4510,12 @@ class Problem:
                         _block_spec = _block_coo_classify(
                             term, axis_cols, on, self._dense_axes
                         )
+                    # See _build_canonical_matrix: a deferred map-effect
+                    # Where cannot be carried by the block-COO seed —
+                    # bake-before-block (route to prune / fallback) keeps
+                    # the path byte-identical until Phase C-3.
+                    if term.where_map_frames is not None:
+                        _block_spec = None
                     _use_block_coo = _block_spec is not None
                     if _use_block_coo:
                         _verify_dense_sorted(
@@ -4341,6 +4561,7 @@ class Problem:
                             on,
                             coef_scalar=term.coef_scalar,
                             where_frames=term.where_frames,
+                            where_map_frames=term.where_map_frames,
                         ).select("_rid", "col_id", "coef")
                         if _sp_on:
                             _sp_emit(
@@ -4353,9 +4574,13 @@ class Problem:
                     else:
                         # Bake any deferred Where filters before the
                         # semi-join — fallback path applies them since
-                        # prune-down isn't firing here.
+                        # prune-down isn't firing here.  Pure-filter then
+                        # map-effect (dim-extending).
                         term_lazy_filtered = _apply_where_frames(
                             term.lazy, term.dims, term.where_frames
+                        )
+                        term_lazy_filtered, _ = _apply_where_map_frames(
+                            term_lazy_filtered, term.dims, term.where_map_frames
                         )
                         rl_a, tl_a = _align_enum_join_keys(
                             row_index_lf, term_lazy_filtered, on
@@ -5755,6 +5980,12 @@ class WarmProblem:
                         _block_spec = _block_coo_classify(
                             term, axis_cols, on, p._dense_axes
                         )
+                    # See _build_canonical_matrix: a deferred map-effect
+                    # Where cannot be carried by the block-COO seed —
+                    # bake-before-block (route to prune / fallback) keeps
+                    # the warm path byte-identical until Phase C-3.
+                    if term.where_map_frames is not None:
+                        _block_spec = None
                     if _block_spec is not None:
                         _verify_dense_sorted(
                             term.var_source.frame,
@@ -5801,6 +6032,7 @@ class WarmProblem:
                             on,
                             coef_scalar=term.coef_scalar,
                             where_frames=term.where_frames,
+                            where_map_frames=term.where_map_frames,
                         ).select("_rid", "col_id", "coef", *term.dims)
                         if _sp_on:
                             _sp_emit(
@@ -5813,9 +6045,14 @@ class WarmProblem:
                     else:
                         # Bake any deferred Where filters before the
                         # semi-join — fallback path applies them since
-                        # prune-down isn't firing here.
+                        # prune-down isn't firing here.  Pure-filter then
+                        # map-effect (dim-extending), so ``*term.dims``
+                        # (which now includes any extras) is satisfied.
                         term_lazy_filtered = _apply_where_frames(
                             term.lazy, term.dims, term.where_frames
+                        )
+                        term_lazy_filtered, _ = _apply_where_map_frames(
+                            term_lazy_filtered, term.dims, term.where_map_frames
                         )
                         rl_a, tl_a = _align_enum_join_keys(
                             row_index_lf, term_lazy_filtered, on

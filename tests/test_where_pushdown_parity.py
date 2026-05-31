@@ -29,7 +29,7 @@ import os
 import numpy as np
 import polars as pl
 
-from polar_high.engine import Param, Problem, Sum, Where
+from polar_high.engine import Param, Problem, Sum, WarmProblem, Where
 
 # --------------------------------------------------------------------- #
 # Helpers                                                               #
@@ -171,11 +171,147 @@ def test_where_pure_filter_var_param_param():
 
 
 def test_where_with_extras_map_effect():
-    """``Where(v*p, frame_with_extra_dim)`` — pushdown takes the
-    map-effect branch (eager join, clear metadata); parity must hold."""
+    """``Where(v*p, frame_with_extra_dim)`` — pushdown DEFERS the
+    map-effect via ``where_map_frames`` (preserving var_source); the
+    disabled path eagerly joins + clears.  Byte-identity must hold."""
     _assert_parity(
         _build_v_p_problem(rows=50, sel_rows=8, chain_len=1, with_extra_dim=True)
     )
+
+
+def test_map_where_inside_sum_node_balance_shape():
+    """``Sum(Where(v * P, map_frame_introducing_g) * P2, over=g)`` —
+    the nodeBalance-shaped pattern: a map-effect Where INSIDE a Sum,
+    with a Param multiply AFTER the map Where.  Asserts:
+
+    * byte-identical canonical matrix deferred (pushdown on) vs eager
+      (``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1``);
+    * the deferred map-effect term carries non-None ``where_map_frames``
+      and PRESERVES ``var_source`` (the whole point — eager clears it).
+    """
+
+    def builder() -> Problem:
+        rows = 40
+        p = Problem()
+        x_idx = list(range(rows))
+        v = p.add_var("v", ("x",), pl.DataFrame({"x": x_idx}), lower=0.0, upper=1e6)
+        P = Param(
+            ("x",),
+            pl.DataFrame({"x": x_idx, "value": np.linspace(0.2, 1.8, rows)}),
+            name="P",
+        )
+        # Map frame introduces a new dim 'g' from (x): two g-groups.
+        g_of = ["g0" if i % 2 == 0 else "g1" for i in x_idx]
+        map_frame = pl.DataFrame({"x": x_idx, "g": g_of})
+        # Param keyed on the post-map dim 'g' (multiply AFTER the map
+        # Where — exercises the bake-before-mul overlap path).
+        P2 = Param(
+            ("g",),
+            pl.DataFrame({"g": ["g0", "g1"], "value": [3.0, 7.0]}),
+            name="P2",
+        )
+        mapped = Where(v * P, map_frame) * P2
+        lhs = Sum(mapped, over=("g",))
+        p.add_cstr(
+            "nb",
+            over=pl.DataFrame({"x": x_idx}),
+            sense="<=",
+            lhs_terms={"lhs": lhs},
+            rhs_terms={"rhs": 0.0},
+        )
+        return p
+
+    _assert_parity(builder)
+
+    # Inspect the deferred intermediate: build the map-Where * P2 term
+    # WITHOUT the Sum to confirm var_source + where_map_frames survive.
+    _clear_guard()
+    rows = 40
+    x_idx = list(range(rows))
+    pp = Problem()
+    v = pp.add_var("v", ("x",), pl.DataFrame({"x": x_idx}), lower=0.0)
+    P = Param(
+        ("x",),
+        pl.DataFrame({"x": x_idx, "value": np.linspace(0.2, 1.8, rows)}),
+        name="P",
+    )
+    g_of = ["g0" if i % 2 == 0 else "g1" for i in x_idx]
+    map_frame = pl.DataFrame({"x": x_idx, "g": g_of})
+    expr = Where(v * P, map_frame)
+    t = expr.terms[0]
+    assert t.where_map_frames is not None, "map-effect Where must defer"
+    assert t.var_source is not None, "var_source must be preserved"
+    assert "g" in t.dims and "g" not in t.lazy.collect_schema().names()
+
+
+def _build_node_balance_solve_problem() -> Problem:
+    """A solvable node-balance-shaped LP: ``Sum_x∈g Where(v*P, map)``
+    must meet a per-group demand (``>=``), minimise weighted cost.  The
+    map-effect Where (x → g) drives a constraint indexed by g, so the
+    LHS for that family exercises the deferred map-join at every engine
+    site (canonical / streaming / warm)."""
+    n = 12
+    x_idx = list(range(n))
+    p = Problem()
+    v = p.add_var("v", ("x",), pl.DataFrame({"x": x_idx}), lower=0.0, upper=10.0)
+    # Per-x conversion factor on the LHS (Param BEFORE the map Where).
+    P = Param(
+        ("x",),
+        pl.DataFrame({"x": x_idx, "value": np.linspace(0.5, 1.5, n)}),
+        name="P",
+    )
+    g_of = ["g0" if i < n // 2 else "g1" for i in x_idx]
+    map_frame = pl.DataFrame({"x": x_idx, "g": g_of})
+    lhs = Sum(Where(v * P, map_frame), over=("x",))
+    demand = Param(
+        ("g",),
+        pl.DataFrame({"g": ["g0", "g1"], "value": [4.0, 6.0]}),
+        name="demand",
+    )
+    p.add_cstr(
+        "balance",
+        over=pl.DataFrame({"g": ["g0", "g1"]}),
+        sense=">=",
+        lhs_terms={"lhs": lhs},
+        rhs_terms={"rhs": demand},
+    )
+    cost = Param(
+        ("x",),
+        pl.DataFrame({"x": x_idx, "value": np.linspace(1.0, 2.0, n)}),
+        name="cost",
+    )
+    p.set_objective(Sum(v * cost), sense="min")
+    return p
+
+
+def test_map_where_solve_parity_all_engines():
+    """Solve the node-balance-shaped LP under deferred (pushdown on) and
+    eager (``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1``) regimes, across the
+    one-shot (streaming=False), streaming (streaming=True) and warm
+    engines.  All six solves must agree on the objective — this is the
+    end-to-end guard that the deferred map-join is wired correctly at
+    every LHS consumer site, not just ``_build_canonical_matrix``."""
+    objs: dict[str, float] = {}
+    for label, disable in (("on", False), ("off", True)):
+        _clear_guard()
+        try:
+            if disable:
+                _set_disable()
+            sol_oneshot = _build_node_balance_solve_problem().solve(streaming=False)
+            sol_stream = _build_node_balance_solve_problem().solve(streaming=True)
+            wp = WarmProblem(_build_node_balance_solve_problem())
+            sol_warm = wp.solve()
+        finally:
+            _clear_guard()
+        assert sol_oneshot.optimal and sol_stream.optimal and sol_warm.optimal
+        objs[f"{label}_oneshot"] = sol_oneshot.obj
+        objs[f"{label}_stream"] = sol_stream.obj
+        objs[f"{label}_warm"] = sol_warm.obj
+    ref = objs["on_oneshot"]
+    for k, val in objs.items():
+        assert abs(val - ref) <= 1e-9 * max(1.0, abs(ref)), (
+            f"objective mismatch {k}={val} vs ref={ref}\nall={objs}"
+        )
 
 
 def test_nested_where():
@@ -456,10 +592,16 @@ def test_rhs_where_filter_preserved_through_negation():
 
 
 def test_where_shared_empty_extras_nonempty():
-    """Latent-bug regression: when ``shared==[]`` but ``extras!=()``,
-    the original code skipped the join AND claimed extras in dims —
-    leaving the lazy plan without the extras columns.  The fix
-    explicitly cross-joins so the extras land in the frame."""
+    """``shared==[] and extras!=()`` map-effect Where, now DEFERRED.
+
+    With the Tier-1 map-effect deferral the extras column is NOT baked
+    into ``t.lazy`` eagerly — it is recorded into ``where_map_frames``
+    and the term's dims are extended.  Baking via
+    :func:`_apply_where_map_frames` reproduces the eager cross-join
+    (3 rows in v × 2 rows in f = 6) so the dim claim is honoured at the
+    leaf.  The disabled-pushdown path still bakes eagerly (verbatim)."""
+    from polar_high.engine import _apply_where_map_frames
+
     p = Problem()
     v = p.add_var("v", ("x",), pl.DataFrame({"x": [1, 2, 3]}), lower=0.0)
     # Frame has NO shared columns with v — extras-only path.
@@ -467,10 +609,29 @@ def test_where_shared_empty_extras_nonempty():
     _clear_guard()
     expr = Where(v, f)
     t = expr.terms[0]
-    schema_cols = t.lazy.collect_schema().names()
-    # After fix: lazy plan must carry 'y' (cross-joined) so the term's
-    # dim claim is honoured.
-    assert "y" in schema_cols
+    # Deferred: dims claim 'y' but the lazy plan does not yet carry it.
     assert t.dims == ("x", "y")
-    # Sanity: 3 rows in v × 2 rows in f = 6.
-    assert t.lazy.collect().height == 6
+    assert t.where_map_frames is not None
+    schema_cols = t.lazy.collect_schema().names()
+    assert "y" not in schema_cols
+    # Baking the deferred map frame reproduces the eager cross-join.
+    baked_lf, baked_dims = _apply_where_map_frames(
+        t.lazy, t.dims, t.where_map_frames
+    )
+    assert "y" in baked_lf.collect_schema().names()
+    assert set(baked_dims) == {"x", "y"}
+    assert baked_lf.collect().height == 6
+
+    # Disabled pushdown: today's verbatim behaviour for the
+    # ``shared==[] and extras!=()`` case is the latent bug preserved on
+    # purpose — the join is SKIPPED, so 'y' is claimed in dims but never
+    # produced in the lazy plan (no where_map_frames either).
+    try:
+        _set_disable()
+        expr_off = Where(v, f)
+        t_off = expr_off.terms[0]
+        assert t_off.dims == ("x", "y")
+        assert t_off.where_map_frames is None
+        assert "y" not in t_off.lazy.collect_schema().names()
+    finally:
+        _clear_guard()

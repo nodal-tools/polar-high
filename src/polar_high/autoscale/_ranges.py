@@ -276,6 +276,24 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
     from ..engine import Param as _Param
     from ..engine import _align_enum_join_keys as _align
+    from ..engine import _apply_where_frames, _apply_where_map_frames
+
+    def _bake_term(term) -> tuple[_pl.LazyFrame, tuple[str, ...]]:
+        """Bake any deferred Where pushdown frames (pure-filter
+        ``where_frames`` AND map-effect ``where_map_frames``) into the
+        term's lazy plan so its schema matches ``term.dims`` before
+        consumers (``_align`` / ``.join(on=...)`` / ``_agg`` /
+        ``.select``) read it.  Mirrors the bake-before-consume pattern in
+        ``_build_canonical_matrix`` / ``_solve_streaming`` /
+        ``WarmProblem._initial_build``.  Without the map-effect bake a
+        Tier-1 map-Where leaves ``term.dims`` claiming extras columns
+        that ``term.lazy`` does not yet carry, and the ``_align`` /
+        ``join(on=...)`` calls below crash with ColumnNotFoundError.
+        No-op when both metadata slots are ``None`` (the common case).
+        """
+        lf = _apply_where_frames(term.lazy, term.dims, term.where_frames)
+        lf, dims = _apply_where_map_frames(lf, term.dims, term.where_map_frames)
+        return lf, dims
 
     _profile = _os.environ.get("POLAR_HIGH_RANGES_PROFILE") == "1"
     if _profile:
@@ -412,10 +430,13 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
+        # Bake deferred Where pushdown frames before consuming the lazy
+        # plan (Sum(over=None) objective terms already bake — defensive).
+        t_lazy, _t_dims = _bake_term(t)
         if _l2_cf is None:
-            lo, hi = _agg(t.lazy, "coef")
+            lo, hi = _agg(t_lazy, "coef")
         else:
-            plan = t.lazy.select("col_id", "coef")
+            plan = t_lazy.select("col_id", "coef")
             df = _collect_streaming(plan)
             if df.height == 0:
                 lo, hi = None, None
@@ -597,15 +618,21 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             row_index_lf_rid = None
 
         for ti, term in enumerate(proto.expr.terms):
-            if not term.dims or row_index_lf is None:
+            # Bake deferred Where pushdown frames before the joins below.
+            # Without this, a Tier-1 map-effect Where leaves ``term.dims``
+            # claiming extras columns ``term.lazy`` does not yet carry,
+            # and the ``_align`` / ``join(on=...)`` calls fail with
+            # ColumnNotFoundError (the miss the prototype made on DES).
+            term_lazy, term_dims = _bake_term(term)
+            if not term_dims or row_index_lf is None:
                 # Scalar (no row binding) — broadcast across the family
                 # rows.  ``_agg`` reduces |coef| only; when side vectors
                 # are on, expand to per-(row,col) magnitudes so the row/
                 # col factors apply.
                 if _l2_rf is None and _l2_cf is None:
-                    lo, hi = _agg(term.lazy, "coef")
+                    lo, hi = _agg(term_lazy, "coef")
                 else:
-                    df = _collect_streaming(term.lazy.select("col_id", "coef"))
+                    df = _collect_streaming(term_lazy.select("col_id", "coef"))
                     if df.height == 0:
                         lo, hi = None, None
                     else:
@@ -623,9 +650,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             tiled_vals = np.outer(rf_slice, vals).ravel()
                             lo, hi = _reduce_abs(tiled_vals)
             else:
-                on = [d for d in term.dims if d in axis_cols]
+                on = [d for d in term_dims if d in axis_cols]
                 if _l2_rf is None:
-                    rl_a, tl_a = _align(row_index_lf, term.lazy, on)
+                    rl_a, tl_a = _align(row_index_lf, term_lazy, on)
                     keys = rl_a.select(on).unique()
                     pruned = tl_a.join(keys, on=on, how="semi")
                     if _l2_cf is None:
@@ -645,7 +672,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     # Side vectors on — left-join with ``_rid`` so the
                     # collected frame carries the absolute row id needed
                     # to index ``_l2_rf``.
-                    rl_a, tl_a = _align(row_index_lf_rid, term.lazy, on)
+                    rl_a, tl_a = _align(row_index_lf_rid, term_lazy, on)
                     keys = rl_a.select(on).unique()
                     pruned = tl_a.join(keys, on=on, how="semi")
                     plan = (
@@ -667,7 +694,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             if _profile:
                 _emit(
                     "term_done", family=cname, term_idx=ti,
-                    has_dims=str(bool(term.dims)),
+                    has_dims=str(bool(term_dims)),
                 )
 
     matrix = (matrix_lo, matrix_hi) if matrix_hi > 0 else _NAN_PAIR
@@ -743,21 +770,31 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     import polars as pl  # local import — autoscale must not pull polars
 
     # at import time for environments that don't need this fallback.
+    from ..engine import _apply_where_frames, _apply_where_map_frames
+
     for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
-        if isinstance(t.lazy, pl.LazyFrame):
+        # Bake deferred Where pushdown frames before the collect — same
+        # invariant as ``_ranges_via_streaming``.  Objective terms flow
+        # through Sum(over=None) which already bakes, so this is a
+        # defensive no-op in production but keeps the invariant uniform.
+        _t_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
+        _t_lazy, _ = _apply_where_map_frames(
+            _t_lazy, t.dims, t.where_map_frames
+        )
+        if isinstance(_t_lazy, pl.LazyFrame):
             try:
-                f = t.lazy.collect(engine="streaming")
+                f = _t_lazy.collect(engine="streaming")
             except TypeError:
                 try:
-                    f = t.lazy.collect(streaming=True)
+                    f = _t_lazy.collect(streaming=True)
                 except TypeError:
-                    f = t.lazy.collect()
+                    f = _t_lazy.collect()
             except Exception:
-                f = t.lazy.collect()
+                f = _t_lazy.collect()
         else:
-            f = t.lazy
+            f = _t_lazy
         if f.height == 0:
             continue
         np.add.at(
