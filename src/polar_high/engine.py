@@ -693,36 +693,99 @@ def _block_coo_min_dense() -> int:
     return v if v > 0 else 100
 
 
+def _verify_dense_sorted(
+    frame,
+    lead_dims: list[str],
+    dense_axes,
+    var_name: str | None = None,
+) -> None:
+    """Cheaply verify the client's dense-axis sort contract on ``frame``.
+
+    The :class:`Problem` ``dense_axes`` contract (see ``Problem.__init__``)
+    promises that any client frame carrying the dense axes is globally
+    lexicographically sorted by ``lead_dims + list(dense_axes)`` — i.e.
+    the dense axes are the trailing sort keys (in declared order) and the
+    leading dims form a sorted prefix.  Block-COO slices the dense suffix
+    with NO re-sort, so a broken promise would silently produce wrong
+    coefficients; this verifier makes it a loud, immediate error instead.
+
+    Implementation: a SINGLE-PASS monotonic check, NOT a sort.  We build a
+    struct column over ``lead_dims + dense_axes`` (polars struct compares
+    lexicographically, field-by-field in declaration order) and call
+    :meth:`polars.Series.is_sorted`, which is an O(n) "is each row >= its
+    predecessor?" scan — it never reorders the data.  ``frame`` may be a
+    :class:`polars.DataFrame` or a lazy frame (collected here; block-COO
+    needs the Var eager anyway, and the verifier touches only the key
+    columns).
+
+    Raises ``ValueError`` naming the originating Var/frame and restating
+    the contract when the scan finds a descent.
+    """
+    keys = list(lead_dims) + list(dense_axes)
+    df = frame.collect() if isinstance(frame, pl.LazyFrame) else frame
+    if df.height <= 1:
+        return
+    sorted_ok = df.select(pl.struct(keys).alias("__bc_key")).to_series().is_sorted()
+    if not sorted_ok:
+        who = f" for Var {var_name!r}" if var_name else ""
+        raise ValueError(
+            f"block-COO dense_axes contract violated{who}: the frame is not "
+            f"lexicographically sorted by {tuple(keys)} "
+            f"(leading dims {tuple(lead_dims)} then dense axes "
+            f"{tuple(dense_axes)}).  The Problem was constructed with "
+            f"dense_axes={tuple(dense_axes)}, which promises every frame "
+            "carrying those columns is already row-sorted with the dense "
+            "axes as the trailing sort keys; polar-high relies on that to "
+            "slice the dense suffix without re-sorting.  Re-sort the frame "
+            "by (lead..., *dense_axes) before passing it, or do not declare "
+            "these dense_axes."
+        )
+
+
 def _block_coo_classify(
     term: _Term,
     axis_cols: list[str],
     on: list[str],
+    dense_axes,
 ) -> dict | None:
     """Classify whether a non-Sum ``Var × Param-chain`` LHS term is
-    block-COO evaluable.  Returns a small spec ``dict`` if it is, else
-    ``None`` (caller falls back to the existing path).
+    block-COO evaluable against the client-DECLARED dense suffix.  Returns
+    a small spec ``dict`` if it is, else ``None`` (caller falls back to the
+    existing path).
 
-    A term is block-evaluable iff ALL of:
+    The dense set is no longer GUESSED by cardinality — it is exactly the
+    ``dense_axes`` the client declared on the :class:`Problem` (see
+    ``Problem.__init__``).  A term is block-evaluable iff ALL of:
 
+    * ``dense_axes`` is non-empty (the client opted in to the contract).
     * ``term.var_source is not None`` — guarantees a non-Sum / non-Lag /
       non-map-Where term (those clear ``var_source``), so there is an
       unreduced ``Var × P1 × P2 …`` chain to slice.
-    * ``term.param_sources`` is a non-empty list of ``(Param, dir)``.
+    * ``term.param_sources`` is a non-empty list of ``(Param, dir)`` with
+      ``dir ∈ {1, -1}``.
     * Every Param's dims are a subset of ``var.dims ∪ axis_cols`` — no
-      foreign dim that the block alignment can't account for.
-    * There is a non-empty "dense" dim set ``D`` = the dims present in
-      EVERY factor (the Var AND every Param), whose total cardinality is
-      ``>= _block_coo_min_dense()``.  Cardinality is estimated as the Var
-      frame height (an upper bound on the distinct dense-key count, since
-      the Var carries one row per ``(*var.dims)`` cell and ``D ⊆
-      var.dims``); this is the cheap correct option — an over-estimate
-      only risks firing block-COO on a term that is actually cheaper in
-      polars (a perf, never a correctness, concern).
+      foreign dim that the block alignment can't account for.  Low-dim /
+      broadcast Params (e.g. ``Pb(p)``) are explicitly ALLOWED: they
+      broadcast, and the existing join-based builder handles them
+      correctly — the dense set is the declared suffix, not the factor
+      intersection.
+    * ``on ⊆ var.dims`` (the block-COO seed carries only var dims; if a
+      join key came from a Param the seed would mis-key — fall back).
+    * **The Var's dims END WITH ``dense_axes`` in the declared order**:
+      ``tuple(var.dims[-len(dense_axes):]) == tuple(dense_axes)``.  This is
+      the suffix contract.  A Var lacking the dense axes, or carrying them
+      non-trailing (e.g. an investment Var ``("p", "d")`` does not end in
+      ``("d", "t")``), does NOT fire — it falls back, correctly.
 
     Conservative by construction: any shape the block loop cannot
-    reproduce bit-identically must return ``None`` here.  False negatives
-    (fall back, slower) are fine; false positives are correctness bugs.
+    reproduce bit-identically must return ``None`` here.  The firing
+    decision is a PERFORMANCE choice (block-COO is bit-identical to the
+    polars path); false negatives (fall back, slower) are always safe.
     """
+    if not dense_axes:
+        return None
+    dense_axes = list(dense_axes)
+
     var = term.var_source
     if var is None:
         return None
@@ -760,32 +823,35 @@ def _block_coo_classify(
     if not set(on).issubset(var_dim_set):
         return None
 
-    # Dense set: dims present in EVERY factor (Var AND every Param).
-    dense = set(var_dims)
-    for atomic, _direction in psrc:
-        dense &= set(atomic.dims)
-    if not dense:
+    # Suffix contract: the Var's dims must END WITH the declared dense_axes
+    # in the declared order.  This is what lets block-COO slice the dense
+    # suffix with no re-sort under the client's sort promise.  No firing
+    # otherwise (fall back) — the firing decision is perf-only.
+    if len(dense_axes) > len(var_dims):
         return None
-    # Canonical dense order = var-dim order restricted to dense set.
-    dense_dims = [d for d in var_dims if d in dense]
-    if not dense_dims:
+    if tuple(var_dims[-len(dense_axes):]) != tuple(dense_axes):
         return None
 
-    # Cardinality upper-bound = Var frame height (one row per var cell;
-    # dense ⊆ var.dims so distinct dense keys <= var height).
+    dense_dims = list(dense_axes)
+    non_dense_dims = [d for d in var_dims if d not in set(dense_axes)]
+
+    # OPTIONAL secondary perf gate on the dense-axis cardinality.  Upper
+    # bound = Var frame height (one row per var cell; dense ⊆ var.dims so
+    # distinct dense keys <= var height).  This is PERF-ONLY — it never
+    # affects correctness or the broadcast case; if the height can't be
+    # read we simply skip the gate and fire on the suffix match.
     try:
         dense_card = int(var.frame.height)
     except Exception:
-        return None
-    if dense_card < _block_coo_min_dense():
+        dense_card = None
+    if dense_card is not None and dense_card < _block_coo_min_dense():
         return None
 
-    non_dense_dims = [d for d in var_dims if d not in dense]
     return {
         "var_dims": var_dims,
         "dense_dims": dense_dims,
         "non_dense_dims": non_dense_dims,
-        "dense_card": dense_card,
+        "dense_card": dense_card if dense_card is not None else 0,
         "on": list(on),
     }
 
@@ -1683,7 +1749,7 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
 class Problem:
     """LP container.  Generic — no flextool-specific knowledge."""
 
-    def __init__(self) -> None:
+    def __init__(self, dense_axes: tuple[str, ...] | None = None) -> None:
         """Construct an empty LP container.
 
         Pure polar-high is a generic LP kernel; scaling decisions are
@@ -1691,7 +1757,32 @@ class Problem:
         opt-in autoscaler (Layer 1 detect + Layer 3 recommendation)
         that callers (e.g. FlexTool) use to drive
         ``user_bound_scale`` / ``user_objective_scale`` automatically.
+
+        ``dense_axes`` — the explicit client contract for the block-COO
+        LHS arm.  When the client (e.g. FlexTool) declares the dense
+        trailing axes once here (e.g. ``Problem(dense_axes=("d", "t"))``),
+        it makes a binding PROMISE about every frame it passes that
+        contains those columns:
+
+            the frame is globally lexicographically sorted by
+            ``(other_dims_in_declared_order..., *dense_axes)`` — i.e. the
+            declared dense axes are the trailing sort keys, in the given
+            order, and the leading dims form a sorted prefix.
+
+        This lets block-COO slice the dense suffix of each Var with NO
+        re-sort (a re-sort would cost more than the multiply itself).
+        polar-high VERIFIES this promise cheaply (a single-pass monotonic
+        scan — see :func:`_verify_dense_sorted`) on every Var that the
+        block-COO arm classifies + fires on, and RAISES a clear
+        ``ValueError`` naming the Var if the client breaks it.  Frames
+        that do not contain the dense axes (e.g. an investment Var
+        ``("p", "d")`` when ``dense_axes=("d", "t")``) simply do not fire
+        block-COO and are unaffected.  ``None`` (default) leaves the
+        block-COO arm dormant regardless of the env opt-in.
         """
+        self._dense_axes: tuple[str, ...] | None = (
+            tuple(dense_axes) if dense_axes else None
+        )
         self._vars: dict[str, Var] = {}
         self._cstrs: list[tuple[str, _CstrProto, pl.DataFrame | None]] = []
         self._next_col = 0
@@ -2606,9 +2697,21 @@ class Problem:
                     # separate task wires them.)
                     _block_spec = None
                     if _block_coo_enabled() and not _block_coo_disabled():
-                        _block_spec = _block_coo_classify(term, axis_cols, on)
+                        _block_spec = _block_coo_classify(
+                            term, axis_cols, on, self._dense_axes
+                        )
                     _use_block_coo = _block_spec is not None
                     if _use_block_coo:
+                        # Verify the client's dense_axes sort contract on
+                        # the Var BEFORE building — a mis-ordered frame
+                        # would silently corrupt the dense-suffix slice, so
+                        # raise a clear, actionable error instead.
+                        _verify_dense_sorted(
+                            term.var_source.frame,
+                            _block_spec["non_dense_dims"],
+                            _block_spec["dense_dims"],
+                            getattr(term.var_source, "name", None),
+                        )
                         _t_blk0 = time.monotonic()
                         # Block-COO collects eagerly inside the helper; wrap
                         # the result lazy so the shared per-term collect loop
