@@ -5237,6 +5237,27 @@ class Problem:
                     if term.where_map_frames is not None:
                         _block_spec = None
                     _use_block_coo = _block_spec is not None
+                    # Sum-block-COO sibling arm — identical dispatch to
+                    # Site 1 (_build_canonical_matrix).  Fires on a
+                    # ``Sum``-wrapped Var×Param chain (var_source cleared by
+                    # Sum, SumBlockMeta recipe captured) when the Problem
+                    # declared dense_axes AND the recipe matches the suffix
+                    # contract.  Same off switch; mutually exclusive with the
+                    # non-Sum arm (a Sum term has var_source=None ⇒
+                    # _block_spec is already None).  The builder joins the
+                    # family-local ``row_index_lf`` so its ``_rid`` is
+                    # family-local — exactly matching ``rids_local =
+                    # j["_rid"]`` consumed below.  Wrapped ``.lazy()`` so it
+                    # appends as ``("dim", plan)`` like every other streaming
+                    # term.  Anything the rebuild can't reduce
+                    # bit-equivalently returns None / raises the fallback ⇒
+                    # the term reads its reduced ``term.lazy`` verbatim.
+                    _sum_block_spec = None
+                    if not _use_block_coo and not _block_coo_disabled():
+                        _sum_block_spec = _sum_block_coo_classify(
+                            term, axis_cols, on, self._dense_axes
+                        )
+                    _use_sum_block_coo = _sum_block_spec is not None
                     if _use_block_coo:
                         _verify_dense_sorted(
                             term.var_source.frame,
@@ -5272,6 +5293,69 @@ class Problem:
                             )
                             sys.stderr.flush()
                         plan = plan.lazy()
+                    elif _use_sum_block_coo:
+                        # Verify the dense_axes sort contract on the
+                        # RECIPE's Var (the seed block-COO slices) first.
+                        _sm = term.sum_block_meta
+                        _verify_dense_sorted(
+                            _sm.var_source.frame,
+                            _sum_block_spec["non_dense_dims"],
+                            _sum_block_spec["dense_dims"],
+                            getattr(_sm.var_source, "name", None),
+                        )
+                        _t_blk0 = time.monotonic()
+                        try:
+                            plan = _build_sum_block_coo_plan(
+                                row_index_lf,
+                                axis_cols,
+                                _sm,
+                                on,
+                                _sum_block_spec,
+                            )
+                            _sum_block_fired = True
+                        except _SumBlockCooFallback:
+                            _sum_block_fired = False
+                            plan = None
+                        if _sum_block_fired:
+                            if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+                                _blk_wall = time.monotonic() - _t_blk0
+                                _n_rows = int(plan.height)
+                                _dense = _sum_block_spec["dense_dims"]
+                                _nb = _sum_block_spec["dense_card"]
+                                _avg = (_n_rows / _nb) if _nb else 0.0
+                                sys.stderr.write(
+                                    f"[block_coo profile]\tphase=block_coo_term"
+                                    f"\tkind=sum\tphase_site=streaming"
+                                    f"\tfamily={name}\tfamily_idx={_fam_idx}"
+                                    f"\tterm_idx={_term_idx}"
+                                    f"\tdense_dims={','.join(_dense)}"
+                                    f"\tn_blocks={_nb}"
+                                    f"\tavg_block_size={_avg:.2f}"
+                                    f"\twall_s={_blk_wall:.4f}\n"
+                                )
+                                sys.stderr.flush()
+                            plan = plan.lazy()
+                        else:
+                            # Reduced-``term.lazy`` fallback (identical to
+                            # the final else arm): bake deferred filters,
+                            # then the row_index semi-join + inner-join.
+                            term_lazy_filtered = _apply_where_frames(
+                                term.lazy, term.dims, term.where_frames
+                            )
+                            term_lazy_filtered, _ = _apply_where_map_frames(
+                                term_lazy_filtered,
+                                term.dims,
+                                term.where_map_frames,
+                            )
+                            rl_a, tl_a = _align_enum_join_keys(
+                                row_index_lf, term_lazy_filtered, on
+                            )
+                            keys_lazy = rl_a.select(on).unique()
+                            tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                            plan = (
+                                rl_a.join(tl_pruned, on=on, how="inner")
+                                .select("_rid", "col_id", "coef")
+                            )
                     elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
@@ -6706,6 +6790,49 @@ class WarmProblem:
                     # the warm path byte-identical until Phase C-3.
                     if term.where_map_frames is not None:
                         _block_spec = None
+                    # Sum-block-COO sibling arm for the warm path (Site 3).
+                    # The warm tracker re-joins each tracked Param on its
+                    # dims against the emitted (_rid, col_id, coef,
+                    # *term.dims) frame to recover the per-cell old value and
+                    # cache factor = coef / old_value (numerator) so
+                    # ``update_param`` can recompute factor * new_value.  That
+                    # model is exact ONLY when each emitted cell's coef is a
+                    # SINGLE product linear in the tracked Param's value AND
+                    # every tracked Param's dims are recoverable from the
+                    # emitted ``*term.dims`` (= keep) columns.  So we admit
+                    # the Sum-block arm here ONLY for the RELABEL shape
+                    # (reduce_dims ⊆ var.dims ⇒ every reduce group is
+                    # single-element ⇒ coef is one product, bit-identical to
+                    # the reduced path) AND only when every tracked Param's
+                    # dims ⊆ keep AND keep carries no map-introduced extra
+                    # (keep ⊆ var.dims), so the tracker's re-join keys and the
+                    # cached factor reproduce the cell exactly.  The combining
+                    # shape (coef is a SUM over a reduced dim) and any
+                    # tracked Param keyed on a reduced/map dim would make
+                    # factor * new_value wrong, so they fall through to the
+                    # UNCHANGED reduced ``term.lazy`` warm path (its tracking
+                    # is the guaranteed-correct fallback).  Same off switch as
+                    # the non-Sum arm.
+                    _sum_block_spec = None
+                    if _block_spec is None and not _block_coo_disabled():
+                        _sum_block_spec = _sum_block_coo_classify(
+                            term, axis_cols, on, p._dense_axes
+                        )
+                        if _sum_block_spec is not None:
+                            _keep_set = set(_sum_block_spec["keep"])
+                            _var_dims_set = set(_sum_block_spec["var_dims"])
+                            _relabel = set(
+                                _sum_block_spec["reduce_dims"]
+                            ).issubset(_var_dims_set)
+                            _keep_in_var = _keep_set.issubset(_var_dims_set)
+                            _tracked_ok = all(
+                                set(pobj.dims).issubset(_keep_set)
+                                for pobj, _pdir in tracked_sources
+                            )
+                            if not (_relabel and _keep_in_var and _tracked_ok):
+                                # Warm-tracker-unsafe ⇒ decline; the reduced
+                                # ``term.lazy`` warm path tracks it correctly.
+                                _sum_block_spec = None
                     if _block_spec is not None:
                         _verify_dense_sorted(
                             term.var_source.frame,
@@ -6743,6 +6870,74 @@ class WarmProblem:
                             )
                             sys.stderr.flush()
                         plan = _blk_df.lazy()
+                    elif _sum_block_spec is not None:
+                        # Relabel-shape Sum-block term, tracker-safe (gated
+                        # above).  Build with keep_dims=tuple(term.dims) so
+                        # the emitted frame carries (_rid, col_id, coef,
+                        # *term.dims) — the exact shape the warm tracker's
+                        # re-join + ``abs_rows = base_row + rids`` path below
+                        # consumes.  A fallback sentinel ⇒ reduced
+                        # ``term.lazy`` warm path verbatim.
+                        _sm = term.sum_block_meta
+                        _verify_dense_sorted(
+                            _sm.var_source.frame,
+                            _sum_block_spec["non_dense_dims"],
+                            _sum_block_spec["dense_dims"],
+                            getattr(_sm.var_source, "name", None),
+                        )
+                        _t_blk0 = time.monotonic()
+                        try:
+                            _blk_df = _build_sum_block_coo_plan(
+                                row_index_lf,
+                                axis_cols,
+                                _sm,
+                                on,
+                                _sum_block_spec,
+                                keep_dims=tuple(term.dims),
+                            )
+                            _sum_block_fired = True
+                        except _SumBlockCooFallback:
+                            _sum_block_fired = False
+                        if _sum_block_fired:
+                            if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+                                _blk_wall = time.monotonic() - _t_blk0
+                                _n_rows = int(_blk_df.height)
+                                _dense = _sum_block_spec["dense_dims"]
+                                _nb = _sum_block_spec["dense_card"]
+                                _avg = (_n_rows / _nb) if _nb else 0.0
+                                sys.stderr.write(
+                                    f"[block_coo profile]\tphase=block_coo_term"
+                                    f"\tkind=sum\tphase_site=warm"
+                                    f"\tfamily={cname}\tfamily_idx={_fam_idx}"
+                                    f"\tterm_idx=0"
+                                    f"\tdense_dims={','.join(_dense)}"
+                                    f"\tn_blocks={_nb}"
+                                    f"\tavg_block_size={_avg:.2f}"
+                                    f"\twall_s={_blk_wall:.4f}\n"
+                                )
+                                sys.stderr.flush()
+                            plan = _blk_df.lazy()
+                        else:
+                            # Reduced-``term.lazy`` fallback — identical to
+                            # the final else arm (bake deferred filters, then
+                            # the row_index semi-join + inner-join carrying
+                            # ``*term.dims`` for the tracker re-join).
+                            term_lazy_filtered = _apply_where_frames(
+                                term.lazy, term.dims, term.where_frames
+                            )
+                            term_lazy_filtered, _ = _apply_where_map_frames(
+                                term_lazy_filtered,
+                                term.dims,
+                                term.where_map_frames,
+                            )
+                            rl_a, tl_a = _align_enum_join_keys(
+                                row_index_lf, term_lazy_filtered, on
+                            )
+                            keys_lazy = rl_a.select(on).unique()
+                            tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                            plan = rl_a.join(
+                                tl_pruned, on=on, how="inner"
+                            ).select("_rid", "col_id", "coef", *term.dims)
                     elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
