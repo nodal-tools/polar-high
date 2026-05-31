@@ -651,28 +651,12 @@ def _block_coo_disabled() -> bool:
     :func:`_build_block_coo_plan` in
     :meth:`Problem._build_canonical_matrix`) is skipped entirely and the
     term falls through to the existing LHS prune-down / fallback paths
-    verbatim.  Block-COO is bit-identical to the polars path, so this
-    flag exists only as an escape hatch / parity-test lever, not because
-    the two paths can disagree numerically.
+    verbatim.  Block-COO is default ON (see ``specs/block_coo_DECISIONS.md``
+    D5) and bit-identical to the polars path, so this flag exists only as
+    an escape hatch / parity-test lever, not because the two paths can
+    disagree numerically.
     """
     return os.environ.get("POLAR_HIGH_DISABLE_BLOCK_COO") == "1"
-
-
-def _block_coo_enabled() -> bool:
-    """Return True only when ``POLAR_HIGH_ENABLE_BLOCK_COO=1`` (default
-    off).
-
-    Block-COO defaults OFF.  The non-Sum arm wired here has no memory
-    advantage over the shipped LHS prune-down (no reduction → every factor
-    must reach grid resolution before the multiply) and it collects
-    eagerly, so it must NOT silently affect real solves until the valuable
-    Sum-reduction case (Phase C, deferred) lands.  Users opt in explicitly
-    with ``POLAR_HIGH_ENABLE_BLOCK_COO=1``; :func:`_block_coo_disabled`
-    (``POLAR_HIGH_DISABLE_BLOCK_COO=1``) remains a hard override for
-    forward-compat once the arm is on by default.  See
-    ``specs/block_coo_DECISIONS.md`` D3/D4.
-    """
-    return os.environ.get("POLAR_HIGH_ENABLE_BLOCK_COO") == "1"
 
 
 def _block_coo_min_dense() -> int:
@@ -2022,11 +2006,11 @@ class Problem:
         that do not contain the dense axes (e.g. an investment Var
         ``("p", "d")`` when ``dense_axes=("d", "t")``) simply do not fire
         block-COO and are unaffected.  ``None`` (default) leaves the
-        block-COO arm dormant regardless of the env opt-in.
+        block-COO arm dormant — it only fires once dense axes are declared
+        (here or via :meth:`declare_dense_axes`).
         """
-        self._dense_axes: tuple[str, ...] | None = (
-            tuple(dense_axes) if dense_axes else None
-        )
+        self._dense_axes: tuple[str, ...] | None = None
+        self.declare_dense_axes(dense_axes)
         self._vars: dict[str, Var] = {}
         self._cstrs: list[tuple[str, _CstrProto, pl.DataFrame | None]] = []
         self._next_col = 0
@@ -2080,6 +2064,26 @@ class Problem:
         # orchestrator decision D8.
         self._matrix: _CanonicalMatrix | None = None
         self._canonical_dirty: bool = True
+
+    def declare_dense_axes(self, axes: tuple[str, ...] | None) -> None:
+        """Declare the dense trailing axes for block-COO (see __init__ contract).
+
+        Equivalent to passing ``dense_axes=`` to the constructor; provided so
+        callers that receive an already-constructed Problem (e.g. FlexTool's
+        ``build_flextool`` step, which builds the Problem first and populates
+        it afterwards) can declare them.  Pass ``None`` to clear.
+        """
+        if axes is None:
+            self._dense_axes = None
+            return
+        if not isinstance(axes, (tuple, list)) or not all(
+            isinstance(a, str) for a in axes
+        ):
+            raise TypeError(
+                "declare_dense_axes expects a tuple/list of str (or None); "
+                f"got {axes!r}"
+            )
+        self._dense_axes = tuple(axes) if axes else None
 
     def set_solver_options(self, options: dict | None) -> None:
         """Store HiGHS options to be applied in ``solve()``.  Pass ``None``
@@ -2927,20 +2931,18 @@ class Problem:
                     # Var×Param chains — it key-aligns factors and does the
                     # final multiply in numpy on contiguous value buffers
                     # while staying bit-identical (same factor order, same
-                    # row set, same IEEE-double ops).  It defaults OFF
-                    # (opt-in via POLAR_HIGH_ENABLE_BLOCK_COO=1): the
-                    # non-Sum arm is performance-neutral vs the shipped
-                    # prune-down (no reduction → all factors reach grid
-                    # resolution) and collects eagerly, so it must not
-                    # silently affect real solves before the valuable Phase
-                    # C Sum-reduction case lands (see DECISIONS D3/D4).
-                    # Conservatively gated by the classifier; any shape it
-                    # can't reproduce exactly returns None → fall through to
-                    # prune-down / fallback unchanged.  (Sites 2/3 —
-                    # streaming / warm — are left on the prune-down path; a
-                    # separate task wires them.)
+                    # row set, same IEEE-double ops).  It is default ON;
+                    # POLAR_HIGH_DISABLE_BLOCK_COO=1 is the off switch (see
+                    # DECISIONS D5).  It fires ONLY when the Problem declares
+                    # dense_axes AND the term matches the suffix contract, so
+                    # default-on is inert for callers that don't declare
+                    # dense_axes.  Conservatively gated by the classifier;
+                    # any shape it can't reproduce exactly returns None →
+                    # fall through to prune-down / fallback unchanged.
+                    # (Sites 2/3 — streaming / warm — are left on the
+                    # prune-down path; a separate task wires them.)
                     _block_spec = None
-                    if _block_coo_enabled() and not _block_coo_disabled():
+                    if not _block_coo_disabled():
                         _block_spec = _block_coo_classify(
                             term, axis_cols, on, self._dense_axes
                         )

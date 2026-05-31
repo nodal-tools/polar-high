@@ -23,12 +23,13 @@ when the Var's dims END WITH the declared dense axes (the suffix
 contract), verifies the sort promise cheaply, and RAISES a clear
 ``ValueError`` if the client breaks it.
 
-Block-COO defaults OFF (opt-in via ``POLAR_HIGH_ENABLE_BLOCK_COO=1``;
-see ``specs/block_coo_DECISIONS.md`` D3/D4).  These tests pin bit-identity
-by canonicalising each builder twice: once with block-COO OFF (no opt-in
-→ polars prune-down / fallback), once with ``POLAR_HIGH_ENABLE_BLOCK_COO=1``
-(block-COO ON) — and the canonical matrix triples must be EQUAL with NO
-tolerance.
+Block-COO is default ON; ``POLAR_HIGH_DISABLE_BLOCK_COO=1`` is the off
+switch (see ``specs/block_coo_DECISIONS.md`` D5).  It fires only when the
+Problem declares ``dense_axes``.  These tests pin bit-identity by
+canonicalising each builder twice: once under the DEFAULT (block-COO ON),
+once with ``POLAR_HIGH_DISABLE_BLOCK_COO=1`` (block-COO OFF → polars
+prune-down / fallback) — and the canonical matrix triples must be EQUAL
+with NO tolerance.
 
 All builders construct frames in ``itertools.product(lead..., d, t)``
 order, which is exactly the row order the dense_axes contract requires
@@ -52,8 +53,11 @@ from polar_high.engine import Param, Problem, Where
 
 
 def _clear_guard() -> None:
-    os.environ.pop("POLAR_HIGH_ENABLE_BLOCK_COO", None)
+    # Drop the off switch (and any stale opt-in env from the removed
+    # POLAR_HIGH_ENABLE_BLOCK_COO era) so block-COO runs at its default
+    # (ON, see D5).
     os.environ.pop("POLAR_HIGH_DISABLE_BLOCK_COO", None)
+    os.environ.pop("POLAR_HIGH_ENABLE_BLOCK_COO", None)
     # Keep the other prune/pushdown levers at their defaults so the
     # comparison is block-COO-on vs block-COO-off, all else equal.
     os.environ.pop("POLAR_HIGH_DISABLE_PRUNE_DOWN", None)
@@ -61,9 +65,9 @@ def _clear_guard() -> None:
     os.environ.pop("POLAR_HIGH_BLOCK_COO_MIN_DENSE", None)
 
 
-def _set_enable() -> None:
-    """Opt block-COO ON (it defaults OFF — D3)."""
-    os.environ["POLAR_HIGH_ENABLE_BLOCK_COO"] = "1"
+def _set_disable() -> None:
+    """Force block-COO OFF (it defaults ON — D5)."""
+    os.environ["POLAR_HIGH_DISABLE_BLOCK_COO"] = "1"
 
 
 def _matrix_arrays(m) -> tuple[list, list, list]:
@@ -90,15 +94,15 @@ def _build_and_snapshot(builder) -> tuple[list, list, list]:
 
 def _assert_parity(builder) -> None:
     """Assert byte-for-byte canonical equality between block-COO-on and
-    block-COO-off runs of the same builder.  OFF = no opt-in (default,
-    polars prune-down / fallback); ON = ``POLAR_HIGH_ENABLE_BLOCK_COO=1``."""
+    block-COO-off runs of the same builder.  ON = the DEFAULT (no env);
+    OFF = ``POLAR_HIGH_DISABLE_BLOCK_COO=1`` (polars prune-down / fallback)."""
     _clear_guard()
     try:
+        _set_disable()
         snap_off = _build_and_snapshot(builder)
     finally:
         _clear_guard()
     try:
-        _set_enable()
         snap_on = _build_and_snapshot(builder)
     finally:
         _clear_guard()
@@ -110,19 +114,14 @@ def _assert_parity(builder) -> None:
     )
 
 
-def _block_coo_fires(builder, *, enable: bool = True) -> bool:
+def _block_coo_fires(builder) -> bool:
     """Detect whether the block-COO arm fires for the builder's single
-    LHS family/term by reading the PROFILE stream.
-
-    ``enable`` opts block-COO ON (it defaults OFF — D3).  Pass
-    ``enable=False`` to assert the default-off behaviour (no opt-in →
-    must NOT fire)."""
+    LHS family/term by reading the PROFILE stream, under the DEFAULT
+    (block-COO ON, no env — D5)."""
     import io
     import sys as _sys
 
     _clear_guard()
-    if enable:
-        _set_enable()
     os.environ["POLAR_HIGH_BLOCK_COO_PROFILE"] = "1"
     buf = io.StringIO()
     old = _sys.stderr
@@ -152,7 +151,6 @@ def _block_coo_paths(builder) -> list[str]:
     import sys as _sys
 
     _clear_guard()
-    _set_enable()
     os.environ["POLAR_HIGH_BLOCK_COO_PROFILE"] = "1"
     buf = io.StringIO()
     old = _sys.stderr
@@ -368,15 +366,83 @@ def test_block_coo_scalar_fold_and_division():
     _assert_parity(builder)
 
 
-def test_block_coo_default_off_does_not_fire():
-    """With NO opt-in (``POLAR_HIGH_ENABLE_BLOCK_COO`` unset), block-COO
-    must NOT fire even on a shape the classifier would otherwise accept."""
+def test_block_coo_default_on_fires_without_env():
+    """With NO env set (the DEFAULT — D5), block-COO must fire on an
+    eligible Problem that declares ``dense_axes``."""
     builder = _build_vpp_problem(n_p=3, n_d=5, n_t=40)
-    assert _block_coo_fires(builder, enable=True), (
-        "shape must be block-COO-eligible when opted in"
+    assert _block_coo_fires(builder), (
+        "block-COO must fire by DEFAULT (no env) on the eligible shape"
     )
-    assert not _block_coo_fires(builder, enable=False), (
-        "block-COO must NOT fire without POLAR_HIGH_ENABLE_BLOCK_COO=1"
+    _assert_parity(builder)
+
+
+def test_block_coo_disable_env_forces_off():
+    """``POLAR_HIGH_DISABLE_BLOCK_COO=1`` is the off switch: the same
+    eligible Problem must NOT fire, and parity (ON vs forced-OFF) holds."""
+    builder = _build_vpp_problem(n_p=3, n_d=5, n_t=40)
+    _clear_guard()
+    os.environ["POLAR_HIGH_BLOCK_COO_PROFILE"] = "1"
+    os.environ["POLAR_HIGH_DISABLE_BLOCK_COO"] = "1"
+    import io
+    import sys as _sys
+
+    buf = io.StringIO()
+    old = _sys.stderr
+    try:
+        _sys.stderr = buf
+        prob = builder()
+        prob._build_canonical_matrix()
+    finally:
+        _sys.stderr = old
+        os.environ.pop("POLAR_HIGH_BLOCK_COO_PROFILE", None)
+        _clear_guard()
+    assert "phase=block_coo_term" not in buf.getvalue(), (
+        "POLAR_HIGH_DISABLE_BLOCK_COO=1 must force block-COO OFF"
+    )
+    _assert_parity(builder)
+
+
+def test_declare_dense_axes_equivalent_to_ctor():
+    """``Problem(dense_axes=("d","t"))`` and ``Problem()`` followed by
+    ``declare_dense_axes(("d","t"))`` must produce identical canonical
+    matrices (both fire block-COO, same result)."""
+    n_p, n_d, n_t = 3, 5, 40
+    ps, ds, ts = list(range(n_p)), list(range(n_d)), list(range(n_t))
+
+    def _populate(p: Problem) -> Problem:
+        over = _vdt_over(ps, ds, ts)
+        v = p.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
+        Pa = _dt_param(ds, ts, "Pa", 0.1, 0.9)
+        Pb = _dt_param(ds, ts, "Pb", 2.0, 5.0)
+        p.add_cstr(
+            "c",
+            over=over,
+            sense="<=",
+            lhs_terms={"lhs": v * Pa * Pb},
+            rhs_terms={"rhs": 0.0},
+        )
+        return p
+
+    def ctor_builder() -> Problem:
+        return _populate(Problem(dense_axes=("d", "t")))
+
+    def setter_builder() -> Problem:
+        p = Problem()
+        p.declare_dense_axes(("d", "t"))
+        return _populate(p)
+
+    # Both must fire block-COO under the default.
+    assert _block_coo_fires(ctor_builder)
+    assert _block_coo_fires(setter_builder)
+
+    _clear_guard()
+    try:
+        snap_ctor = _build_and_snapshot(ctor_builder)
+        snap_setter = _build_and_snapshot(setter_builder)
+    finally:
+        _clear_guard()
+    assert snap_ctor == snap_setter, (
+        "declare_dense_axes must be equivalent to the dense_axes ctor kwarg"
     )
 
 
@@ -496,7 +562,7 @@ def test_block_coo_var_without_dense_suffix_falls_back():
 
 def test_block_coo_verification_raises_on_misordered_input():
     """A Var ``over`` frame deliberately NOT sorted by (p, d, t) violates
-    the dense_axes sort contract.  With block-COO enabled,
+    the dense_axes sort contract.  Under the DEFAULT (block-COO ON),
     ``_build_canonical_matrix`` must RAISE ``ValueError`` naming the
     contract — polar-high's own ``add_var`` does NOT sort, so the unsorted
     frame stays unsorted and trips the verifier."""
@@ -529,7 +595,6 @@ def test_block_coo_verification_raises_on_misordered_input():
 
     _clear_guard()
     try:
-        _set_enable()
         prob = builder()
         with pytest.raises(ValueError, match="dense_axes contract violated"):
             prob._build_canonical_matrix()
