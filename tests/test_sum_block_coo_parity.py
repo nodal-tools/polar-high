@@ -463,9 +463,11 @@ def _capture_sum_block_args(builder):
     captured: dict = {}
     orig = eng._build_sum_block_coo_relabel
 
-    def _spy(row_index_lf, axis_cols, meta, on, dense_spec, keep_dims=None):
+    def _spy(row_index_lf, axis_cols, meta, on, dense_spec, keep_dims=None, **kw):
         captured["args"] = (row_index_lf, axis_cols, meta, on, dense_spec, keep_dims)
-        return orig(row_index_lf, axis_cols, meta, on, dense_spec, keep_dims)
+        return orig(
+            row_index_lf, axis_cols, meta, on, dense_spec, keep_dims, **kw
+        )
 
     _clear_guard()
     os.environ["POLAR_HIGH_BLOCK_COO_MIN_DENSE"] = "1"

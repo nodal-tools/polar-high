@@ -1199,6 +1199,8 @@ def _build_block_coo_plan(
     where_frames: tuple[pl.LazyFrame, ...] | None,
     dense_spec: dict,
     keep_dims: tuple[str, ...] | None = None,
+    *,
+    dense_param_vectors: dict[int, np.ndarray] | None = None,
 ) -> pl.DataFrame:
     """Evaluate a non-Sum ``Var × Param-chain`` LHS term via *positional*
     per-block numpy slice-multiply on the already-sorted Var grid, with NO
@@ -1260,6 +1262,18 @@ def _build_block_coo_plan(
     subset of ``var.dims`` (it rides on the seed and survives to the final
     join); we verify that and fall back to the joined builder otherwise.
     Default ``None`` ⇒ the unchanged ``(_rid, col_id, coef)`` shape.
+
+    ``dense_param_vectors`` (perf hoist for the bounded coefficient walk) is
+    an optional ``{id(atomic): sorted-dense-value-array}`` cache for the
+    dense-only Param case: a dense-only Param's value vector (sorted by
+    ``dense_dims``) is BATCH-INVARIANT (the same vector is tiled onto every
+    leading block of every batch), so the walk collects it ONCE per term and
+    threads it here, letting each batch tile from the cached numpy buffer
+    instead of re-running ``atomic.lazy.collect().sort(dense_dims)``.  When a
+    Param is absent from the cache (or the cache is ``None``) the builder
+    collects it inline exactly as before — the cache is a pure speed hoist,
+    bit-identical (same sorted vector either way).  Default ``None`` ⇒ the
+    unchanged per-call collect (canonical-matrix callers).
     """
     var_dims = list(var_source.dims)
     var_on = [d for d in var_dims if d in axis_cols]
@@ -1377,11 +1391,24 @@ def _build_block_coo_plan(
             # --- Case dense-only: one dense vector shared by every block.
             # Sort the (small) Param by dense_dims, read its value array
             # (must be length n_dense — else it's sparse on the dense axis
-            # ⇒ fall back), tile across all blocks, multiply.
-            atomic_df = atomic.lazy.collect().sort(dense_dims)
-            if atomic_df.height != n_dense:
+            # ⇒ fall back), tile across all blocks, multiply.  The sorted
+            # dense vector is batch-invariant, so the bounded walk may supply
+            # it pre-collected via ``dense_param_vectors`` (keyed by id) — use
+            # the cached buffer when present, else collect+sort inline.
+            dense_vals = (
+                dense_param_vectors.get(id(atomic))
+                if dense_param_vectors is not None
+                else None
+            )
+            if dense_vals is None:
+                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                if atomic_df.height != n_dense:
+                    return _build_block_coo_plan_joined(*_fallback_args)
+                dense_vals = (
+                    atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+                )
+            elif dense_vals.size != n_dense:
                 return _build_block_coo_plan_joined(*_fallback_args)
-            dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
             tiled = np.tile(dense_vals, n_lead)
             if direction >= 0:
                 coef = coef * tiled
@@ -1588,6 +1615,8 @@ def _build_sum_block_coo_relabel(
     on: list[str],
     dense_spec: dict,
     keep_dims: tuple[str, ...] | None = None,
+    *,
+    dense_param_vectors: dict[int, np.ndarray] | None = None,
 ) -> pl.DataFrame:
     """Relabel fast-path for a ``Sum``-wrapped ``Var × Param-chain`` term
     when ``reduce_dims ⊆ var.dims`` (Phase C-3b).
@@ -1718,11 +1747,24 @@ def _build_sum_block_coo_relabel(
                 coef = coef / repeated
 
         elif has_dense and not has_lead and shared == dense_dims:
-            # Dense-only: one dense vector shared by every block.
-            atomic_df = atomic.lazy.collect().sort(dense_dims)
-            if atomic_df.height != n_dense:
+            # Dense-only: one dense vector shared by every block.  The sorted
+            # dense vector is batch-invariant, so the bounded walk may supply
+            # it pre-collected via ``dense_param_vectors`` (keyed by id) — use
+            # the cached buffer when present, else collect+sort inline.
+            dense_vals = (
+                dense_param_vectors.get(id(atomic))
+                if dense_param_vectors is not None
+                else None
+            )
+            if dense_vals is None:
+                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                if atomic_df.height != n_dense:
+                    raise _SumBlockCooFallback("relabel: dense-only sparse")
+                dense_vals = (
+                    atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+                )
+            elif dense_vals.size != n_dense:
                 raise _SumBlockCooFallback("relabel: dense-only sparse")
-            dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
             tiled = np.tile(dense_vals, n_lead)
             if direction >= 0:
                 coef = coef * tiled
@@ -1782,6 +1824,8 @@ def _build_sum_block_coo_plan(
     on: list[str],
     dense_spec: dict,
     keep_dims: tuple[str, ...] | None = None,
+    *,
+    dense_param_vectors: dict[int, np.ndarray] | None = None,
 ) -> pl.DataFrame:
     """Evaluate a ``Sum``-wrapped ``Var × Param-chain`` LHS term (Phase
     C-3a) by rebuilding the unreduced product from the
@@ -1853,7 +1897,13 @@ def _build_sum_block_coo_plan(
             sys.stderr.write("[block_coo profile]\tkind=sum\tpath=relabel\n")
             sys.stderr.flush()
         return _build_sum_block_coo_relabel(
-            row_index_lf, axis_cols, meta, on, dense_spec, keep_dims
+            row_index_lf,
+            axis_cols,
+            meta,
+            on,
+            dense_spec,
+            keep_dims,
+            dense_param_vectors=dense_param_vectors,
         )
     if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
         sys.stderr.write("[block_coo profile]\tkind=sum\tpath=combining\n")
@@ -3301,24 +3351,45 @@ class Problem:
 
         What goes: every ``_Term.lazy`` plan (objective and constraint
         LHS), every ``_CstrProto.rhs`` reference (which may pin a Param
-        frame), and the constraint-family list itself.  Sets
-        :attr:`_released` so :meth:`solve` refuses to run again — the
-        Problem is no longer re-emittable.
+        frame), every ``_Term.sum_block_meta`` recipe (whose FULL,
+        un-survivor-filtered ``param_sources`` pins the summed-out dense
+        Params for the Problem's lifetime — see below), and the
+        constraint-family list itself.  Sets :attr:`_released` so
+        :meth:`solve` refuses to run again — the Problem is no longer
+        re-emittable.
+
+        Why ``sum_block_meta`` must go too: a ``Sum``-reduced term clears
+        its own ``var_source`` and *survivor-filters* ``param_sources``
+        (dropping the summed-out factors), but the captured
+        :class:`SumBlockMeta` recipe snapshots the FULL pre-Sum chain —
+        including those summed-out ``(d,t)`` Params (e.g. a profile ×
+        availability product collapsed by a ``Sum``).  The matrix build
+        is the recipe's last reader; once HiGHS owns the assembled LP the
+        recipe is dead weight that would otherwise keep every snapshotted
+        dense Param (and its eager source frame) alive past release,
+        defeating the save_memory contract.  Nulling ``t.lazy`` /
+        ``t.param_sources`` alone does NOT release them — the recipe is a
+        separate, independent reference.
         """
         # Objective terms: drop lazy plans first so any Param objects
         # referenced via ``param_sources`` aren't extended past the
-        # constraint walk below.
+        # constraint walk below.  Also drop the SumBlockMeta recipe, whose
+        # FULL param chain independently pins the summed-out dense Params.
         for t in self._obj_terms:
             t.lazy = None  # type: ignore[assignment]
             t.param_sources = None
+            t.sum_block_meta = None
         self._obj_terms = []
 
         # Constraint families: clear each Expr's term list and drop the
         # rhs reference (which may be a Param holding a sizeable eager
-        # frame).  We don't touch ``over`` — it's typically the row-
-        # index DataFrame, already small compared to the LHS plans we
-        # just dropped, and stripping it would complicate any future
-        # diagnostic that wants to report which family came last.
+        # frame).  Clearing the term list drops each term object whole,
+        # so its ``sum_block_meta`` recipe (and the dense Params that
+        # recipe pins) goes with it — no separate null needed here.  We
+        # don't touch ``over`` — it's typically the row-index DataFrame,
+        # already small compared to the LHS plans we just dropped, and
+        # stripping it would complicate any future diagnostic that wants
+        # to report which family came last.
         for _name, proto, _over in self._cstrs:
             proto.expr.terms = []
             proto.rhs = None
@@ -7358,5 +7429,26 @@ class WarmProblem:
         self._n_rows = int(n_rows)
         self._col_names = col_names
         self._row_names = row_names
+
+        # Release the per-term ``SumBlockMeta`` recipe now the build has
+        # consumed it.  A ``Sum``-reduced term survivor-filters its own
+        # ``param_sources`` (dropping the summed-out factors), but the
+        # captured recipe snapshots the FULL pre-Sum chain — pinning the
+        # summed-out dense ``(d,t)`` Params (and their eager source frames)
+        # for this WarmProblem's whole lifetime.  This build is the
+        # recipe's LAST reader (the matrix-assembly block-COO Sum path
+        # above + every autoscale readout that ran before it); the warm
+        # update machinery (``update_param`` / the tracked-source second
+        # pass) keys off ``term.param_sources`` and ``self._param_cells``,
+        # NOT the recipe, so dropping it cannot perturb a warm update.
+        # WarmProblem never calls ``_release_python_lp_inputs`` (the
+        # save_memory cold path), so without this the recipe ratchets dense
+        # Params up across rolls until OOM.
+        for t in p._obj_terms:
+            t.sum_block_meta = None
+        for _name, _proto, _over in p._cstrs:
+            for t in _proto.expr.terms:
+                t.sum_block_meta = None
+
         if _sp_on:
             _sp_emit("initial_build_exit", n_cols=int(n_cols), n_rows=int(n_rows))

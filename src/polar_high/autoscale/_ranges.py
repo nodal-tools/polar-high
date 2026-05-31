@@ -281,11 +281,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _apply_where_map_frames,
         _block_coo_classify,
         _block_coo_disabled,
-        _build_block_coo_plan,
-        _build_sum_block_coo_plan,
         _emit_block_coo_path,
         _sum_block_coo_classify,
-        _SumBlockCooFallback,
         _verify_dense_sorted,
     )
     from ._coef_walk import (
@@ -424,26 +421,6 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             matrix_lo = lo
         if hi > matrix_hi:
             matrix_hi = hi
-
-    def _reduce_lhs_block(
-        rid_local: np.ndarray, col_id: np.ndarray, coef: np.ndarray
-    ) -> tuple[float | None, float | None]:
-        """Bounded min/max(abs(post-Layer-2 LHS coef)) for a block-COO
-        term.  Reproduces the side-vectors-on streaming magnitude
-        expression (``_ranges.py`` LHS dim branch) EXACTLY:
-
-            vals = coef * |_l2_rf[base_row + _rid]|
-            vals *= |_l2_cf[col_id]|        # only if _l2_cf is not None
-
-        then reduces via :func:`_reduce_abs` (same finite/non-zero mask).
-        ``_l2_rf`` is required (this primitive is only used on the side-
-        vectors-on path); ``base_row`` and the side vectors are captured
-        from the enclosing scope.  Shared with the D-2 RHS path.
-        """
-        vals = coef * np.abs(_l2_rf[base_row + rid_local])
-        if _l2_cf is not None:
-            vals = vals * np.abs(_l2_cf[col_id])
-        return _reduce_abs(vals)
 
     def _rhs_chain_bounded_coef(
         over_grid, axis_cols_l: list[str], rhs_param, cname: str
@@ -1232,7 +1209,26 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # (mirrors the canonical builder's explicit guard).
                 if term.where_map_frames is not None:
                     _blk_spec = None
-                _blk_df = None
+                # Does the bounded block-COO LHS path APPLY to this term?
+                # The classification below is CHEAP (no coefficient
+                # materialisation): it only inspects the term's recipe /
+                # dim layout to decide whether block-COO can rebuild the
+                # ``(_rid, col_id, coef)`` triple bit-identically.  When it
+                # can, we run the readout through the BOUNDED coefficient
+                # walk (per-``_WALK_BATCH_ROWS``-row slices of the family's
+                # ``over`` spine) instead of a single whole-family
+                # ``_build_block_coo_plan`` collect.  The walk's
+                # per-batch dispatch (``_build_constraint_batch_triple``)
+                # is the SAME block-COO classify+build this inline arm used
+                # to run on the WHOLE family — only the row_index handed to
+                # the builder is a batch slice, so each batch's product is
+                # bounded and freed before the next.  min/max is
+                # order-free, so the folded result is BYTE-IDENTICAL to the
+                # old whole-family collect (proven by the parity tests).
+                # This removes the wide-family materialisation (e.g.
+                # ``profile_flow_upper_limit``'s ~10⁵-row triple, ~32 GB on
+                # DES) without any per-family special-casing or size gate.
+                _block_applies = False
                 if _blk_spec is not None:
                     _verify_dense_sorted(
                         term.var_source.frame,
@@ -1240,24 +1236,14 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                         _blk_spec["dense_dims"],
                         getattr(term.var_source, "name", None),
                     )
-                    _blk_df = _build_block_coo_plan(
-                        row_index_lf_rid,
-                        axis_cols,
-                        term.var_source,
-                        term.param_sources,
-                        blk_on,
-                        term.coef_scalar,
-                        term.where_frames,
-                        _blk_spec,
-                    )
+                    _block_applies = True
                 else:
                     # Sum-wrapped Var × Param chain (var_source cleared by
                     # Sum, recipe captured).  Only the RELABEL branch is
                     # bit-identical to polars' group_by; the combining
                     # branch is bit-EQUIVALENT, which would perturb the
                     # reported magnitude — so decline unless the spec
-                    # routes to relabel (``reduce_dims ⊆ var.dims``), and
-                    # fall back on the builder's fallback sentinel too.
+                    # routes to relabel (``reduce_dims ⊆ var.dims``).
                     _sum_spec = _sum_block_coo_classify(
                         term, axis_cols, blk_on, dense_axes
                     )
@@ -1271,27 +1257,27 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                                 _sum_spec["dense_dims"],
                                 getattr(_sm.var_source, "name", None),
                             )
-                            try:
-                                _blk_df = _build_sum_block_coo_plan(
-                                    row_index_lf_rid,
-                                    axis_cols,
-                                    _sm,
-                                    blk_on,
-                                    _sum_spec,
-                                )
-                            except _SumBlockCooFallback:
-                                _blk_df = None
-                if _blk_df is not None:
-                    # Both block-COO builders return an eager DataFrame
-                    # with (_rid, col_id, coef).
-                    df = _blk_df.select("_rid", "col_id", "coef")
-                    if df.height == 0:
-                        lo, hi = None, None
-                    else:
-                        rids = df["_rid"].to_numpy().astype(np.int64)
-                        cids = df["col_id"].to_numpy().astype(np.int64)
-                        vals = df["coef"].to_numpy().astype(np.float64)
-                        lo, hi = _reduce_lhs_block(rids, cids, vals)
+                            _block_applies = True
+                if _block_applies:
+                    # Bounded readout: walk the SAME block-COO
+                    # ``(_rid, col_id, coef)`` stream in ``_WALK_BATCH_ROWS``
+                    # slices, folding each batch's |scaled coef| into a
+                    # running min/max via :class:`MinMaxAbsReducer` (which
+                    # applies the IDENTICAL ``|_l2_rf[base_row+_rid]| *
+                    # |_l2_cf[col_id]|`` scale + finite/non-zero mask as
+                    # :func:`_reduce_lhs_block`).  The whole-family triple is
+                    # NEVER materialised.
+                    recipe = _CoefWalkRecipe.from_term(term)
+                    scale = (_l2_rf, base_row, _l2_cf)
+                    (walk_minmax,) = _bounded_coefficient_walk(
+                        over,
+                        recipe,
+                        scale,
+                        [_MinMaxAbsReducer(scale)],
+                        batch_rows=_WALK_BATCH_ROWS,
+                        dense_axes=dense_axes,
+                    )
+                    lo, hi = walk_minmax
                     _update_matrix(lo, hi)
                     if _profile:
                         _emit(

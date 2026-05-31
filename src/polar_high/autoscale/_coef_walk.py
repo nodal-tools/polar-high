@@ -525,11 +525,114 @@ def _resolve_spine_rids(
     return spine, "constraint"
 
 
+class _Hoist:
+    """Per-term batch-INVARIANT state, computed ONCE before the batch loop
+    and threaded into every per-batch builder so the loop is O(n), not
+    O(n²).
+
+    The block-COO chain math depends on the batch's row set ONLY through
+    which seed rows survive the row_index prune; the following pieces do
+    NOT depend on the batch at all and so were redundantly recomputed every
+    batch by the original per-batch builders:
+
+    * ``spec`` — the block-COO classification (dense/non-dense split, on,
+      keep …).  A function of ``var.dims``, ``axis_cols`` and the declared
+      ``dense_axes`` only — never the batch rows.  Classifying once also
+      makes the per-batch builder's only work the bounded chain build.
+    * ``verified`` — the dense-axis sort contract is a property of the WHOLE
+      Var frame (``_verify_dense_sorted`` collects + struct-scans the entire
+      frame).  Verifying it once per term, not once per batch, removes the
+      single biggest O(n²) term (a full-frame collect + ``is_sorted`` scan
+      per batch).
+    * ``dense_param_vectors`` — ``{id(atomic): sorted-dense value array}``
+      for every dense-only Param (``shared == dense_dims``).  Each such
+      vector is tiled identically onto every block of every batch, so it is
+      collected ONCE and threaded into the engine builders via their
+      ``dense_param_vectors`` kwarg (they tile the cached buffer instead of
+      re-running ``atomic.lazy.collect().sort()``).
+    * ``col_seed`` / ``col_coef`` (column / objective mode ONLY) — the whole
+      Var seed and its whole-frame ``(col_id, coef)`` product, computed once
+      in seed order.  Each batch is then a positional slice of these arrays
+      — NO per-batch ``var.frame`` semi-join + collect, NO full scan, no
+      ``_rid`` (the objective row carries no row factor).
+
+    Memory bound
+    ------------
+    Everything held here is column / low-dim scale, NOT the wide product:
+
+    * ``spec`` is a tiny dict; ``verified`` is a bool.
+    * ``dense_param_vectors`` holds one array of length ``n_dense`` per
+      dense-only Param — the dense suffix cardinality (e.g. ``|d|·|t|``),
+      bounded and shared across all blocks, NOT ``n_lead · n_dense``.
+    * ``col_seed`` / ``col_coef`` are column-scale (one entry per Var cell =
+      one LP column) — the SAME order as the objective itself, which the
+      caller already holds.
+
+    The WIDE ``Var × Param`` per-cell product is NOT hoisted: it is still
+    built and released per batch by the constraint-mode builders, so the
+    peak stays bounded by ``batch_rows`` exactly as before.
+    """
+
+    __slots__ = (
+        "mode",
+        "spec",
+        "verified",
+        "dense_param_vectors",
+        "col_coef_cids",
+        "col_coef",
+        "col_coef_order",
+    )
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.spec: dict | None = None
+        self.verified = False
+        self.dense_param_vectors: dict[int, np.ndarray] | None = None
+        # Column / objective mode: the whole-frame (col_id, coef) product
+        # (one entry per LP column) + a sort order over col_id for the
+        # per-batch positional lookup.  None in constraint / param-only mode.
+        self.col_coef_cids: np.ndarray | None = None
+        self.col_coef: np.ndarray | None = None
+        self.col_coef_order: np.ndarray | None = None
+
+
+def _dense_param_vectors(
+    param_sources: Sequence[tuple[Param, int]],
+    var_dims: Sequence[str],
+    dense_dims: Sequence[str],
+) -> dict[int, np.ndarray]:
+    """Collect, ONCE, the sorted-by-``dense_dims`` value array for every
+    dense-only Param in the chain (``shared == dense_dims``).
+
+    These are precisely the Params the engine builders tile across blocks in
+    their dense-only case; the vector is batch-invariant, so we collect it
+    here once and thread it via ``dense_param_vectors``.  Params that are not
+    dense-only (lead-only, lead+dense, scalar, foreign) are skipped — the
+    builder handles them per-batch via its other (cheap, batch-keyed) cases.
+    A Param whose collect does not yield a clean dense vector is omitted, so
+    the builder falls back to its inline collect (and its own length guard).
+    """
+    dense_list = list(dense_dims)
+    var_list = list(var_dims)
+    out: dict[int, np.ndarray] = {}
+    for atomic, _direction in param_sources:
+        shared = [d for d in var_list if d in atomic.dims]
+        if shared != dense_list:
+            continue
+        if id(atomic) in out:
+            continue
+        atomic_df = atomic.lazy.collect().sort(dense_list)
+        out[id(atomic)] = (
+            atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+        )
+    return out
+
+
 def _build_constraint_batch_triple(
     batch_over: pl.DataFrame,
     axis_cols: list[str],
     recipe: CoefWalkRecipe,
-    dense_axes: tuple[str, ...] | None,
+    hoist: _Hoist,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build the ``(_rid, col_id, coef)`` triple for ONE batch of the
     constraint spine, reusing the engine's block-COO builders.
@@ -568,19 +671,16 @@ def _build_constraint_batch_triple(
     row_index_lf = batch_over.lazy()
 
     df: pl.DataFrame | None = None
+    # ``hoist.spec`` was classified ONCE per term (batch-invariant); the
+    # dense-axis sort contract was verified ONCE (``hoist.verified``); the
+    # dense-only Param vectors were collected ONCE
+    # (``hoist.dense_param_vectors``).  This builder only does the bounded,
+    # batch-keyed chain build here.
+    spec = hoist.spec
 
     if recipe.sum_block_meta is None:
-        # Reconstruct a minimal term-shaped object the classifier reads.
-        term_proxy = _NonSumTermProxy(recipe)
         blk_on = [d for d in var.dims if d in axis_cols]
-        spec = _block_coo_classify(term_proxy, axis_cols, blk_on, dense_axes)
         if spec is not None and recipe.where_map_frames is None:
-            _verify_dense_sorted(
-                var.frame,
-                spec["non_dense_dims"],
-                spec["dense_dims"],
-                getattr(var, "name", None),
-            )
             df = _build_block_coo_plan(
                 row_index_lf,
                 axis_cols,
@@ -590,22 +690,20 @@ def _build_constraint_batch_triple(
                 recipe.coef_scalar,
                 recipe.where_frames,
                 spec,
+                dense_param_vectors=hoist.dense_param_vectors,
             )
     else:
         meta = recipe.sum_block_meta
-        term_proxy = _SumTermProxy(recipe)
         keep_on = [d for d in meta.keep if d in axis_cols]
-        spec = _sum_block_coo_classify(term_proxy, axis_cols, keep_on, dense_axes)
         if spec is not None:
-            _verify_dense_sorted(
-                meta.var_source.frame,
-                spec["non_dense_dims"],
-                spec["dense_dims"],
-                getattr(meta.var_source, "name", None),
-            )
             try:
                 df = _build_sum_block_coo_plan(
-                    row_index_lf, axis_cols, meta, keep_on, spec
+                    row_index_lf,
+                    axis_cols,
+                    meta,
+                    keep_on,
+                    spec,
+                    dense_param_vectors=hoist.dense_param_vectors,
                 )
             except _SumBlockCooFallback:
                 df = None
@@ -785,58 +883,48 @@ def _reduced_lazy_collect(
     return plan.collect()
 
 
-def _build_column_batch_triple(
-    batch_seed: pl.DataFrame,
+def _column_whole_product(
+    seed: pl.DataFrame,
     recipe: CoefWalkRecipe,
-    dense_axes: tuple[str, ...] | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build the ``(col_id, coef)`` per-cell product for ONE batch of a
-    *column* spine (objective / bare-Var), reusing the positional
-    block-COO slice-multiply on the batch's Var-seed slice.
+    spec: dict | None,
+    dense_param_vectors: dict[int, np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute the WHOLE-frame ``(col_id, coef)`` per-cell product for a
+    *column* spine (objective / bare-Var) ONCE, in seed order.
 
-    ``batch_seed`` is a slice of the Var frame carrying ``(*var_dims,
-    col_id)``.  The objective has no constraint row, so we attach NO
-    ``_rid``; we feed the seed to :func:`_build_block_coo_plan` as the
-    ``row_index_lf`` keyed on the var dims themselves (an identity attach:
-    ``on = var.dims`` so each seed row maps to exactly itself), then read
-    ``(col_id, coef)`` and report ``rid = -1``.
+    The objective spine IS the Var seed, so the whole product is
+    batch-invariant: every batch is a positional slice of it.  We feed the
+    pre-collected ``seed`` (the whole Var frame, carrying ``(*var_dims,
+    col_id)``) to :func:`_build_block_coo_plan` as the identity row_index
+    (``on = var.dims`` — each seed row maps to itself), so the builder emits
+    one ``(col_id, coef)`` per Var cell.  The dense-only Param vectors are
+    threaded in pre-collected (``dense_param_vectors``) so even this single
+    whole-frame build does no redundant collect.
 
-    This mirrors ``_ranges._obj_chain_bounded`` (the bounded objective
-    Param-chain readout) but generalised to an arbitrary batch slice and
-    routed through the shared block-COO builder rather than a bespoke
-    positional loop.  Param chains are required (a bare Var with no Param
-    yields ``coef == coef_scalar`` directly).
+    Returns ``(col_id, coef)`` numpy arrays paired index-for-index, one
+    entry per Var cell (= one LP column).  Computed ONCE per term; the batch
+    loop then maps each batch's ``col_id`` against these via a sorted lookup
+    — NO per-batch ``var.frame`` semi-join / collect / scan.
     """
     var = recipe.var_source
     var_dims = list(var.dims)
-
     if not recipe.param_sources:
         # Bare Var (no Param chain): coef is the constant coef_scalar per
         # cell.  No product to build.
-        cids = batch_seed["col_id"].to_numpy().astype(np.int64)
+        cids = seed["col_id"].to_numpy().astype(np.int64)
         coef = np.full(cids.size, recipe.coef_scalar, dtype=np.float64)
-        rid = np.full(cids.size, -1, dtype=np.int64)
-        return rid, cids, coef
+        return cids, coef
 
-    # Use the batch seed itself as the row_index, keyed on the var dims —
-    # an identity attach (every seed row joins to itself).  ``axis_cols``
-    # = var dims so the block-COO ``on`` is the full var dim set.
     axis_cols = list(var_dims)
-    # Attach an _rid so the builder's emission schema has it; we ignore it
-    # (column mode reports rid = -1).  The identity row_index carries the
-    # var dims + _rid.
-    row_index = batch_seed.select(*var_dims).with_columns(
-        _rid=pl.int_range(0, batch_seed.height, dtype=pl.Int64)
+    # Identity row_index: the whole seed keyed on the var dims (every row
+    # joins to itself).  The injected _rid is ignored (column mode reports
+    # rid = -1); we read only (col_id, coef).
+    row_index = seed.select(*var_dims).with_columns(
+        _rid=pl.int_range(0, seed.height, dtype=pl.Int64)
     )
-    term_proxy = _NonSumTermProxy(recipe)
     blk_on = list(var_dims)
-    spec = _block_coo_classify(term_proxy, axis_cols, blk_on, dense_axes)
     df: pl.DataFrame | None = None
     if spec is not None and recipe.where_map_frames is None:
-        _verify_dense_sorted(
-            var.frame, spec["non_dense_dims"], spec["dense_dims"],
-            getattr(var, "name", None),
-        )
         df = _build_block_coo_plan(
             row_index.lazy(),
             axis_cols,
@@ -846,18 +934,64 @@ def _build_column_batch_triple(
             recipe.coef_scalar,
             recipe.where_frames,
             spec,
+            dense_param_vectors=dense_param_vectors,
         )
     if df is None:
         df = _lhs_prune_down_collect(row_index.lazy(), axis_cols, recipe)
 
     if df.height == 0:
+        zi = np.empty(0, dtype=np.int64)
+        return zi, np.empty(0, dtype=np.float64)
+    cids = df["col_id"].to_numpy().astype(np.int64)
+    coef = df["coef"].to_numpy().astype(np.float64)
+    return cids, coef
+
+
+def _build_column_batch_triple(
+    batch_seed: pl.DataFrame,
+    recipe: CoefWalkRecipe,
+    hoist: _Hoist,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the ``(rid, col_id, coef)`` triple for ONE batch of a *column*
+    spine by a positional LOOKUP into the hoisted whole-frame product — NO
+    per-batch ``var.frame`` semi-join, collect, sorted-scan, or chain build.
+
+    ``hoist.col_coef`` is the whole-frame ``coef`` (one per LP column),
+    aligned to ``hoist.col_seed``'s ``col_id``.  Each batch carries a slice
+    of the objective spine's ``col_id``; we map those ``col_id`` to their
+    coef via a sorted index into the hoisted arrays.  ``col_id`` is unique
+    per Var cell (one LP column), so the map is 1:1 and exact.  ``rid`` is
+    reported ``-1`` (the objective row carries no row factor).
+    """
+    batch_cids = batch_seed["col_id"].to_numpy().astype(np.int64)
+    if batch_cids.size == 0:
         z = np.empty(0, dtype=np.float64)
         zi = np.empty(0, dtype=np.int64)
         return zi, zi, z
-    cids = df["col_id"].to_numpy().astype(np.int64)
-    coef = df["coef"].to_numpy().astype(np.float64)
-    rid = np.full(cids.size, -1, dtype=np.int64)
-    return rid, cids, coef
+
+    full_cids = hoist.col_coef_cids
+    full_coef = hoist.col_coef
+    order = hoist.col_coef_order
+    if full_cids is None or full_cids.size == 0:
+        z = np.empty(0, dtype=np.float64)
+        zi = np.empty(0, dtype=np.int64)
+        return zi, zi, z
+
+    # Sorted-index lookup of the batch col_ids into the whole-frame product.
+    # ``clip`` keeps searchsorted in-bounds; the equality check below drops
+    # any batch col_id NOT in the product — exactly the cells a sparse Param
+    # dropped from the per-cell chain (the original per-batch builder emitted
+    # height < batch for those), so the surviving set matches byte-for-byte.
+    pos = np.searchsorted(full_cids, batch_cids, sorter=order)
+    pos_clipped = np.clip(pos, 0, order.size - 1)
+    src = order[pos_clipped]
+    hit = full_cids[src] == batch_cids
+    if not hit.all():
+        batch_cids = batch_cids[hit]
+        src = src[hit]
+    coef = full_coef[src]
+    rid = np.full(batch_cids.size, -1, dtype=np.int64)
+    return rid, batch_cids, coef
 
 
 def _build_param_only_batch_triple(
@@ -865,6 +999,7 @@ def _build_param_only_batch_triple(
     axis_cols: list[str],
     recipe: CoefWalkRecipe,
     dense_axes: tuple[str, ...] | None,
+    dense_param_vectors: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build the ``(_rid, coef)`` triple for ONE batch of a Var-LESS
     (Param-only) constraint chain — the RHS Param-product readout.
@@ -904,7 +1039,9 @@ def _build_param_only_batch_triple(
         zi = np.empty(0, dtype=np.int64)
         return zi, zi, z
 
-    coef = _param_only_positional(batch_over, axis_cols, recipe, dense_axes)
+    coef = _param_only_positional(
+        batch_over, axis_cols, recipe, dense_axes, dense_param_vectors
+    )
     if coef is not None:
         # Positional build keeps the batch's row order, so ``_rid`` pairs
         # index-for-index with ``coef``.
@@ -921,6 +1058,7 @@ def _param_only_positional(
     axis_cols: list[str],
     recipe: CoefWalkRecipe,
     dense_axes: tuple[str, ...] | None,
+    dense_param_vectors: dict[int, np.ndarray] | None = None,
 ) -> np.ndarray | None:
     """Positional Param-only product over the batch ``over`` slice — the
     reuse of ``_rhs_chain_bounded_coef``'s three alignment cases.
@@ -930,6 +1068,10 @@ def _param_only_positional(
     decline (caller falls to :func:`_param_only_prune_down`).  Declining is
     always safe — a false decline only changes which (byte-identical) build
     produces the batch.
+
+    ``dense_param_vectors`` is the hoisted ``{id(atomic): sorted-dense value
+    array}`` cache (batch-invariant); the dense-only case tiles the cached
+    buffer instead of re-running ``atomic.lazy.collect().sort()`` per batch.
     """
     if not dense_axes or _block_coo_disabled():
         return None
@@ -1007,12 +1149,22 @@ def _param_only_positional(
                 coef = coef / repeated
 
         elif has_dense and not has_lead and shared == dense_dims:
-            atomic_df = atomic.lazy.collect().sort(dense_dims)
-            if atomic_df.height != n_dense:
-                return None
+            # Dense-only: the sorted dense vector is batch-invariant — use the
+            # hoisted buffer when present, else collect+sort inline.
             dense_vals = (
-                atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+                dense_param_vectors.get(id(atomic))
+                if dense_param_vectors is not None
+                else None
             )
+            if dense_vals is None:
+                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                if atomic_df.height != n_dense:
+                    return None
+                dense_vals = (
+                    atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+                )
+            elif dense_vals.size != n_dense:
+                return None
             tiled = np.tile(dense_vals, n_lead)
             if direction >= 0:
                 coef = coef * tiled
@@ -1145,6 +1297,97 @@ class _SumTermProxy:
         self.dims = meta.keep
 
 
+def _precompute_hoist(
+    recipe: CoefWalkRecipe,
+    annotated: pl.DataFrame,
+    mode: str,
+    axis_cols: list[str],
+    dense_axes: tuple[str, ...] | None,
+) -> _Hoist:
+    """Compute, ONCE per term, all batch-INVARIANT state the per-batch
+    builders would otherwise recompute every batch (the source of the
+    O(n²)).  See :class:`_Hoist` for the memory bound (everything held here
+    is column / low-dim scale, NOT the wide product).
+
+    * Classify the block-COO spec once (a function of var.dims / axis_cols /
+      dense_axes — never the batch rows).
+    * Verify the dense-axis sort contract once on the WHOLE Var frame
+      (``_verify_dense_sorted`` is a full-frame collect + scan; doing it per
+      batch is the single biggest O(n²) term).
+    * Collect the dense-only Param vectors once.
+    * Column / objective mode: collect the whole Var seed and compute its
+      whole-frame ``(col_id, coef)`` product once, in seed order — each batch
+      then positionally maps its ``col_id`` against it.
+
+    The ``param_only`` (Var-less RHS) mode keeps its per-batch positional
+    build (its ``_verify_dense_sorted`` runs on the BATCH slice, already
+    O(batch)); we still hoist its dense-only Param vectors.
+    """
+    hoist = _Hoist(mode)
+
+    if recipe.param_only:
+        # Var-less RHS chain: no Var frame to verify (the batch slice is
+        # verified per batch, O(batch)); hoist only the dense-only Param
+        # vectors keyed by the over-grid dense suffix.
+        if dense_axes:
+            hoist.dense_param_vectors = _dense_param_vectors(
+                recipe.param_sources, axis_cols, list(dense_axes)
+            )
+        return hoist
+
+    # --- Classify the block-COO spec ONCE (batch-invariant).
+    if recipe.sum_block_meta is None:
+        var = recipe.var_source
+        blk_on = list(var.dims) if mode == "column" else [
+            d for d in var.dims if d in axis_cols
+        ]
+        spec = _block_coo_classify(
+            _NonSumTermProxy(recipe), axis_cols, blk_on, dense_axes
+        )
+        verify_frame = var.frame
+        verify_name = getattr(var, "name", None)
+        fires = spec is not None and recipe.where_map_frames is None
+    else:
+        meta = recipe.sum_block_meta
+        keep_on = [d for d in meta.keep if d in axis_cols]
+        spec = _sum_block_coo_classify(
+            _SumTermProxy(recipe), axis_cols, keep_on, dense_axes
+        )
+        verify_frame = meta.var_source.frame
+        verify_name = getattr(meta.var_source, "name", None)
+        fires = spec is not None
+    hoist.spec = spec
+
+    if fires:
+        # --- Verify the dense-axis sort contract ONCE on the whole frame.
+        _verify_dense_sorted(
+            verify_frame,
+            spec["non_dense_dims"],
+            spec["dense_dims"],
+            verify_name,
+        )
+        hoist.verified = True
+        # --- Collect the dense-only Param vectors ONCE.
+        var_dims = spec["var_dims"]
+        hoist.dense_param_vectors = _dense_param_vectors(
+            recipe.param_sources, var_dims, spec["dense_dims"]
+        )
+
+    # --- Column / objective mode: compute the whole-frame product ONCE.
+    # ``_column_whole_product`` uses the positional builder when ``spec``
+    # fires (the verify above has run) and the prune-down fallback otherwise.
+    if mode == "column":
+        seed = annotated  # the objective spine IS the whole Var seed
+        col_cids, col_coef = _column_whole_product(
+            seed, recipe, spec, hoist.dense_param_vectors
+        )
+        hoist.col_coef_cids = col_cids
+        hoist.col_coef = col_coef
+        hoist.col_coef_order = np.argsort(col_cids, kind="stable")
+
+    return hoist
+
+
 def bounded_coefficient_walk(
     spine: pl.DataFrame | pl.LazyFrame,
     recipe: CoefWalkRecipe,
@@ -1247,21 +1490,27 @@ def bounded_coefficient_walk(
         # ``list(over.columns)``.
         axis_cols = [c for c in annotated.columns if c != "_rid"]
 
+    # Hoist all batch-INVARIANT full-frame work to ONCE per term, BEFORE the
+    # batch loop — the classified spec, the dense-axis sort verification, the
+    # dense-only Param vectors, and (column mode) the whole-frame product.
+    # This is what turns the walk from O(n²) (full-frame work × n_batches)
+    # into O(n).  The held state is column / low-dim scale, NOT the wide
+    # product (which is still built + freed per batch below).
+    hoist = _precompute_hoist(recipe, annotated, mode, axis_cols, dense_axes)
+
     start = 0
     while start < n:
         stop = min(start + batch_rows, n)
         batch = annotated.slice(start, stop - start)
         if mode == "column":
-            rid, cid, coef = _build_column_batch_triple(
-                batch, recipe, dense_axes
-            )
+            rid, cid, coef = _build_column_batch_triple(batch, recipe, hoist)
         elif recipe.param_only:
             rid, cid, coef = _build_param_only_batch_triple(
-                batch, axis_cols, recipe, dense_axes
+                batch, axis_cols, recipe, dense_axes, hoist.dense_param_vectors
             )
         else:
             rid, cid, coef = _build_constraint_batch_triple(
-                batch, axis_cols, recipe, dense_axes
+                batch, axis_cols, recipe, hoist
             )
         for r in reducer_list:
             r.update(rid, cid, coef)
