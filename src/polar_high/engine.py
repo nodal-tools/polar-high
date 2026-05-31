@@ -29,6 +29,7 @@ import os
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 
 import highspy
 import numpy as np
@@ -1549,6 +1550,49 @@ class Var:
         return _to_expr(o) - self.to_expr()
 
 
+@dataclass(frozen=True)
+class SumBlockMeta:
+    """Inert reconstruction recipe captured at ``Sum``-time (Phase C-2).
+
+    When a block-eligible term (``var_source`` present, non-empty
+    ``param_sources`` list, non-empty ``over``) is reduced by
+    :func:`Sum`, the aggregation clears ``var_source`` and survivor-
+    filters ``param_sources`` on the returned term, discarding the
+    information needed to rebuild the pre-Sum ``row_index → Var → P1 →
+    P2 …`` chain and reduce it in-block.  :class:`SumBlockMeta` snapshots
+    that pre-Sum state so a future block-COO classifier (Phase C-3) can
+    evaluate the Sum-wrapped chain by rebuilding from leaves and reducing
+    within the block.
+
+    All fields are captured from the PRE-Sum term, *before* any clearing
+    or survivor-filtering:
+
+    * ``var_source`` — the originating :class:`Var`.
+    * ``param_sources`` — the FULL pre-Sum ``list[(Param, direction)]``,
+      NOT survivor-filtered: block-COO needs every factor, including
+      Params whose dims are summed out (e.g. ``p_unitsize`` over ``p``).
+    * ``coef_scalar`` — the cumulative constant scalar folded into coef.
+    * ``where_frames`` — the pre-Sum deferred pure-filter frames.
+    * ``where_map_frames`` — the pre-Sum deferred map-effect frames.
+    * ``reduce_dims`` — the dims summed out (the Sum's ``over``).
+    * ``keep`` — the post-Sum open dims (the returned term's dims).
+
+    This class is currently INERT: nothing reads it (confirmed by grep).
+    It is set ONLY at the point of reduction in :func:`Sum`, never
+    propagated through later :class:`Expr` ops or a nested / re-reduced
+    :func:`Sum` (those set it to ``None``), so a stale recipe can never
+    attach to an already-reduced term.
+    """
+
+    var_source: Var
+    param_sources: tuple[tuple[Param, int], ...]
+    coef_scalar: float
+    where_frames: tuple[pl.LazyFrame, ...] | None
+    where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None
+    reduce_dims: tuple[str, ...]
+    keep: tuple[str, ...]
+
+
 class _Term:
     """One additive term inside an Expr.
 
@@ -1613,6 +1657,17 @@ class _Term:
     at leaf-rebuild time (``_build_lhs_pruned_plan``) or at Sum / Lag /
     consumer-fallback.  Stored as a tuple of immutable
     ``(LazyFrame, frozenset)`` pairs.
+
+    ``sum_block_meta`` — opt-in :class:`SumBlockMeta` snapshot of the
+    pre-Sum reconstruction recipe, set ONLY on the term returned by a
+    block-eligible :func:`Sum` reduction (Phase C-2).  Captures the
+    pre-Sum ``var_source`` / FULL (un-filtered) ``param_sources`` /
+    ``coef_scalar`` / ``where_frames`` / ``where_map_frames`` plus the
+    Sum's ``over`` (``reduce_dims``) and the surviving open dims
+    (``keep``), so a future block-COO classifier can rebuild and reduce
+    the chain in-block.  ``None`` for every other term, including
+    non-block-eligible Sums and nested / re-reduced Sums (never
+    propagated through later ops).  Currently INERT — read nowhere.
     """
 
     __slots__ = (
@@ -1623,6 +1678,7 @@ class _Term:
         "coef_scalar",
         "where_frames",
         "where_map_frames",
+        "sum_block_meta",
     )
 
     def __init__(
@@ -1634,6 +1690,7 @@ class _Term:
         coef_scalar: float = 1.0,
         where_frames: tuple[pl.LazyFrame, ...] | None = None,
         where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None = None,
+        sum_block_meta: SumBlockMeta | None = None,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
@@ -1662,6 +1719,8 @@ class _Term:
             self.where_map_frames = None
         else:
             self.where_map_frames = tuple(where_map_frames)
+        # Inert Phase C-2 reconstruction recipe; read nowhere yet.
+        self.sum_block_meta = sum_block_meta
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -2177,6 +2236,33 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
                 f, where_sub = _align_enum_join_keys(f, where_sub, shared)
                 f = f.join(where_sub, on=shared, how="inner")
         keep = tuple(d for d in term_dims if d not in over)
+        # Phase C-2 (INERT): capture the pre-Sum reconstruction recipe
+        # BEFORE the survivor filter below mutates ``psrc``.  Set ONLY at
+        # the point of a block-eligible reduction — ``var_source`` present,
+        # a non-empty ``param_sources`` list, and a non-empty ``over``.
+        # ``param_sources`` is captured FULL (NOT survivor-filtered) so
+        # block-COO sees every factor, including Params whose dims are
+        # summed out (e.g. ``p_unitsize`` over ``p``).  A nested / re-
+        # reduced Sum (``t`` already carries a recipe) sets the new term's
+        # to None so a stale recipe never propagates.  Nothing reads this
+        # field yet, so the capture is behaviorally inert.
+        block_meta: SumBlockMeta | None = None
+        if (
+            t.var_source is not None
+            and isinstance(t.param_sources, list)
+            and len(t.param_sources) > 0
+            and over
+            and t.sum_block_meta is None
+        ):
+            block_meta = SumBlockMeta(
+                var_source=t.var_source,
+                param_sources=tuple(t.param_sources),
+                coef_scalar=t.coef_scalar,
+                where_frames=t.where_frames,
+                where_map_frames=t.where_map_frames,
+                reduce_dims=tuple(over),
+                keep=keep,
+            )
         # If the Sum collapses any of the source-Param's dim columns,
         # multiple cells (with different param values) get merged into
         # one — we can no longer recover the per-cell param contribution
@@ -2196,7 +2282,7 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
             )
         else:
             f = f.group_by("col_id").agg(pl.col("coef").sum())
-        new_terms.append(_Term(f, keep, param_sources=psrc))
+        new_terms.append(_Term(f, keep, param_sources=psrc, sum_block_meta=block_meta))
     return Expr(new_terms)
 
 
