@@ -457,24 +457,59 @@ class Log2HistogramReducer(Reducer):
         cids = col_id_arr[mask]
         logs = np.log2(a)
         # Per-batch grouping by bucket key.  We classify the (typically
-        # few) DISTINCT col_ids in this batch, then group rows by their
-        # bucket key.  No Python-per-row loop over the coef stream.
+        # few) DISTINCT col_ids in this batch, then accumulate every row's
+        # (log2, magnitude) into its bucket via a single vectorized
+        # segmented reduction.  ``classify`` runs per DISTINCT col_id
+        # (cheap); the per-row work is O(n) bincount + ufunc.at, never the
+        # old O(n_uniq x batch_n) per-uniq full-mask loop.
         uniq_cids, inv = np.unique(cids, return_inverse=True)
         bucket_of_uniq = [self._classify(int(c)) for c in uniq_cids.tolist()]
+        # Map each DISTINCT non-None bucket key to a dense int index; a
+        # ``None`` classification gets -1 so its rows are dropped below
+        # (mirrors ``bucket_coefficients`` skipping unregistered families).
+        key_to_idx: dict[Hashable, int] = {}
+        keys_in_order: list[Hashable] = []
+        uniq_bidx = np.full(uniq_cids.size, -1, dtype=np.int64)
         for u_idx, bkey in enumerate(bucket_of_uniq):
             if bkey is None:
                 continue
-            sel = inv == u_idx
-            if not sel.any():
+            j = key_to_idx.get(bkey)
+            if j is None:
+                j = len(keys_in_order)
+                key_to_idx[bkey] = j
+                keys_in_order.append(bkey)
+            uniq_bidx[u_idx] = j
+        nb = len(keys_in_order)
+        if nb == 0:
+            return
+        # One bucket index per surviving row; drop rows whose col_id
+        # classified to None.
+        row_bidx = uniq_bidx[inv]
+        keep = row_bidx >= 0
+        if not keep.all():
+            row_bidx = row_bidx[keep]
+            logs = logs[keep]
+            a = a[keep]
+        # Segmented reduction over dense bucket indices.  bincount (count,
+        # log2-sum) and minimum/maximum.at (abs-min/max) are order-free, so
+        # count/min/max stay byte-identical to the per-uniq loop; the
+        # log2-sum differs only by FP reassociation.
+        slog = np.bincount(row_bidx, weights=logs, minlength=nb)
+        cnt = np.bincount(row_bidx, minlength=nb).astype(np.int64)
+        bmin = np.full(nb, np.inf, dtype=np.float64)
+        bmax = np.full(nb, -np.inf, dtype=np.float64)
+        np.minimum.at(bmin, row_bidx, a)
+        np.maximum.at(bmax, row_bidx, a)
+        for bkey, j in key_to_idx.items():
+            if cnt[j] == 0:
+                # Empty bucket — never fold (matches old ``if not sel.any``).
                 continue
-            sub_log = logs[sel]
-            sub_a = a[sel]
             self._fold(
                 bkey,
-                float(sub_log.sum()),
-                int(sub_a.size),
-                float(sub_a.min()),
-                float(sub_a.max()),
+                float(slog[j]),
+                int(cnt[j]),
+                float(bmin[j]),
+                float(bmax[j]),
             )
 
     def _fold(
