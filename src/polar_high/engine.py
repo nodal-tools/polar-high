@@ -1430,6 +1430,332 @@ def _build_block_coo_plan(
     ).collect()
 
 
+def _sum_block_coo_classify(
+    term: _Term,
+    axis_cols: list[str],
+    on: list[str],
+    dense_axes,
+) -> dict | None:
+    """Classify whether a ``Sum``-wrapped ``Var × Param-chain`` LHS term
+    (Phase C-3a) can be rebuilt-and-reduced via block-COO from its
+    captured :class:`SumBlockMeta` recipe.  Returns a small spec ``dict``
+    if it can, else ``None`` (caller uses the reduced ``term.lazy`` path
+    verbatim).
+
+    Unlike :func:`_block_coo_classify` (the non-Sum arm) this fires on the
+    POST-Sum term: ``term.var_source`` is ``None`` (Sum cleared it) and
+    ``term.dims`` is the surviving ``keep`` set, but ``term.sum_block_meta``
+    snapshots the FULL pre-Sum recipe (originating Var, the complete —
+    un-survivor-filtered — Param chain, the deferred filter / map-effect
+    Where frames, the Sum's ``over``, and ``keep``).  Block-COO rebuilds
+    the unreduced ``Var × P1 × P2 …`` product on the pre-sorted Var grid,
+    bakes the map-effect Where to introduce the map dims, then reduces over
+    ``reduce_dims`` to ``keep`` — producing the reduced LP coefficients
+    without polars' join + group_by.
+
+    Fires iff ALL hold (else ``None`` → fall back, always safe):
+
+    * ``term.sum_block_meta is not None`` and ``dense_axes`` non-empty.
+    * The recipe's ``var_source`` dims END WITH ``dense_axes`` in declared
+      order (the suffix contract — block-COO slices the dense suffix).
+    * Every Param in the recipe's FULL ``param_sources`` is a real
+      ``(Param, dir)`` pair with ``dir ∈ {±1}`` and dims ⊆
+      ``var.dims ∪ map_extras ∪ axis_cols`` (no foreign dim the rebuild
+      can't account for).
+    * The post-map open dim set = ``var.dims ∪ map_extras``; ``keep`` (=
+      ``term.dims``), ``reduce_dims`` (= ``over``) are both ⊆ that set, and
+      ``on ⊆ keep``.
+
+    Conservative by construction: any shape the rebuild+reduce loop cannot
+    reproduce bit-equivalently must return ``None`` here.
+    """
+    if not dense_axes:
+        return None
+    meta = term.sum_block_meta
+    if meta is None:
+        return None
+    dense_axes = list(dense_axes)
+
+    var = meta.var_source
+    if var is None:
+        return None
+    psrc = list(meta.param_sources)
+    if len(psrc) == 0:
+        return None
+
+    var_dims = list(var.dims)
+    var_dim_set = set(var_dims)
+
+    # Suffix contract: the Var's dims must END WITH the declared dense_axes
+    # in declared order, so block-COO can slice the dense suffix with no
+    # re-sort under the client's sort promise.
+    if len(dense_axes) > len(var_dims):
+        return None
+    if tuple(var_dims[-len(dense_axes):]) != tuple(dense_axes):
+        return None
+
+    # Map-effect extras: dims the deferred map-Where introduces (e.g. ``n``
+    # from ``flow_to_n``).  Collected in frame-column order per frame so the
+    # rebuilt open-dim set is deterministic.  A pure map-effect frame whose
+    # ``shared`` columns are not all ⊆ var.dims would inner-join on a column
+    # the seed (Var dims only) cannot carry — fall back.
+    map_extras: list[str] = []
+    if meta.where_map_frames is not None:
+        for mf, extras in meta.where_map_frames:
+            mf_cols = mf.collect_schema().names()
+            shared = [c for c in mf_cols if c in var_dim_set or c in map_extras]
+            # The map frame's non-extra columns are its join keys; they must
+            # already be present (var dims or a prior frame's extras).  A
+            # frame keyed on a column we cannot supply ⇒ fall back.
+            non_extra = [c for c in mf_cols if c not in extras]
+            if any(c not in var_dim_set and c not in map_extras for c in non_extra):
+                return None
+            if not shared and extras:
+                # Cross-join map frame (no shared key) — the reduce alignment
+                # below relies on a deterministic join; decline rather than
+                # risk a cross-product we cannot reduce cleanly.
+                return None
+            for c in mf_cols:
+                if c in extras and c not in map_extras:
+                    map_extras.append(c)
+
+    # Post-map open dim universe.
+    open_dims = var_dims + [d for d in map_extras if d not in var_dim_set]
+    open_set = set(open_dims)
+    axis_set = set(axis_cols)
+    allowed = open_set | axis_set
+
+    for entry in psrc:
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            return None
+        atomic, direction = entry
+        if not isinstance(atomic, Param):
+            return None
+        if direction not in (1, -1):
+            return None
+        if not set(atomic.dims).issubset(allowed):
+            return None
+
+    keep = list(meta.keep)
+    reduce_dims = list(meta.reduce_dims)
+    if not set(keep).issubset(open_set):
+        return None
+    if not set(reduce_dims).issubset(open_set):
+        return None
+    if not set(on).issubset(set(keep)):
+        return None
+    # ``keep`` must partition the open dims with ``reduce_dims`` — every open
+    # dim is either kept or reduced (no dangling dim that would leave the
+    # group ambiguous).  ``keep`` and ``reduce_dims`` must be disjoint.
+    if set(keep) & set(reduce_dims):
+        return None
+    if open_set != (set(keep) | set(reduce_dims)):
+        return None
+
+    dense_dims = list(dense_axes)
+    non_dense_dims = [d for d in var_dims if d not in set(dense_axes)]
+
+    try:
+        dense_card = int(var.frame.height)
+    except Exception:
+        dense_card = None
+    if dense_card is not None and dense_card < _block_coo_min_dense():
+        return None
+
+    return {
+        "var_dims": var_dims,
+        "dense_dims": dense_dims,
+        "non_dense_dims": non_dense_dims,
+        "map_extras": map_extras,
+        "open_dims": open_dims,
+        "keep": keep,
+        "reduce_dims": reduce_dims,
+        "dense_card": dense_card if dense_card is not None else 0,
+        "on": list(on),
+    }
+
+
+class _SumBlockCooFallback(Exception):
+    """Raised inside :func:`_build_sum_block_coo_plan` when a shape cannot
+    be reconstructed + reduced bit-equivalently, signalling the caller to
+    use the reduced ``term.lazy`` emission verbatim."""
+
+
+def _build_sum_block_coo_plan(
+    row_index_lf: pl.LazyFrame,
+    axis_cols: list[str],
+    meta: SumBlockMeta,
+    on: list[str],
+    dense_spec: dict,
+    keep_dims: tuple[str, ...] | None = None,
+) -> pl.DataFrame:
+    """Evaluate a ``Sum``-wrapped ``Var × Param-chain`` LHS term (Phase
+    C-3a) by rebuilding the unreduced product from the
+    :class:`SumBlockMeta` recipe and reducing it in-block, WITHOUT polars'
+    join + group_by.
+
+    Returns an eager :class:`polars.DataFrame` with columns
+    ``(_rid, col_id, coef[, *keep_dims])`` — the same emission contract as
+    :func:`_build_block_coo_plan`, so the canonical builder consumes it
+    unchanged.
+
+    Algorithm
+    ---------
+    1. **Seed** = ``meta.var_source.frame`` (PRE-SORTED by ``(non_dense…,
+       dense…)`` per the dense_axes contract — verified by the caller via
+       :func:`_verify_dense_sorted`).  Carry ``col_id`` + the Var dims.
+    2. **Bake ``meta.where_frames``** (deferred pure-filter, semi-join,
+       order-preserving) onto the seed.
+    3. **Apply ``meta.where_map_frames``** via :func:`_apply_where_map_frames`
+       to introduce the map dims (e.g. ``n``).  This is an inner-join that
+       can reorder, so we re-establish a deterministic order in step 5.
+    4. **Multiply the FULL ``meta.param_sources``** in chain order (seed
+       ``coef_scalar``, ``*value`` for ``dir >= 0`` / ``/value`` for
+       ``dir < 0``).  Each Param is left-joined onto the accumulator on its
+       shared dims with ``maintain_order="left"`` (verified order-preserving
+       in polars 1.40.1) — the SAME IEEE-double op sequence as the polars
+       prune-down chain.  A sparse Param (a join that introduces a null
+       ``value``) means the recipe's unreduced product is not dense over
+       this accumulator ⇒ raise the fallback sentinel.
+    5. **Reduce** over ``reduce_dims`` to ``keep``: sort the unreduced frame
+       by ``(*keep, col_id)`` (a FIXED canonical order) and sum ``coef``
+       per ``(*keep, col_id)`` group via ``np.add.reduceat`` over the group
+       boundaries.  The fixed sort order guarantees run-to-run determinism.
+       Where each group is a single row (e.g. nodeBalance — each flow is a
+       distinct ``col_id`` mapping to one node) the sum is a 1-element sum
+       ⇒ BIT-IDENTICAL to polars' group_by.  Multi-row groups (true coef
+       combining) are bit-EQUIVALENT (a different summation order than
+       polars' hash-group).
+    6. **Attach ``_rid``** by inner-joining ``row_index_lf`` on ``on``
+       (Enum-aligned).  Return selecting ``_rid, col_id, coef[, *keep]``.
+
+    Fallback contract
+    -----------------
+    On ANY shape this cannot reconstruct + reduce bit-equivalently it
+    raises :class:`_SumBlockCooFallback`; the caller catches it and uses
+    the reduced ``term.lazy`` emission verbatim (byte-identical to today).
+    """
+    var_source = meta.var_source
+    var_dims = list(var_source.dims)
+    keep = list(dense_spec["keep"])
+    # ``reduce_dims`` (= dense_spec["reduce_dims"]) is summed out implicitly:
+    # the group_by on (*keep, col_id) below collapses every open dim not in
+    # ``keep``, which by the classifier's partition guarantee is exactly the
+    # reduce-dims set.
+    coef_scalar = float(meta.coef_scalar)
+
+    # --- Step 1: seed = pre-sorted Var grid (col_id + var dims).
+    seed_df = var_source.frame.select(*var_dims, "col_id")
+    acc_lf = seed_df.lazy()
+    acc_dims = list(var_dims)
+
+    # --- Step 2: bake deferred pure-filter Where frames (semi-join).
+    acc_lf = _apply_where_frames(acc_lf, acc_dims, meta.where_frames)
+
+    # --- Step 3: bake map-effect Where frames (inner-join, dim-extending).
+    acc_lf, acc_dims_t = _apply_where_map_frames(
+        acc_lf, acc_dims, meta.where_map_frames
+    )
+    acc_dims = list(acc_dims_t)
+
+    # --- Step 4: multiply the FULL Param chain in order.  Use a left-join
+    # per atomic with maintain_order="left" (order-preserving in polars
+    # 1.40.1) so we can read each value column into a numpy buffer aligned
+    # to the accumulator and multiply in the SAME order as the polars chain.
+    # We carry ``value`` columns one at a time (rename uniquely) so the
+    # accumulator stays narrow.
+    acc = acc_lf.collect()
+    n = acc.height
+    if n == 0:
+        # Empty after filter — emit the empty (_rid, col_id, coef[, *keep])
+        # frame.  keep_dims (warm site) dtypes come from the seed schema.
+        return _empty_block_coo_frame(seed_df, keep_dims)
+
+    coef = np.full(n, coef_scalar, dtype=np.float64)
+    for atomic, direction in meta.param_sources:
+        shared = [d for d in acc_dims if d in atomic.dims]
+        atomic_lf = atomic.lazy.rename({"value": "__sb_val"})
+        if shared:
+            acc_a, at_a = _align_enum_join_keys(acc.lazy(), atomic_lf, shared)
+            aligned = acc_a.join(
+                at_a.select(*shared, "__sb_val"),
+                on=shared,
+                how="left",
+                maintain_order="left",
+            ).collect()
+        else:
+            # Param with no shared dim ⇒ a scalar broadcast (single row) or
+            # a cross-product we won't reduce cleanly.  Only a single-row
+            # Param is safe (broadcast); anything else falls back.
+            atomic_df = atomic.lazy.collect()
+            if atomic_df.height != 1:
+                raise _SumBlockCooFallback("no-shared multi-row Param")
+            aligned = acc.with_columns(
+                pl.lit(float(atomic_df["value"][0])).alias("__sb_val")
+            )
+        if aligned.height != n:
+            # A left join that changed the row count means a Param key
+            # expansion (duplicate keys) — the recipe's product is no longer
+            # 1:1 with the seed rows ⇒ fall back.
+            raise _SumBlockCooFallback("Param key expansion")
+        if "__sb_val" not in aligned.columns:
+            raise _SumBlockCooFallback("Param value column missing")
+        if aligned["__sb_val"].null_count() > 0:
+            # Sparse Param: the recipe's unreduced product is not dense over
+            # the accumulator (a polars inner-join chain would DROP these
+            # rows, not null them).  Reproducing the drop here positionally
+            # is fragile; fall back to the guaranteed-correct reduced path.
+            raise _SumBlockCooFallback("sparse Param (null after left join)")
+        vals = aligned["__sb_val"].to_numpy().astype(np.float64, copy=False)
+        if direction >= 0:
+            coef = coef * vals
+        else:
+            coef = coef / vals
+        # ``aligned`` preserves the accumulator's row order (maintain_order
+        # ="left"); keep ``acc`` as the order-of-record for the next factor.
+        acc = aligned.drop("__sb_val")
+
+    # --- Step 5: deterministic reduce over reduce_dims to keep.  Attach the
+    # unreduced coef to the accumulator, sort by (*keep, col_id) (a FIXED
+    # canonical order), and sum per (*keep, col_id) group with
+    # np.add.reduceat over the group boundaries.
+    unreduced = acc.select(*keep, "col_id").with_columns(
+        coef=pl.Series("coef", coef, dtype=pl.Float64)
+    )
+    group_keys = keep + ["col_id"]
+    unreduced = unreduced.sort(group_keys)
+    m = unreduced.height
+    if m == 0:
+        return _empty_block_coo_frame(seed_df, keep_dims)
+    coef_sorted = unreduced["coef"].to_numpy().astype(np.float64, copy=False)
+    # Group boundaries: first row of each distinct (*keep, col_id) tuple.
+    # Build a boolean "is new group" mask via a struct equality shift.  The
+    # very first row's shift(1) is null ⇒ the inequality is null; fill it
+    # True (a new group always starts at row 0) and cast to a dense bool
+    # array so np.flatnonzero / np.add.reduceat operate on contiguous data.
+    is_new = (
+        unreduced.select(
+            (
+                pl.struct(group_keys) != pl.struct(group_keys).shift(1)
+            ).fill_null(True).alias("__new")
+        )["__new"]
+        .to_numpy()
+        .astype(bool, copy=False)
+    )
+    starts = np.flatnonzero(is_new)
+    reduced_coef = np.add.reduceat(coef_sorted, starts)
+    reduced = unreduced[starts].select(*keep, "col_id").with_columns(
+        coef=pl.Series("coef", reduced_coef, dtype=pl.Float64)
+    )
+
+    # --- Step 6: attach _rid via row_index inner-join on ``on``.
+    ri_a, res_a = _align_enum_join_keys(row_index_lf, reduced.lazy(), on)
+    joined_ri = ri_a.join(res_a, on=on, how="inner")
+    return joined_ri.select(
+        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
+    ).collect()
+
+
 def _where_pushdown_disabled() -> bool:
     """Return True when ``POLAR_HIGH_DISABLE_WHERE_PUSHDOWN=1``.
 
@@ -3274,6 +3600,26 @@ class Problem:
                     if term.where_map_frames is not None:
                         _block_spec = None
                     _use_block_coo = _block_spec is not None
+                    # Sum-block-COO (Phase C-3a) is a SIBLING arm for
+                    # ``Sum``-wrapped Var×Param chains (var_source cleared by
+                    # Sum, but a SumBlockMeta recipe captured).  It rebuilds
+                    # the unreduced product from the recipe on the pre-sorted
+                    # Var grid, bakes the map-effect Where, then reduces over
+                    # ``over`` to ``keep`` — without polars' join + group_by.
+                    # Same off-switch as the non-Sum arm; fires only when the
+                    # Problem declares dense_axes AND the recipe matches the
+                    # suffix contract.  Conservatively gated by
+                    # ``_sum_block_coo_classify``; anything it can't
+                    # reproduce bit-equivalently returns None → the term
+                    # reads its reduced ``term.lazy`` exactly as today.
+                    # Mutually exclusive with the non-Sum arm (a Sum term has
+                    # var_source=None so _block_spec is already None here).
+                    _sum_block_spec = None
+                    if not _use_block_coo and not _block_coo_disabled():
+                        _sum_block_spec = _sum_block_coo_classify(
+                            term, axis_cols, on, self._dense_axes
+                        )
+                    _use_sum_block_coo = _sum_block_spec is not None
                     if _use_block_coo:
                         # Verify the client's dense_axes sort contract on
                         # the Var BEFORE building — a mis-ordered frame
@@ -3316,6 +3662,72 @@ class Problem:
                             )
                             sys.stderr.flush()
                         plan = plan.lazy()
+                    elif _use_sum_block_coo:
+                        # Verify the dense_axes sort contract on the RECIPE's
+                        # Var (the seed block-COO slices) before building.
+                        _sm = term.sum_block_meta
+                        _verify_dense_sorted(
+                            _sm.var_source.frame,
+                            _sum_block_spec["non_dense_dims"],
+                            _sum_block_spec["dense_dims"],
+                            getattr(_sm.var_source, "name", None),
+                        )
+                        _t_blk0 = time.monotonic()
+                        try:
+                            plan = _build_sum_block_coo_plan(
+                                row_index_lf,
+                                axis_cols,
+                                _sm,
+                                on,
+                                _sum_block_spec,
+                            )
+                            _sum_block_fired = True
+                        except _SumBlockCooFallback:
+                            # Shape the rebuild can't reduce bit-equivalently
+                            # ⇒ use the reduced ``term.lazy`` path verbatim
+                            # (byte-identical to the block-COO-off run).
+                            _sum_block_fired = False
+                            plan = None
+                        if _sum_block_fired:
+                            if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+                                _blk_wall = time.monotonic() - _t_blk0
+                                _n_rows = int(plan.height)
+                                _dense = _sum_block_spec["dense_dims"]
+                                _nb = _sum_block_spec["dense_card"]
+                                _avg = (_n_rows / _nb) if _nb else 0.0
+                                sys.stderr.write(
+                                    f"[block_coo profile]\tphase=block_coo_term"
+                                    f"\tkind=sum\tfamily={cname}"
+                                    f"\tfamily_idx={_fam_idx}"
+                                    f"\tterm_idx={_term_idx}"
+                                    f"\tdense_dims={','.join(_dense)}"
+                                    f"\tn_blocks={_nb}"
+                                    f"\tavg_block_size={_avg:.2f}"
+                                    f"\twall_s={_blk_wall:.4f}\n"
+                                )
+                                sys.stderr.flush()
+                            plan = plan.lazy()
+                        else:
+                            # Reduced-``term.lazy`` fallback (identical to the
+                            # final else arm): bake any deferred filters, then
+                            # the row_index semi-join + inner-join.
+                            term_lazy_filtered = _apply_where_frames(
+                                term.lazy, term.dims, term.where_frames
+                            )
+                            term_lazy_filtered, _ = _apply_where_map_frames(
+                                term_lazy_filtered,
+                                term.dims,
+                                term.where_map_frames,
+                            )
+                            rl_a, tl_a = _align_enum_join_keys(
+                                row_index_lf, term_lazy_filtered, on
+                            )
+                            keys_lazy = rl_a.select(on).unique()
+                            tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
+                            plan = (
+                                rl_a.join(tl_pruned, on=on, how="inner")
+                                .select("_rid", "col_id", "coef")
+                            )
                     elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
