@@ -857,6 +857,32 @@ def _emit_block_coo_path(path: str, reason: str = "") -> None:
     sys.stderr.flush()
 
 
+def _block_coo_keep_cols(keep_dims: tuple[str, ...] | None) -> tuple[str, ...]:
+    """Normalise the optional ``keep_dims`` into the extra final-select
+    columns (empty tuple when None).  Shared by both block-COO builders so
+    the warm-path Site-3 caller gets ``(_rid, col_id, coef, *keep_dims)``
+    while Sites 1/2 (``keep_dims=None``) stay ``(_rid, col_id, coef)``."""
+    return tuple(keep_dims) if keep_dims else ()
+
+
+def _empty_block_coo_frame(
+    schema_src: pl.DataFrame, keep_dims: tuple[str, ...] | None
+) -> pl.DataFrame:
+    """Build the empty ``(_rid, col_id, coef[, *keep_dims])`` frame both
+    builders emit when nothing survives.  ``keep_dims`` columns adopt their
+    dtypes from ``schema_src`` (the pre-sorted seed / aligned frame, which
+    carries the Var dims) so the warm tracker's downstream re-join keys
+    align with the populated case."""
+    cols: dict[str, pl.Series] = {
+        "_rid": pl.Series("_rid", [], dtype=pl.Int64),
+        "col_id": pl.Series("col_id", [], dtype=pl.Int64),
+        "coef": pl.Series("coef", [], dtype=pl.Float64),
+    }
+    for d in _block_coo_keep_cols(keep_dims):
+        cols[d] = pl.Series(d, [], dtype=schema_src.schema[d])
+    return pl.DataFrame(cols)
+
+
 def _build_block_coo_plan_joined(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
@@ -866,6 +892,7 @@ def _build_block_coo_plan_joined(
     coef_scalar: float,
     where_frames: tuple[pl.LazyFrame, ...] | None,
     dense_spec: dict,
+    keep_dims: tuple[str, ...] | None = None,
 ) -> pl.DataFrame:
     """Evaluate a non-Sum ``Var × Param-chain`` LHS term via block-COO.
 
@@ -874,6 +901,14 @@ def _build_block_coo_plan_joined(
     :func:`_build_lhs_pruned_plan`'s output, so the existing emission
     code in :meth:`Problem._build_canonical_matrix` consumes it
     unchanged.
+
+    ``keep_dims`` (the warm-path Site-3 caller) appends those dim columns
+    to the final ``.select(...)`` *in addition* to ``(_rid, col_id,
+    coef)``, so the warm param-tracking machinery can re-join each tracked
+    Param on its dims.  Every ``keep_dims`` entry is a subset of
+    ``var.dims`` for a block-evaluable term, so it rides on the seed
+    (``*var_dims``) and survives to the final join.  Default ``None`` ⇒
+    the unchanged ``(_rid, col_id, coef)`` shape (Sites 1/2).
 
     Algorithm (mirrors :func:`_build_lhs_pruned_plan`'s leaf discipline —
     per-leaf Enum alignment + row_index pre-prune — but does the final
@@ -1008,15 +1043,11 @@ def _build_block_coo_plan_joined(
     _emit_block_coo_path("joined")
     if n == 0:
         # Nothing survived the chain (empty seed or a sparse Param dropped
-        # every row) — emit an empty (_rid, col_id, coef) frame matching
-        # the prune helper's output schema.
-        return pl.DataFrame(
-            {
-                "_rid": pl.Series("_rid", [], dtype=pl.Int64),
-                "col_id": pl.Series("col_id", [], dtype=pl.Int64),
-                "coef": pl.Series("coef", [], dtype=pl.Float64),
-            }
-        )
+        # every row) — emit an empty (_rid, col_id, coef[, *keep_dims])
+        # frame matching the prune helper's output schema.  keep_dims
+        # columns adopt their dtypes from the (now-empty) sorted frame so
+        # the warm tracker's downstream re-join keys align.
+        return _empty_block_coo_frame(acc_sorted, keep_dims)
 
     # --- Step 3: numpy multiply in chain order on the aligned buffers.
     # Every value column lives on the SAME row as its ``col_id`` (they
@@ -1038,7 +1069,9 @@ def _build_block_coo_plan_joined(
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select("_rid", "col_id", "coef").collect()
+    return joined_ri.select(
+        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
+    ).collect()
 
 
 def _build_block_coo_plan(
@@ -1050,6 +1083,7 @@ def _build_block_coo_plan(
     coef_scalar: float,
     where_frames: tuple[pl.LazyFrame, ...] | None,
     dense_spec: dict,
+    keep_dims: tuple[str, ...] | None = None,
 ) -> pl.DataFrame:
     """Evaluate a non-Sum ``Var × Param-chain`` LHS term via *positional*
     per-block numpy slice-multiply on the already-sorted Var grid, with NO
@@ -1103,6 +1137,14 @@ def _build_block_coo_plan(
     per-Param alignment that cannot be proven length-exact — returns
     ``_build_block_coo_plan_joined(...)``.  False fallbacks cost speed,
     never correctness.
+
+    ``keep_dims`` (the warm-path Site-3 caller) appends those dim columns
+    to the final ``.select(...)`` in addition to ``(_rid, col_id, coef)``
+    so the warm param-tracking machinery can re-join each tracked Param on
+    its dims.  For a block-evaluable term every ``keep_dims`` entry is a
+    subset of ``var.dims`` (it rides on the seed and survives to the final
+    join); we verify that and fall back to the joined builder otherwise.
+    Default ``None`` ⇒ the unchanged ``(_rid, col_id, coef)`` shape.
     """
     var_dims = list(var_source.dims)
     var_on = [d for d in var_dims if d in axis_cols]
@@ -1118,7 +1160,16 @@ def _build_block_coo_plan(
         coef_scalar,
         where_frames,
         dense_spec,
+        keep_dims,
     )
+
+    # ``keep_dims`` must ride on the Var seed (``*var_dims``) to survive to
+    # the final select.  For a block-evaluable term ``term.dims ⊆ var.dims``
+    # holds, but guard defensively: if any requested dim is absent, the
+    # order-preserving joined builder (which carries the same dims) is the
+    # safe backstop.
+    if keep_dims and not set(keep_dims).issubset(var_dims):
+        return _build_block_coo_plan_joined(*_fallback_args)
 
     # --- Step 1: bake where_frames + pre-prune the Var seed.  Filtering
     # (semi-join) preserves the seed's sort order, so the result stays
@@ -1135,16 +1186,11 @@ def _build_block_coo_plan(
 
     n = seed.height
     if n == 0:
-        # Empty seed — emit the empty (_rid, col_id, coef) frame directly
-        # (cheaper than recursing; the joined builder produces the same).
+        # Empty seed — emit the empty (_rid, col_id, coef[, *keep_dims])
+        # frame directly (cheaper than recursing; the joined builder
+        # produces the same).  keep_dims dtypes come from the seed schema.
         _emit_block_coo_path("positional", reason="empty_seed")
-        return pl.DataFrame(
-            {
-                "_rid": pl.Series("_rid", [], dtype=pl.Int64),
-                "col_id": pl.Series("col_id", [], dtype=pl.Int64),
-                "coef": pl.Series("coef", [], dtype=pl.Float64),
-            }
-        )
+        return _empty_block_coo_frame(seed, keep_dims)
 
     # --- Step 2: completeness guard.  A deferred filter (where_frames) can
     # leave the grid sparse/ragged ⇒ fall back.  Otherwise the seed is
@@ -1264,7 +1310,9 @@ def _build_block_coo_plan(
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select("_rid", "col_id", "coef").collect()
+    return joined_ri.select(
+        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
+    ).collect()
 
 
 def _where_pushdown_disabled() -> bool:
@@ -5679,7 +5727,72 @@ class WarmProblem:
                         and len(_lhs_psrc) >= 2
                         and not _prune_down_disabled()
                     )
-                    if _use_lhs_prune:
+                    # Block-COO sibling arm — identical dispatch to Sites 1
+                    # (_build_canonical_matrix) and 2 (_solve_streaming),
+                    # adapted to the warm path.  Fires ONLY when the source
+                    # Problem declared dense_axes AND this non-Sum Var×Param
+                    # chain matches the dense-suffix contract; default ON
+                    # (POLAR_HIGH_DISABLE_BLOCK_COO=1 is the off switch);
+                    # bit-identical to the polars path; any shape it can't
+                    # reproduce returns None and we fall through to the
+                    # UNCHANGED prune-down / semi-join warm arms.
+                    #
+                    # The warm path needs the per-term dims on the emitted
+                    # frame (the prune/fallback arms select ``*term.dims``)
+                    # because the downstream param-TRACKING re-joins each
+                    # tracked Param on its dims for incremental update_param.
+                    # We therefore call the helper with
+                    # ``keep_dims=tuple(term.dims)`` so the returned frame
+                    # carries ``_rid, col_id, coef, *term.dims`` — the exact
+                    # shape ``j = _collect_streaming(plan)`` consumes.  The
+                    # helper returns a collected frame whose ``_rid`` is
+                    # family-local (it joined the local int-range
+                    # ``row_index_lf``), matching the ``abs_rows = base_row +
+                    # rids`` bake below; we ``.lazy()`` it so it flows through
+                    # ``_collect_streaming`` like the other warm arms.
+                    _block_spec = None
+                    if not _block_coo_disabled():
+                        _block_spec = _block_coo_classify(
+                            term, axis_cols, on, p._dense_axes
+                        )
+                    if _block_spec is not None:
+                        _verify_dense_sorted(
+                            term.var_source.frame,
+                            _block_spec["non_dense_dims"],
+                            _block_spec["dense_dims"],
+                            getattr(term.var_source, "name", None),
+                        )
+                        _t_blk0 = time.monotonic()
+                        _blk_df = _build_block_coo_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                            term.coef_scalar,
+                            term.where_frames,
+                            _block_spec,
+                            keep_dims=tuple(term.dims),
+                        )
+                        if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+                            _blk_wall = time.monotonic() - _t_blk0
+                            _n_rows = int(_blk_df.height)
+                            _dense = _block_spec["dense_dims"]
+                            _nb = _block_spec["dense_card"]
+                            _avg = (_n_rows / _nb) if _nb else 0.0
+                            sys.stderr.write(
+                                f"[block_coo profile]\tphase=block_coo_term"
+                                f"\tphase_site=warm"
+                                f"\tfamily={cname}\tfamily_idx={_fam_idx}"
+                                f"\tterm_idx=0"
+                                f"\tdense_dims={','.join(_dense)}"
+                                f"\tn_blocks={_nb}"
+                                f"\tavg_block_size={_avg:.2f}"
+                                f"\twall_s={_blk_wall:.4f}\n"
+                            )
+                            sys.stderr.flush()
+                        plan = _blk_df.lazy()
+                    elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
                             axis_cols,
