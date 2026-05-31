@@ -873,26 +873,73 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     if _profile:
         _emit("obj_done")
 
-    # Per-family size guard.  Families above this row count are skipped
-    # in Layer-1 detection — their rhs/term coefficient distributions
-    # don't fold into the four-range readout.  This is a deliberate
-    # graceful-degradation: the polars streaming engine intermittently
-    # fails to push the row-key semi-join into deep multi-Param product
-    # chains on very large families (the FlexTool DES LP's
-    # ``profile_flow_upper_limit`` family is the canonical offender —
-    # 1.5 M rows × multi-Param rhs allocates >30 GB even with the
-    # semi-join + left-join + streaming-collect pattern that
-    # ``Problem.write_mps`` survives on).  Skipping means the autoscale
-    # trigger / Layer 3 recommendation is based on the families it
-    # could read; smaller-family ranges still inform the decision.
-    # Override with ``POLAR_HIGH_RANGES_MAX_FAMILY_ROWS=<int>`` —
-    # set to 0 to disable the skip and accept the OOM risk.
+    # Per-family size guard — FALLBACK-ONLY (no longer a blanket skip).
+    #
+    # A family is ALWAYS range-scanned when the bounded path applies
+    # (Phase D-1 LHS block-COO, D-2 RHS Param-chain, D-3 objective): the
+    # bounded builders compute the per-row/per-cell coef magnitude WITHOUT
+    # materialising the deep Param product, so the memory spike that this
+    # cap originally dodged is gone for everything we can bound — including
+    # huge families like the FlexTool DES LP's ``profile_flow_upper_limit``
+    # (1.5 M rows × multi-Param rhs), whose RHS is bounded by D-2.  Those
+    # families must NOT be skipped: their coefficient ranges have to reach
+    # the scaler.
+    #
+    # The size cap now applies ONLY as a last-resort fallback: when a
+    # specific term/RHS branch DECLINES the bounded path (deferred
+    # map-Where, Sum-combining, non-dense-suffix, sparse grid, or the
+    # side-vectors-off readout) AND would take the OLD materialising
+    # ``_collect_streaming`` collect AND the family's row count exceeds the
+    # cap, that single collect is skipped — and a LOUD stderr line names
+    # the family + row count + that it hit an un-boundable shape over the
+    # cap.  So an over-cap un-boundable shape is a VISIBLE gap to fix, never
+    # a silent skip.  Override the cap with
+    # ``POLAR_HIGH_RANGES_MAX_FAMILY_ROWS=<int>`` — set to 0 to disable the
+    # fallback skip entirely and accept the OOM risk on un-boundable shapes.
     try:
         _max_family_rows = int(
             _os.environ.get("POLAR_HIGH_RANGES_MAX_FAMILY_ROWS", "1000000")
         )
     except (ValueError, TypeError):
         _max_family_rows = 1_000_000
+
+    def _skip_unbounded_over_cap(
+        cname: str, row_count: int, kind: str, term_idx: int | None = None
+    ) -> bool:
+        """Last-resort fallback guard for a DECLINED bounded branch.
+
+        Returns ``True`` (skip the materialising collect) iff the cap is
+        active and this family exceeds it — and, when it does, emits a
+        LOUD stderr line so the over-cap un-boundable shape is a visible
+        gap to fix, never a silent skip.  Returns ``False`` otherwise (the
+        caller proceeds with the existing materialising collect).
+
+        ``kind`` names the declined branch (``"rhs"`` / ``"lhs"``) and is
+        included in the log so the gap can be pinpointed.  Always reached
+        ONLY after the bounded path declined, so a ``True`` here never
+        drops a family the bounded path could have read.
+        """
+        if _max_family_rows <= 0 or row_count <= _max_family_rows:
+            return False
+        loc = f"{cname}" if term_idx is None else f"{cname}[term {term_idx}]"
+        print(
+            "[ranges-stream SKIP] un-boundable LP shape over the family-row "
+            f"cap — family={loc} kind={kind} row_count={row_count} "
+            f"cap={_max_family_rows}: bounded range path DECLINED and the "
+            "materialising collect would exceed the cap, so this family's "
+            f"{kind} coefficient range is NOT folded into the autoscale "
+            "readout. This is a visible coverage gap — extend the bounded "
+            "path to this shape (set POLAR_HIGH_RANGES_MAX_FAMILY_ROWS=0 to "
+            "force the collect and accept the OOM risk).",
+            file=_sys.stderr, flush=True,
+        )
+        if _profile:
+            _emit(
+                "family_branch_skipped", family=cname,
+                kind=kind, row_count=row_count,
+                threshold=_max_family_rows,
+            )
+        return True
 
     # Matrix + RHS — per constraint family.  ``base_row`` is the 0-based
     # absolute constraint row id (same indexing space as
@@ -911,14 +958,6 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 row_count=row_count,
                 term_count=len(proto.expr.terms),
             )
-        if _max_family_rows > 0 and row_count > _max_family_rows:
-            if _profile:
-                _emit(
-                    "family_skipped", family=cname,
-                    row_count=row_count,
-                    threshold=_max_family_rows,
-                )
-            continue
         rhs = proto.rhs
 
         # RHS magnitude readout — mirror ``Problem.write_mps``'s rhs
@@ -957,19 +996,26 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # ``_build_canonical_matrix``'s rhs build: carry an
                 # ``_rid`` column on the row index.
                 if _l2_rf is None:
-                    ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
-                    keys = ri_a.select(on).unique()
-                    rf_pruned = rf_a.join(keys, on=on, how="semi")
-                    plan = ri_a.join(rf_pruned, on=on, how="left").select("value")
-                    j = _collect_streaming(plan)
-                    if j.height > 0:
-                        vals = j["value"].fill_null(0.0).to_numpy()
-                        lo, hi = _reduce_abs(vals)
-                        if lo is not None:
-                            if lo < rhs_lo:
-                                rhs_lo = lo
-                            if hi > rhs_hi:
-                                rhs_hi = hi
+                    # Side-vectors-off readout: no bounded path applies, so
+                    # this is the materialising collect.  Fallback cap guard.
+                    if _skip_unbounded_over_cap(cname, row_count, "rhs"):
+                        pass
+                    else:
+                        ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
+                        keys = ri_a.select(on).unique()
+                        rf_pruned = rf_a.join(keys, on=on, how="semi")
+                        plan = ri_a.join(
+                            rf_pruned, on=on, how="left"
+                        ).select("value")
+                        j = _collect_streaming(plan)
+                        if j.height > 0:
+                            vals = j["value"].fill_null(0.0).to_numpy()
+                            lo, hi = _reduce_abs(vals)
+                            if lo is not None:
+                                if lo < rhs_lo:
+                                    rhs_lo = lo
+                                if hi > rhs_hi:
+                                    rhs_hi = hi
                 else:
                     # ---- Bounded RHS Param-chain fast path (Phase D-2).
                     # The dominant DES autoscale spike is THIS readout: the
@@ -1006,6 +1052,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                                 "rhs_bounded", family=cname,
                                 rhs_bound="1",
                             )
+                    elif _skip_unbounded_over_cap(cname, row_count, "rhs"):
+                        # Bounded D-2 path declined and the materialising
+                        # collect would exceed the cap — fallback skip (loud).
+                        pass
                     else:
                         over_rid = over.with_columns(
                             _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
@@ -1185,6 +1235,13 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             block_coo="1",
                         )
                     continue
+
+            # Reached only when the bounded block-COO LHS path declined or
+            # was inapplicable (it ``continue``s on success above): this is
+            # the OLD materialising collect.  Fallback cap guard — skip
+            # (loud) iff this family is over the cap.
+            if _skip_unbounded_over_cap(cname, row_count, "lhs", term_idx=ti):
+                continue
 
             if not term_dims or row_index_lf is None:
                 # Scalar (no row binding) — broadcast across the family
