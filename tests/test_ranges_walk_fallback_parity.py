@@ -353,3 +353,154 @@ def test_walk_fallback_profile_signal_fires() -> None:
         "the map-Where relabel Sum must stay on the inline block-COO fast "
         f"path (block_coo=1, count=1); profile:\n{out}"
     )
+
+
+# ---------------------------------------------------------------------------
+# RHS decline branch (Phase D-5 step 2b): a Var-LESS composite Param chain
+# whose ``over`` grid is NOT dense-complete declines the inline D-2 positional
+# fast path; the bounded Var-less walk replaces the materialising / cap-skip
+# collect, byte-identically.
+
+
+def _build_rhs_decline_problem() -> Problem:
+    """A ``profile_flow_upper_limit``-shaped family whose RHS is a composite
+    3-Param chain, but with a SPARSE dense ``(d, t)`` atomic so the over grid
+    is NOT dense-complete — the inline D-2 positional builder DECLINES and the
+    RHS routes through the Var-less coefficient walk.  A bare-Var LHS keeps
+    the family well-formed."""
+    p_idx = [0, 1, 2]
+    s_idx = ["s0", "s1"]
+    d_idx = [10, 11]
+    t_idx = [100, 101, 102]
+
+    prob = Problem(dense_axes=("d", "t"))
+    rows = list(itertools.product(p_idx, s_idx, d_idx, t_idx))
+    over = pl.DataFrame(
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
+    )
+    v = prob.add_var("v", ("p", "s", "d", "t"), over, lower=0.0, upper=1e6)
+
+    pdt = list(itertools.product(p_idx, d_idx, t_idx))
+    Pprofile = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in pdt],
+                "d": [c[1] for c in pdt],
+                "t": [c[2] for c in pdt],
+                "value": np.linspace(1e-3, 5e2, len(pdt)),
+            }
+        ),
+        name="Pprofile",
+    )
+    ps = list(itertools.product(p_idx, s_idx))
+    Pcount = Param(
+        ("p", "s"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in ps],
+                "s": [c[1] for c in ps],
+                "value": np.linspace(2.0, 4e3, len(ps)),
+            }
+        ),
+        name="Pcount",
+    )
+    # SPARSE Pavail on (d, t): drop a cell so the dense completeness guard
+    # fails ⇒ the inline D-2 positional builder declines ⇒ the Var-less walk
+    # (prune-down backstop) fires.
+    dt = list(itertools.product(d_idx, t_idx))
+    dt_sparse = [c for i, c in enumerate(dt) if i != 2]
+    Pavail = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt_sparse],
+                "t": [c[1] for c in dt_sparse],
+                "value": np.linspace(0.4, 0.95, len(dt_sparse)),
+            }
+        ),
+        name="Pavail",
+    )
+    prob.add_cstr(
+        "profile_flow_upper_limit",
+        over=over,
+        sense="<=",
+        lhs_terms={"lhs": v},
+        rhs_terms={"rhs": Pprofile * Pcount * Pavail},
+    )
+    prob.set_objective(Sum(v), sense="min")
+    return prob
+
+
+def test_rhs_walk_fallback_byte_identical_to_cap_disabled() -> None:
+    """The RHS Var-less coefficient walk (forced by a LOW cap on the declined
+    chain) must produce a RangeReport BYTE-IDENTICAL to the cap-disabled run
+    (which forces the materialising ``over ⋈ rhs`` collect), AND emit no
+    ``ranges-stream SKIP`` line for the RHS family."""
+    cfg = _config()
+    _clear_guard()
+    try:
+        prob = _build_rhs_decline_problem()
+        _install_side_vectors(prob)
+
+        buf = io.StringIO()
+        old = sys.stderr
+        os.environ["POLAR_HIGH_RANGES_MAX_FAMILY_ROWS"] = "10"
+        try:
+            sys.stderr = buf
+            rep_walk = _ranges_via_streaming(prob, cfg)
+        finally:
+            sys.stderr = old
+        skip_lines = buf.getvalue().count("ranges-stream SKIP")
+
+        os.environ["POLAR_HIGH_RANGES_MAX_FAMILY_ROWS"] = "0"
+        rep_full = _ranges_via_streaming(prob, cfg)
+    finally:
+        _clear_guard()
+
+    assert skip_lines == 0, (
+        "the Var-less RHS walk must bound the declined chain, so NO "
+        f"'ranges-stream SKIP' line may be emitted; saw {skip_lines}.\n"
+        f"stderr:\n{buf.getvalue()}"
+    )
+    assert _report_tuple(rep_walk) == _report_tuple(rep_full), (
+        "bounded RHS-walk fallback diverged from the cap-disabled "
+        "whole-collect readout:\n"
+        f"  WALK = {_report_tuple(rep_walk)}\n"
+        f"  FULL = {_report_tuple(rep_full)}"
+    )
+
+
+def test_rhs_walk_fallback_no_skip_and_fires() -> None:
+    """With a LOW cap the declined RHS chain must route through the walk
+    (``rhs_walk=1`` profile signal) and emit ZERO ``ranges-stream SKIP``
+    lines."""
+    cfg = _config()
+    _clear_guard()
+    os.environ["POLAR_HIGH_RANGES_PROFILE"] = "1"
+    os.environ["POLAR_HIGH_RANGES_MAX_FAMILY_ROWS"] = "10"
+    buf = io.StringIO()
+    old = sys.stderr
+    try:
+        sys.stderr = buf
+        prob = _build_rhs_decline_problem()
+        _install_side_vectors(prob)
+        _ranges_via_streaming(prob, cfg)
+    finally:
+        sys.stderr = old
+        _clear_guard()
+
+    out = buf.getvalue()
+    assert "ranges-stream SKIP" not in out, (
+        "the declined RHS chain must be bounded by the walk, never skipped.\n"
+        f"stderr:\n{out}"
+    )
+    assert out.count("rhs_walk=1") == 1, (
+        "expected the Var-less RHS walk to fire once on the declined "
+        f"composite chain; profile:\n{out}"
+    )

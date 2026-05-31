@@ -1067,8 +1067,58 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                                 "rhs_bounded", family=cname,
                                 rhs_bound="1",
                             )
+                    elif (
+                        isinstance(rhs._sources, list)
+                        and rhs._sources
+                    ):
+                        # ---- Bounded coefficient-walk RHS fallback
+                        # (Phase D-5 step 2b).  The inline D-2 positional
+                        # fast path DECLINED (the over grid was not
+                        # dense-complete, an atomic carried a foreign dim,
+                        # an alignment surfaced a null, …), but the RHS is
+                        # still a Var-LESS composite Param chain tracking
+                        # its atomic constituents via ``_sources``.  The OLD
+                        # fallback here materialised the merged ``over ⋈
+                        # rhs`` product (the >30 GB DES spike) and, over the
+                        # family-row cap, SKIPPED it (loud) — dropping the
+                        # family's RHS range from the readout (the DES
+                        # ``maxToSink`` RHS gap).  Instead walk the SAME
+                        # Var-less Param chain in bounded ``_WALK_BATCH_ROWS``
+                        # slices via :func:`bounded_coefficient_walk` +
+                        # :class:`MinMaxAbsReducer`: each batch seeds ``coef
+                        # = rhs._value_scalar`` over the batch's ``over``
+                        # rows and multiplies the chain (positional fast path
+                        # or batched prune-down), applying the SAME row-factor
+                        # scale ``|_l2_rf[base_row + _rid]|`` (NO col factor —
+                        # the RHS has none) + the SAME finite/non-zero
+                        # ``_reduce_abs`` mask.  Byte-identical to the collect,
+                        # so the cap-skip never fires for an RHS chain routed
+                        # through the walk.
+                        recipe = _CoefWalkRecipe.from_rhs_chain(rhs)
+                        scale = (_l2_rf, base_row, None)
+                        (walk_minmax,) = _bounded_coefficient_walk(
+                            over,
+                            recipe,
+                            scale,
+                            [_MinMaxAbsReducer(scale)],
+                            batch_rows=_WALK_BATCH_ROWS,
+                            dense_axes=dense_axes,
+                        )
+                        lo, hi = walk_minmax
+                        if lo is not None:
+                            if lo < rhs_lo:
+                                rhs_lo = lo
+                            if hi > rhs_hi:
+                                rhs_hi = hi
+                        if _profile:
+                            _emit(
+                                "rhs_walk", family=cname,
+                                rhs_walk="1",
+                            )
                     elif _skip_unbounded_over_cap(cname, row_count, "rhs"):
-                        # Bounded D-2 path declined and the materialising
+                        # Bounded D-2 path declined AND the chain is not a
+                        # composite ``_sources`` chain the walk can rebuild
+                        # (single / anonymous Param) — the materialising
                         # collect would exceed the cap — fallback skip (loud).
                         pass
                     else:

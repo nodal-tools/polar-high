@@ -85,6 +85,32 @@ def _ref_minmax_constraint(
     return _reduce_abs(_scale_vals(rids, cids, coef, scale))
 
 
+def _ref_minmax_rhs_chain(
+    rhs, over: pl.DataFrame, scale
+) -> tuple[float | None, float | None]:
+    """Reference for a Var-LESS RHS Param chain: collect the merged
+    ``over ⋈ rhs.lazy`` product whole (the materialising path the bounded
+    walk replaces), attach ``_rid``, apply the row-factor scale (NO col
+    factor on the RHS), reduce.  Byte-identity target for the param-only
+    walk mode."""
+    over_rid = over.with_columns(
+        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
+    )
+    on = list(rhs.dims)
+    j = (
+        over_rid.lazy()
+        .join(rhs.lazy, on=on, how="left")
+        .select("_rid", "value")
+        .collect()
+    )
+    if j.height == 0:
+        return None, None
+    rids = j["_rid"].to_numpy().astype(np.int64)
+    vals = j["value"].fill_null(0.0).to_numpy().astype(np.float64)
+    cids = np.full(rids.size, -1, dtype=np.int64)
+    return _reduce_abs(_scale_vals(rids, cids, vals, scale))
+
+
 def _ref_minmax_column(term, scale) -> tuple[float | None, float | None]:
     """Reference for a column-spine (objective) term: collect (col_id, coef)
     whole, apply col scale, reduce."""
@@ -501,6 +527,135 @@ def test_objective_column_mode():
             batch_rows=bs, dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+# ---------------------------------------------------------------------------
+# Shape 8: Var-LESS RHS Param chain (param_only mode).  The bounded walk's
+# (_rid, coef) stream — col_id absent — must match the whole-collect RHS
+# range (over ⋈ rhs.lazy) byte-for-byte, across batch sizes, for dense AND
+# non-dense / sparse chains.
+
+
+def _build_rhs_chain_dense():
+    """A DES ``profile_flow_upper_limit``-shaped RHS: a dense-complete
+    3-Param composite chain over ``(p, s, d, t)`` with dense suffix
+    ``(d, t)`` — exercises the param-only POSITIONAL fast path (lead+dense,
+    lead-only, dense-only atomics)."""
+    ps, ss, ds, ts = [0, 1, 2], ["s0", "s1"], [10, 11], [100, 101, 102, 103]
+    rows = list(itertools.product(ps, ss, ds, ts))
+    over = pl.DataFrame(
+        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
+         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+    )
+    pdt = list(itertools.product(ps, ds, ts))
+    Pprofile = Param(("p", "d", "t"), pl.DataFrame(
+        {"p": [c[0] for c in pdt], "d": [c[1] for c in pdt],
+         "t": [c[2] for c in pdt], "value": np.linspace(1e-3, 5e2, len(pdt))}),
+        name="Pprofile")
+    psl = list(itertools.product(ps, ss))
+    Pcount = Param(("p", "s"), pl.DataFrame(
+        {"p": [c[0] for c in psl], "s": [c[1] for c in psl],
+         "value": np.linspace(2.0, 4e3, len(psl))}), name="Pcount")
+    dt = list(itertools.product(ds, ts))
+    Pavail = Param(("d", "t"), pl.DataFrame(
+        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
+         "value": np.linspace(0.4, 0.95, len(dt))}), name="Pavail")
+    rhs = Pprofile * Pcount * Pavail
+    return over, rhs
+
+
+def _batch_sizes(n: int) -> list[int]:
+    return sorted(set([1, max(1, n // 3), 1_000_000]))
+
+
+def test_rhs_chain_dense_param_only():
+    over, rhs = _build_rhs_chain_dense()
+    n = over.height
+    rf, cf = _side_vectors(n, 8)
+    # Row factor present, NO col factor (RHS has none).
+    scale = (rf, 0, None)
+    recipe = CoefWalkRecipe.from_rhs_chain(rhs)
+    assert recipe.param_only and recipe.var_source is None
+    ref = _ref_minmax_rhs_chain(rhs, over, scale)
+    for bs in _batch_sizes(n):
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def test_rhs_chain_dense_param_only_base_row_offset():
+    """A non-zero ``base_row`` offset must index the row factor correctly
+    (mirrors a family that is not the first in the LP row order)."""
+    over, rhs = _build_rhs_chain_dense()
+    n = over.height
+    base = 7
+    rf, _cf = _side_vectors(n + base, 8)
+    scale = (rf, base, None)
+    recipe = CoefWalkRecipe.from_rhs_chain(rhs)
+    ref = _ref_minmax_rhs_chain(rhs, over, scale)
+    for bs in _batch_sizes(n):
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def _build_rhs_chain_sparse():
+    """A SPARSE RHS chain: the dense ``(d, t)`` atomic drops cells so the
+    over grid is NOT dense-complete ⇒ the positional fast path declines and
+    the param-only PRUNE-DOWN backstop fires (no dense suffix needed)."""
+    ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101, 102]
+    rows = list(itertools.product(ps, ds, ts))
+    over = pl.DataFrame(
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
+         "t": [r[2] for r in rows]}
+    )
+    # Pa SPARSE on (d,t): drop a couple of cells ⇒ left-join nulls ⇒ the
+    # positional completeness / null guard declines ⇒ prune-down backstop.
+    dt = list(itertools.product(ds, ts))
+    dt_sparse = [c for i, c in enumerate(dt) if i not in (1, 4)]
+    Pa = Param(("d", "t"), pl.DataFrame(
+        {"d": [c[0] for c in dt_sparse], "t": [c[1] for c in dt_sparse],
+         "value": np.linspace(1e-2, 50.0, len(dt_sparse))}), name="Pa")
+    Pb = Param(("p",), pl.DataFrame({"p": ps, "value": [3.0, 40.0, 700.0]}),
+               name="Pb")
+    rhs = Pa * Pb
+    return over, rhs
+
+
+def test_rhs_chain_sparse_param_only():
+    over, rhs = _build_rhs_chain_sparse()
+    n = over.height
+    rf, _cf = _side_vectors(n, 8)
+    scale = (rf, 0, None)
+    recipe = CoefWalkRecipe.from_rhs_chain(rhs)
+    ref = _ref_minmax_rhs_chain(rhs, over, scale)
+    for bs in _batch_sizes(n):
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def test_rhs_chain_param_only_no_scale():
+    """param_only with scale all-None reduces ``|coef|`` directly and still
+    matches the whole-collect, dense AND sparse."""
+    for builder in (_build_rhs_chain_dense, _build_rhs_chain_sparse):
+        over, rhs = builder()
+        n = over.height
+        scale = (None, 0, None)
+        recipe = CoefWalkRecipe.from_rhs_chain(rhs)
+        ref = _ref_minmax_rhs_chain(rhs, over, scale)
+        for bs in _batch_sizes(n):
+            (got,) = bounded_coefficient_walk(
+                over, recipe, scale, [MinMaxAbsReducer(scale)],
+                batch_rows=bs, dense_axes=("d", "t"),
+            )
+            assert got == ref, f"{builder.__name__} batch_rows={bs}"
 
 
 # ---------------------------------------------------------------------------

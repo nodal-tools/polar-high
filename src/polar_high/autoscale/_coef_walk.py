@@ -44,6 +44,16 @@ Two spine modes
   slice, emitting ``(col_id, coef)`` (``rid`` reported as ``-1`` — the
   objective row has no row factor, GLPK convention).
 
+A constraint spine may carry EITHER an LHS ``Var × Param`` recipe (the
+default) OR a Var-LESS ``param_only`` recipe — the constraint RHS
+Param-product chain.  The Var-less batch builder seeds ``coef =
+coef_scalar`` over the batch's ``over`` rows and multiplies the Param
+chain onto them (positional fast path reusing the RHS bounded builder's
+three alignment cases, or a batched merged-lazy prune-down for the shapes
+that decline), emitting ``(_rid, coef)`` with ``col_id`` absent (an
+all-``-1`` array — the RHS carries no col factor; the reducer is fed
+``l2_cf=None`` and never indexes it).
+
 Reducer ordering / parity
 --------------------------
 
@@ -73,9 +83,11 @@ from ..engine import (
     Var,
     _align_enum_join_keys,
     _block_coo_classify,
+    _block_coo_disabled,
     _build_block_coo_plan,
     _build_lhs_pruned_plan,
     _build_sum_block_coo_plan,
+    _emit_block_coo_path,
     _sum_block_coo_classify,
     _SumBlockCooFallback,
     _verify_dense_sorted,
@@ -121,6 +133,23 @@ class CoefWalkRecipe:
     / ``where_frames`` / ``where_map_frames`` are taken from the meta (the
     pre-Sum, un-survivor-filtered state) so the builders rebuild the
     unreduced product; the meta is passed through to the Sum builders.
+
+    Param-only (Var-LESS) mode
+    --------------------------
+    When ``param_only`` is set (``var_source is None``) the recipe
+    describes a *Var-less* chain: the spine is the constraint ``over``
+    grid (carrying ``_rid``); ``param_sources`` is a pure ``[(Param,
+    direction)]`` chain; ``coef_scalar`` is the chain's accumulated
+    constant (the composite RHS Param's ``_value_scalar``); there is NO
+    ``col_id`` source.  The per-batch builder seeds ``coef = coef_scalar``
+    over the batch's ``over`` rows and multiplies the Param chain onto
+    them — the same numpy op sequence the canonical builder's RHS
+    prune-down (and the inline ``_rhs_chain_bounded_coef`` positional
+    fast path) produce — emitting ``(_rid, coef)`` with ``col_id`` absent
+    (the reducer is fed an empty ``col_id`` and skips the col factor).
+    This is the mode the RHS decline branch of
+    :func:`_ranges._ranges_via_streaming` and (later) FlexTool's
+    ``bucket_coefficients`` RHS families route through.
     """
 
     __slots__ = (
@@ -132,11 +161,12 @@ class CoefWalkRecipe:
         "sum_block_meta",
         "reduced_lazy",
         "reduced_dims",
+        "param_only",
     )
 
     def __init__(
         self,
-        var_source: Var,
+        var_source: Var | None,
         param_sources: Sequence[tuple[Param, int]],
         coef_scalar: float = 1.0,
         where_frames: tuple[pl.LazyFrame, ...] | None = None,
@@ -145,8 +175,20 @@ class CoefWalkRecipe:
         sum_block_meta: SumBlockMeta | None = None,
         reduced_lazy: pl.LazyFrame | None = None,
         reduced_dims: tuple[str, ...] | None = None,
+        param_only: bool = False,
     ) -> None:
-        if not isinstance(var_source, Var):
+        if param_only:
+            if var_source is not None:
+                raise TypeError(
+                    "CoefWalkRecipe.param_only requires var_source=None "
+                    f"(Var-less chain); got {type(var_source).__name__}"
+                )
+            if sum_block_meta is not None:
+                raise TypeError(
+                    "CoefWalkRecipe.param_only does not support a "
+                    "sum_block_meta (the Var-less RHS chain is unreduced)"
+                )
+        elif not isinstance(var_source, Var):
             raise TypeError(
                 "CoefWalkRecipe.var_source must be a Var; got "
                 f"{type(var_source).__name__}"
@@ -157,6 +199,7 @@ class CoefWalkRecipe:
         self.where_frames = where_frames
         self.where_map_frames = where_map_frames
         self.sum_block_meta = sum_block_meta
+        self.param_only = bool(param_only)
         # ``reduced_lazy`` is the term's OWN post-Sum lazy plan (columns
         # ``*reduced_dims, col_id, coef``).  It is the always-correct
         # backstop the engine uses when the Sum block-COO classifier
@@ -195,6 +238,39 @@ class CoefWalkRecipe:
             where_frames=term.where_frames,
             where_map_frames=term.where_map_frames,
             sum_block_meta=None,
+        )
+
+    @classmethod
+    def from_rhs_chain(cls, rhs: Param) -> CoefWalkRecipe:
+        """Build a Var-LESS (Param-only) recipe from a constraint RHS
+        composite ``Param`` chain.
+
+        The composite RHS Param tracks its atomic constituents in
+        ``rhs._sources`` (a ``[(Param, direction)]`` list) and its folded
+        constant in ``rhs._value_scalar`` — the SAME fields the canonical
+        builder's RHS prune-down (``_build_canonical_matrix``) consumes.
+        We carry them verbatim as ``param_sources`` / ``coef_scalar`` so
+        the per-batch Var-less build reproduces that prune-down's numpy op
+        sequence value-for-value.  ``var_source`` is ``None`` (no Var, no
+        ``col_id`` on the RHS).
+
+        Raises ``ValueError`` if the chain does not expose a ``_sources``
+        list (single / anonymous Params have no constituent list; the
+        caller's bounded positional path / merged-lazy collect handles
+        those — they never reach here).
+        """
+        sources = rhs._sources if isinstance(rhs._sources, list) else None
+        if sources is None:
+            raise ValueError(
+                "CoefWalkRecipe.from_rhs_chain requires a composite RHS "
+                "Param tracking its atomic constituents via _sources; the "
+                "given Param has _sources=None (single / anonymous chain)."
+            )
+        return cls(
+            var_source=None,
+            param_sources=list(sources),
+            coef_scalar=rhs._value_scalar,
+            param_only=True,
         )
 
 
@@ -701,6 +777,255 @@ def _build_column_batch_triple(
     return rid, cids, coef
 
 
+def _build_param_only_batch_triple(
+    batch_over: pl.DataFrame,
+    axis_cols: list[str],
+    recipe: CoefWalkRecipe,
+    dense_axes: tuple[str, ...] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build the ``(_rid, coef)`` triple for ONE batch of a Var-LESS
+    (Param-only) constraint chain — the RHS Param-product readout.
+
+    ``batch_over`` is a slice of the constraint ``over`` grid carrying an
+    ``_rid`` column (the LOCAL row index for the family).  There is no Var
+    / no ``col_id``: the spine IS ``over``.  We seed ``coef =
+    coef_scalar`` over the batch rows and multiply the Param chain onto
+    them, in ``recipe.param_sources`` order.  Returns ``(_rid, col_id,
+    coef)`` where ``col_id`` is an all-``-1`` array (no col factor on the
+    RHS; the reducer is given ``l2_cf=None`` and never indexes it).
+
+    Two builds, byte-identical to each other and to the whole-collect:
+
+    * **positional fast path** — when the batch over slice is
+      dense-complete (the same dense-suffix contract block-COO's LHS seed
+      and the inline ``_rhs_chain_bounded_coef`` obey), align each atomic
+      by the SAME three cases ``_rhs_chain_bounded_coef`` uses: lead-only
+      ``np.repeat``, dense-only ``np.tile``, lead+dense positional
+      ``maintain_order`` left-join.  Same numpy op sequence (``*`` for
+      ``direction >= 0`` / ``/`` for ``< 0``, seeded with ``coef_scalar``)
+      ⇒ value-for-value identical to the canonical RHS prune-down.
+    * **batched prune-down fallback** — when the slice declines the
+      positional regime (not dense-complete, an atomic dim outside the
+      over grid, a null after alignment), seed the batch over with
+      ``value=coef_scalar`` and left-join each atomic on its
+      ``dims ∩ axis_cols`` (semi-join pre-pruned to the batch keys),
+      multiplying / dividing the running ``value`` — the SAME merged-lazy
+      prune-down the engine's RHS path runs, but bounded to the batch's
+      rows (NO dense suffix needed; this generality bounds every shape the
+      positional path declines).  Then read ``value`` back in ``_rid``
+      order.
+    """
+    n = int(batch_over.height)
+    if n == 0:
+        z = np.empty(0, dtype=np.float64)
+        zi = np.empty(0, dtype=np.int64)
+        return zi, zi, z
+
+    coef = _param_only_positional(batch_over, axis_cols, recipe, dense_axes)
+    if coef is not None:
+        # Positional build keeps the batch's row order, so ``_rid`` pairs
+        # index-for-index with ``coef``.
+        rids = batch_over["_rid"].to_numpy().astype(np.int64)
+    else:
+        rids, coef = _param_only_prune_down(batch_over, axis_cols, recipe)
+
+    col_id = np.full(coef.size, -1, dtype=np.int64)
+    return rids, col_id, coef.astype(np.float64, copy=False)
+
+
+def _param_only_positional(
+    batch_over: pl.DataFrame,
+    axis_cols: list[str],
+    recipe: CoefWalkRecipe,
+    dense_axes: tuple[str, ...] | None,
+) -> np.ndarray | None:
+    """Positional Param-only product over the batch ``over`` slice — the
+    reuse of ``_rhs_chain_bounded_coef``'s three alignment cases.
+
+    Returns the per-row ``coef`` numpy array (length ``batch_over.height``,
+    one entry per ``_rid`` in the slice's row order), or ``None`` to
+    decline (caller falls to :func:`_param_only_prune_down`).  Declining is
+    always safe — a false decline only changes which (byte-identical) build
+    produces the batch.
+    """
+    if not dense_axes or _block_coo_disabled():
+        return None
+    sources = recipe.param_sources
+    if not sources:
+        return None
+    dense_dims = list(dense_axes)
+    if len(dense_dims) > len(axis_cols):
+        return None
+    if tuple(axis_cols[-len(dense_dims):]) != tuple(dense_dims):
+        return None
+    non_dense_dims = [d for d in axis_cols if d not in set(dense_dims)]
+    for atomic, _direction in sources:
+        for d in atomic.dims:
+            if d not in axis_cols:
+                return None
+
+    # Verify the dense-sort contract on the batch over slice (loud error on
+    # violation — same guard block-COO's LHS seed runs).
+    _verify_dense_sorted(batch_over, non_dense_dims, dense_dims, None)
+
+    n = int(batch_over.height)
+    n_dense = batch_over.select(dense_dims).n_unique() if dense_dims else 1
+    n_lead = (
+        batch_over.select(non_dense_dims).n_unique() if non_dense_dims else 1
+    )
+    if n != n_lead * n_dense:
+        return None
+
+    coef = np.full(n, float(recipe.coef_scalar), dtype=np.float64)
+    non_dense_set = set(non_dense_dims)
+    dense_set = set(dense_dims)
+
+    lead_table = None
+    if non_dense_dims:
+        lead_table = batch_over.select(non_dense_dims).unique(
+            maintain_order=True
+        )
+        if lead_table.height != n_lead:
+            return None
+
+    for atomic, direction in sources:
+        shared = [d for d in axis_cols if d in atomic.dims]
+        if not shared:
+            f = atomic.frame
+            if "value" not in f.columns or f.height == 0:
+                return None
+            scalar_val = float(f["value"][0])
+            if direction >= 0:
+                coef = coef * scalar_val
+            else:
+                coef = coef / scalar_val
+            continue
+
+        shared_set = set(shared)
+        has_lead = bool(shared_set & non_dense_set)
+        has_dense = bool(shared_set & dense_set)
+
+        if has_lead and not has_dense:
+            lt_a, at_a = _align_enum_join_keys(
+                lead_table.lazy(), atomic.lazy, shared
+            )
+            aligned = lt_a.join(
+                at_a, on=shared, how="left", maintain_order="left"
+            ).collect()
+            if aligned.height != n_lead or aligned["value"].null_count() > 0:
+                return None
+            block_vals = (
+                aligned["value"].to_numpy().astype(np.float64, copy=False)
+            )
+            repeated = np.repeat(block_vals, n_dense)
+            if direction >= 0:
+                coef = coef * repeated
+            else:
+                coef = coef / repeated
+
+        elif has_dense and not has_lead and shared == dense_dims:
+            atomic_df = atomic.lazy.collect().sort(dense_dims)
+            if atomic_df.height != n_dense:
+                return None
+            dense_vals = (
+                atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+            )
+            tiled = np.tile(dense_vals, n_lead)
+            if direction >= 0:
+                coef = coef * tiled
+            else:
+                coef = coef / tiled
+
+        elif has_dense:
+            grid_a, at_a = _align_enum_join_keys(
+                batch_over.lazy(), atomic.lazy, shared
+            )
+            aligned = grid_a.join(
+                at_a, on=shared, how="left", maintain_order="left"
+            ).collect()
+            if aligned.height != n or aligned["value"].null_count() > 0:
+                return None
+            vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
+            if direction >= 0:
+                coef = coef * vals
+            else:
+                coef = coef / vals
+
+        else:
+            return None
+
+    _emit_block_coo_path("rhs_positional_walk")
+    return coef
+
+
+def _param_only_prune_down(
+    batch_over: pl.DataFrame,
+    axis_cols: list[str],
+    recipe: CoefWalkRecipe,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batched merged-lazy prune-down for the Var-less Param chain — the
+    always-correct backstop for any batch slice the positional regime
+    declines.
+
+    Mirrors the canonical builder's RHS prune-down
+    (``_build_canonical_matrix``) bounded to the batch: seed the batch
+    ``over`` (carrying ``_rid``) with ``value=coef_scalar``, then for each
+    ``(atomic, direction)`` in chain order semi-join the atomic to the
+    accumulator's key projection (so the intermediate stays bounded to the
+    batch's rows) and left-join its ``value``, multiplying (``direction >=
+    0``) or dividing (``< 0``) the running ``value``.  Scalar atomics fold
+    their constant directly.  Reads ``value`` back in ``_rid`` order and
+    ``fill_null(0.0)`` exactly as the engine does, so the result is
+    byte-identical to the whole-collect.  Needs NO dense suffix — that is
+    the generality that bounds the declined shapes.
+
+    Returns ``(rids, coef)`` paired index-for-index (both read off the
+    collected frame, so the ``_rid`` order matches the ``coef`` order
+    regardless of how polars laid the join out).
+    """
+    acc = batch_over.lazy().with_columns(
+        value=pl.lit(float(recipe.coef_scalar), dtype=pl.Float64)
+    )
+    for atomic, direction in recipe.param_sources:
+        atomic_on = [d for d in atomic.dims if d in axis_cols]
+        if atomic_on:
+            acc_for_keys, atomic_lazy = _align_enum_join_keys(
+                acc, atomic.lazy, atomic_on
+            )
+            keys_lazy = acc_for_keys.select(atomic_on).unique()
+            keys_a, atomic_a = _align_enum_join_keys(
+                keys_lazy, atomic_lazy, atomic_on
+            )
+            atomic_pruned = atomic_a.join(keys_a, on=atomic_on, how="semi")
+            acc_a, atomic_pruned_a = _align_enum_join_keys(
+                acc_for_keys, atomic_pruned, atomic_on
+            )
+            joined = acc_a.join(
+                atomic_pruned_a,
+                on=atomic_on,
+                how="left",
+                suffix="__rhs_chain",
+            )
+            if direction >= 0:
+                acc = joined.with_columns(
+                    value=pl.col("value") * pl.col("value__rhs_chain")
+                ).drop("value__rhs_chain")
+            else:
+                acc = joined.with_columns(
+                    value=pl.col("value") / pl.col("value__rhs_chain")
+                ).drop("value__rhs_chain")
+        else:
+            scalar_val = float(atomic.frame["value"][0])
+            if direction >= 0:
+                acc = acc.with_columns(value=pl.col("value") * scalar_val)
+            else:
+                acc = acc.with_columns(value=pl.col("value") / scalar_val)
+    out = acc.select("_rid", "value").collect()
+    rids = out["_rid"].to_numpy().astype(np.int64)
+    coef = out["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
+    return rids, coef
+
+
 class _NonSumTermProxy:
     """Minimal duck-typed ``_Term`` exposing the fields the block-COO
     classifier / builder read on a non-Sum term."""
@@ -846,6 +1171,10 @@ def bounded_coefficient_walk(
         if mode == "column":
             rid, cid, coef = _build_column_batch_triple(
                 batch, recipe, dense_axes
+            )
+        elif recipe.param_only:
+            rid, cid, coef = _build_param_only_batch_triple(
+                batch, axis_cols, recipe, dense_axes
             )
         else:
             rid, cid, coef = _build_constraint_batch_triple(
