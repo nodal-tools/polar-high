@@ -1581,6 +1581,200 @@ class _SumBlockCooFallback(Exception):
     use the reduced ``term.lazy`` emission verbatim."""
 
 
+def _build_sum_block_coo_relabel(
+    row_index_lf: pl.LazyFrame,
+    axis_cols: list[str],
+    meta: SumBlockMeta,
+    on: list[str],
+    dense_spec: dict,
+    keep_dims: tuple[str, ...] | None = None,
+) -> pl.DataFrame:
+    """Relabel fast-path for a ``Sum``-wrapped ``Var × Param-chain`` term
+    when ``reduce_dims ⊆ var.dims`` (Phase C-3b).
+
+    The exploitable insight: when every reduced dim is already a Var dim,
+    ``col_id`` is a function of the Var instance, so two unreduced rows
+    sharing a ``col_id`` share all ``var.dims`` values, hence all
+    ``reduce_dims`` values — they are the SAME row.  Every ``(*keep,
+    col_id)`` reduction group is therefore SINGLE-ELEMENT: the Sum performs
+    NO coefficient summation, only a RELABEL of each Var-grid row to its
+    constraint row(s) via the map-join (1:1, or fan-out to several distinct
+    rows — each still its own single-element group).
+
+    So we skip the materialize-then-reduce builder's full-product
+    sort + ``np.add.reduceat`` entirely and instead mirror
+    :func:`_build_block_coo_plan`'s *positional* per-block slice-multiply on
+    the pre-sorted Var seed (peak bounded by the Var grid + per-factor numpy
+    buffers, NOT the full unreduced product after map / Param fan-out),
+    apply the map-effect Where to introduce the kept map dims, then attach
+    ``_rid`` by inner-joining ``row_index_lf`` on ``on`` — a direct emit,
+    no group-by.
+
+    Bit-identity
+    ------------
+    The coef is seeded with ``meta.coef_scalar`` and multiplied STRICTLY in
+    ``meta.param_sources`` order (the FULL list, including summed-out
+    factors such as ``p_unitsize``), with the SAME positional alignment
+    cases (and the SAME IEEE-double op sequence) as
+    :func:`_build_block_coo_plan`.  Same row set (the Var seed), same
+    per-row factor values, same multiply order ⇒ bit-identical
+    coefficients.  Because every reduce group is single-element there is no
+    summation step to perturb — the result is bit-identical to the reduced
+    ``term.lazy`` path, not merely bit-equivalent.
+
+    Determinism
+    -----------
+    The seed is pre-sorted (caller-verified) and the positional multiply is
+    a fixed left-to-right ufunc chain.  The map-join and the row_index
+    inner-join are polars (Rust) joins whose output is a deterministic
+    function of their inputs — independent of ``PYTHONHASHSEED`` (no Python
+    set/dict iteration drives emission).  No hash-order-dependent step.
+
+    Fallback contract
+    -----------------
+    Any shape this cannot reproduce bit-identically via the positional
+    cases raises :class:`_SumBlockCooFallback`; the caller emits the reduced
+    ``term.lazy`` verbatim.  Same contract as the combining path.
+    """
+    var_source = meta.var_source
+    var_dims = list(var_source.dims)
+    var_dim_set = set(var_dims)
+    keep = list(dense_spec["keep"])
+    dense_dims = list(dense_spec["dense_dims"])
+    non_dense_dims = list(dense_spec["non_dense_dims"])
+    coef_scalar = float(meta.coef_scalar)
+
+    # --- Step 1: bake pure-filter Where frames + pre-prune the Var seed by
+    # the row_index key set (semi-join), exactly as _build_block_coo_plan.
+    # Filtering preserves the seed's sort order (just narrows it).
+    var_on = [d for d in var_dims if d in axis_cols]
+    var_lf = var_source.frame.lazy()
+    if meta.where_frames is not None:
+        var_lf = _apply_where_frames(var_lf, var_dims, meta.where_frames)
+    if var_on:
+        ri_keys = row_index_lf.select(var_on).unique()
+        var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
+        var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
+    seed = var_lf.select(*var_dims, "col_id").collect()
+
+    n = seed.height
+    if n == 0:
+        return _empty_block_coo_frame(seed, keep_dims)
+
+    # --- Step 2: completeness guard.  Positional slicing is valid only when
+    # every leading-dim block is the full, identically-ordered dense set; a
+    # deferred filter can leave the grid sparse/ragged ⇒ fall back.  (Mirror
+    # of _build_block_coo_plan's guard; here a failure raises the Sum
+    # fallback sentinel rather than recursing into a joined backstop.)
+    if meta.where_frames is not None:
+        raise _SumBlockCooFallback("relabel: deferred filter present")
+    n_dense = seed.select(dense_dims).n_unique()
+    n_lead = seed.select(non_dense_dims).n_unique() if non_dense_dims else 1
+    if n != n_lead * n_dense:
+        raise _SumBlockCooFallback("relabel: sparse/ragged Var seed")
+
+    # --- Step 3: positional coef chain (mirror of _build_block_coo_plan).
+    coef = np.full(n, coef_scalar, dtype=np.float64)
+    non_dense_set = set(non_dense_dims)
+    dense_set = set(dense_dims)
+
+    lead_table = None
+    if non_dense_dims:
+        lead_table = seed.select(non_dense_dims).unique(maintain_order=True)
+        if lead_table.height != n_lead:
+            raise _SumBlockCooFallback("relabel: lead-table cardinality")
+
+    for atomic, direction in meta.param_sources:
+        # Under the classifier a Param's dims ⊆ var.dims ∪ map_extras ∪
+        # axis_cols.  When map frames are present, no Param references a
+        # map_extra (such a multiply would have baked the map eagerly,
+        # clearing where_map_frames) — so every relabel Param's dims that
+        # matter are ⊆ var.dims.  A Param dim purely in axis_cols (not in
+        # var.dims) yields an empty shared set ⇒ fall back.
+        shared = [d for d in var_dims if d in atomic.dims]
+        if not shared:
+            raise _SumBlockCooFallback("relabel: no-shared Param")
+        if not set(atomic.dims).issubset(var_dim_set):
+            raise _SumBlockCooFallback("relabel: Param dim outside var.dims")
+
+        shared_set = set(shared)
+        has_lead = bool(shared_set & non_dense_set)
+        has_dense = bool(shared_set & dense_set)
+
+        if has_lead and not has_dense:
+            # Lead-only: Param constant within each block.
+            atomic_lf = atomic.lazy
+            lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic_lf, shared)
+            aligned = lt_a.join(
+                at_a, on=shared, how="left", maintain_order="left"
+            ).collect()
+            if aligned.height != n_lead or aligned["value"].null_count() > 0:
+                raise _SumBlockCooFallback("relabel: lead-only mis-align")
+            block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
+            repeated = np.repeat(block_vals, n_dense)
+            if direction >= 0:
+                coef = coef * repeated
+            else:
+                coef = coef / repeated
+
+        elif has_dense and not has_lead and shared == dense_dims:
+            # Dense-only: one dense vector shared by every block.
+            atomic_df = atomic.lazy.collect().sort(dense_dims)
+            if atomic_df.height != n_dense:
+                raise _SumBlockCooFallback("relabel: dense-only sparse")
+            dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+            tiled = np.tile(dense_vals, n_lead)
+            if direction >= 0:
+                coef = coef * tiled
+            else:
+                coef = coef / tiled
+
+        elif has_dense:
+            # Lead-subset + dense: positional left-join on the FULL shared
+            # with maintain_order="left" (order-preserving in polars 1.40.1).
+            atomic_lf = atomic.lazy
+            seed_a, at_a = _align_enum_join_keys(seed.lazy(), atomic_lf, shared)
+            aligned = seed_a.join(
+                at_a, on=shared, how="left", maintain_order="left"
+            ).collect()
+            if aligned.height != n or aligned["value"].null_count() > 0:
+                raise _SumBlockCooFallback("relabel: lead+dense mis-align")
+            vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
+            if direction >= 0:
+                coef = coef * vals
+            else:
+                coef = coef / vals
+
+        else:
+            raise _SumBlockCooFallback("relabel: Param overlaps neither axis")
+
+    # --- Step 4: attach coef to the pre-sorted seed (positional — coef[i]
+    # is the product for seed row i).  Carry only the var dims + col_id.
+    result = seed.select(*var_dims, "col_id").with_columns(
+        coef=pl.Series("coef", coef, dtype=pl.Float64)
+    )
+
+    # --- Step 5: apply the map-effect Where frames (e.g. flow_to_n) to
+    # introduce the kept map dims (n).  This is an inner-join on the map
+    # frame's shared keys (var dims); it may relabel 1:1 or fan a row out to
+    # several DISTINCT (keep, col_id) rows — each still a single-element
+    # group, so NO summation either way.  The map frame is small; the result
+    # stays at relabel-output resolution, never the full param×map product.
+    res_lf, res_dims = _apply_where_map_frames(
+        result.lazy(), tuple(var_dims) + ("col_id", "coef"), meta.where_map_frames
+    )
+
+    # --- Step 6: project to (*keep, col_id, coef) and attach _rid by
+    # inner-joining row_index on ``on`` (⊆ keep).  No group-by, no reduceat:
+    # single-element groups mean the relabel is the final coefficient.
+    reduced = res_lf.select(*keep, "col_id", "coef")
+    ri_a, res_a = _align_enum_join_keys(row_index_lf, reduced, on)
+    joined_ri = ri_a.join(res_a, on=on, how="inner")
+    return joined_ri.select(
+        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
+    ).collect()
+
+
 def _build_sum_block_coo_plan(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
@@ -1599,8 +1793,22 @@ def _build_sum_block_coo_plan(
     :func:`_build_block_coo_plan`, so the canonical builder consumes it
     unchanged.
 
-    Algorithm
-    ---------
+    Branch (relabel vs combining)
+    -----------------------------
+    When ``reduce_dims ⊆ var.dims`` (e.g. ``nodeBalance_eq``,
+    ``over=("p","source","sink") ⊆ v_flow.dims``) every ``(*keep, col_id)``
+    reduce group is SINGLE-ELEMENT — the Sum is a pure RELABEL, no
+    coefficient summation — so we delegate to
+    :func:`_build_sum_block_coo_relabel`, which mirrors
+    :func:`_build_block_coo_plan`'s bounded *positional* per-block
+    slice-multiply and emits directly (peak bounded by the Var grid + numpy
+    buffers, NOT the full unreduced product).  Otherwise (genuine coef
+    combining: a reduced dim is NOT a Var dim, e.g. a map-introduced ``h``
+    fanned out and summed) we take the materialize-then-reduce path below,
+    which is correct but peaks at the full unreduced product.
+
+    Materialize-then-reduce algorithm (combining path)
+    --------------------------------------------------
     1. **Seed** = ``meta.var_source.frame`` (PRE-SORTED by ``(non_dense…,
        dense…)`` per the dense_axes contract — verified by the caller via
        :func:`_verify_dense_sorted`).  Carry ``col_id`` + the Var dims.
@@ -1637,6 +1845,20 @@ def _build_sum_block_coo_plan(
     """
     var_source = meta.var_source
     var_dims = list(var_source.dims)
+
+    # --- Relabel fast-path: reduce_dims ⊆ var.dims ⇒ single-element groups
+    # ⇒ no summation ⇒ skip the full-product sort + reduceat.  Bit-identical.
+    if set(dense_spec["reduce_dims"]).issubset(set(var_dims)):
+        if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+            sys.stderr.write("[block_coo profile]\tkind=sum\tpath=relabel\n")
+            sys.stderr.flush()
+        return _build_sum_block_coo_relabel(
+            row_index_lf, axis_cols, meta, on, dense_spec, keep_dims
+        )
+    if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+        sys.stderr.write("[block_coo profile]\tkind=sum\tpath=combining\n")
+        sys.stderr.flush()
+
     keep = list(dense_spec["keep"])
     # ``reduce_dims`` (= dense_spec["reduce_dims"]) is summed out implicitly:
     # the group_by on (*keep, col_id) below collapses every open dim not in
