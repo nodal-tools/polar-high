@@ -4228,7 +4228,63 @@ class Problem:
                         and len(_lhs_psrc) >= 2
                         and not _prune_down_disabled()
                     )
-                    if _use_lhs_prune:
+                    # Block-COO sibling arm — identical dispatch to the
+                    # non-streaming site (_build_canonical_matrix): fires
+                    # ONLY when the Problem declared dense_axes AND this
+                    # non-Sum Var×Param chain matches the dense-suffix
+                    # contract.  Default ON; POLAR_HIGH_DISABLE_BLOCK_COO=1
+                    # is the off switch.  Bit-identical to the polars path;
+                    # any shape it can't reproduce returns None and we fall
+                    # through to prune-down / fallback unchanged.  The
+                    # helper returns a collected (_rid, col_id, coef) frame
+                    # whose ``_rid`` is family-local (it joined the local
+                    # int-range ``row_index_lf``), exactly matching the
+                    # ``rids_local = j["_rid"]`` consumed below; we wrap it
+                    # ``.lazy()`` so it appends as ``("dim", plan)`` like
+                    # every other streaming term and flows through
+                    # ``_collect_one``.
+                    _block_spec = None
+                    if not _block_coo_disabled():
+                        _block_spec = _block_coo_classify(
+                            term, axis_cols, on, self._dense_axes
+                        )
+                    _use_block_coo = _block_spec is not None
+                    if _use_block_coo:
+                        _verify_dense_sorted(
+                            term.var_source.frame,
+                            _block_spec["non_dense_dims"],
+                            _block_spec["dense_dims"],
+                            getattr(term.var_source, "name", None),
+                        )
+                        _t_blk0 = time.monotonic()
+                        plan = _build_block_coo_plan(
+                            row_index_lf,
+                            axis_cols,
+                            term.var_source,
+                            _lhs_psrc,
+                            on,
+                            term.coef_scalar,
+                            term.where_frames,
+                            _block_spec,
+                        )
+                        if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
+                            _blk_wall = time.monotonic() - _t_blk0
+                            _n_rows = int(plan.height)
+                            _dense = _block_spec["dense_dims"]
+                            _nb = _block_spec["dense_card"]
+                            _avg = (_n_rows / _nb) if _nb else 0.0
+                            sys.stderr.write(
+                                f"[block_coo profile]\tphase=block_coo_term"
+                                f"\tfamily={name}\tfamily_idx={_fam_idx}"
+                                f"\tterm_idx={_term_idx}"
+                                f"\tdense_dims={','.join(_dense)}"
+                                f"\tn_blocks={_nb}"
+                                f"\tavg_block_size={_avg:.2f}"
+                                f"\twall_s={_blk_wall:.4f}\n"
+                            )
+                            sys.stderr.flush()
+                        plan = plan.lazy()
+                    elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
                             axis_cols,
