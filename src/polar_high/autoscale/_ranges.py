@@ -1308,8 +1308,28 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # finite/non-zero reduce.  The result is BYTE-IDENTICAL to the
             # materialising collect, so the cap-skip no longer fires for this
             # shape (the walk always bounds).
+            # ``_CoefWalkRecipe.from_term`` can ONLY rebuild a term that
+            # carries a Var seed (``var_source``) or a ``Sum`` meta
+            # (``sum_block_meta``).  A fully-collapsed ``Sum(over=ALL)`` LHS
+            # term clears BOTH yet keeps a non-empty ``term.dims`` (the
+            # constraint's broadcast axes) and a real ``over`` grid — its
+            # ``.lazy`` is the already-reduced ``(*dims, col_id, coef)``
+            # constant.  Routing such a term into the walk raises
+            # ``TypeError`` in ``from_term`` — the L3 crash that silently
+            # reverts the solve to an un-scaled LP.  Mirror the ``routable``
+            # predicate the FlexTool consumer (``_layer2.bucket_coefficients``)
+            # applies before its walk: only enter the walk when the term can
+            # produce a recipe.  A non-routable dim-bound term falls through to
+            # the materialising collect below, which STILL folds its
+            # coefficient magnitude into the matrix range (byte-identically to
+            # the pre-block-COO dim-bound readout).
+            _routable = (
+                getattr(term, "var_source", None) is not None
+                or getattr(term, "sum_block_meta", None) is not None
+            )
             if (
-                term_dims
+                _routable
+                and term_dims
                 and row_index_lf is not None
                 and _l2_rf is not None
                 and row_index_lf_rid is not None
@@ -1331,6 +1351,58 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                         "term_done", family=cname, term_idx=ti,
                         has_dims=str(bool(term_dims)),
                         coef_walk="1",
+                    )
+                continue
+
+            # ---- Non-routable dim-bound term, side-vectors ON.
+            # A fully-collapsed ``Sum(over=ALL)`` LHS term has ``term_dims``
+            # (non-empty) + a real ``over`` grid but NO block-COO recipe
+            # (``var_source`` None AND ``sum_block_meta`` None), so it could
+            # NOT enter the bounded walk above.  When the row factor is
+            # installed (``_l2_rf`` on, ``row_index_lf_rid`` carrying the
+            # ``_rid`` int-range) it must STILL contribute its coefficient
+            # magnitude to the matrix range — dropping it would change the L3
+            # ranges and therefore the scaling decision.  Handled HERE, BEFORE
+            # the fallback cap guard below, because it is bounded by
+            # construction (a reduced term's ``.lazy`` is small — the ``Sum``
+            # already collapsed the wide product), so it must never be
+            # cap-skipped.  Reproduce the PRE-block-COO side-vectors-on
+            # dim-bound collect EXACTLY: align the ``_rid``-carrying row index
+            # with the term's reduced ``.lazy`` on the shared axis dims,
+            # inner-join to attach ``_rid`` per surviving (row, col) cell, then
+            # reduce ``|coef| * |_l2_rf[base_row + _rid]| * |_l2_cf[col_id]|``
+            # with the SAME finite/non-zero mask ``_reduce_abs`` uses — the
+            # SAME numpy op sequence :class:`MinMaxAbsReducer` applies, so the
+            # contribution is byte-identical to both the walk and the legacy
+            # materialising path.
+            if (
+                not _routable
+                and term_dims
+                and row_index_lf_rid is not None
+                and _l2_rf is not None
+            ):
+                on = [d for d in term_dims if d in axis_cols]
+                rl_a, tl_a = _align(row_index_lf_rid, term_lazy, on)
+                joined = rl_a.join(tl_a, on=on, how="inner").select(
+                    "_rid", "col_id", "coef"
+                )
+                df = _collect_streaming(joined)
+                if df.height == 0:
+                    lo, hi = None, None
+                else:
+                    rids = df["_rid"].to_numpy().astype(np.int64)
+                    cids = df["col_id"].to_numpy().astype(np.int64)
+                    vals = df["coef"].to_numpy().astype(np.float64)
+                    vals = vals * np.abs(_l2_rf[base_row + rids])
+                    if _l2_cf is not None:
+                        vals = vals * np.abs(_l2_cf[cids])
+                    lo, hi = _reduce_abs(vals)
+                _update_matrix(lo, hi)
+                if _profile:
+                    _emit(
+                        "term_done", family=cname, term_idx=ti,
+                        has_dims=str(bool(term_dims)),
+                        non_routable_collect="1",
                     )
                 continue
 
