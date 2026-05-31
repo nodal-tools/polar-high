@@ -276,7 +276,17 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
     from ..engine import Param as _Param
     from ..engine import _align_enum_join_keys as _align
-    from ..engine import _apply_where_frames, _apply_where_map_frames
+    from ..engine import (
+        _apply_where_frames,
+        _apply_where_map_frames,
+        _block_coo_classify,
+        _block_coo_disabled,
+        _build_block_coo_plan,
+        _build_sum_block_coo_plan,
+        _sum_block_coo_classify,
+        _SumBlockCooFallback,
+        _verify_dense_sorted,
+    )
 
     def _bake_term(term) -> tuple[_pl.LazyFrame, tuple[str, ...]]:
         """Bake any deferred Where pushdown frames (pure-filter
@@ -330,6 +340,12 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     # decision agrees bit-for-bit with what the consumers will emit.
     _l2_rf = getattr(problem, "_layer2_row_factor", None)
     _l2_cf = getattr(problem, "_layer2_col_factor", None)
+
+    # Declared dense suffix — gates the bounded block-COO LHS fast path
+    # (Phase D-1).  ``None`` / empty for callers that never opted into the
+    # dense_axes contract, in which case the bounded path is inert and the
+    # term reads through the existing streaming collect unchanged.
+    dense_axes = getattr(problem, "_dense_axes", None)
 
     def _agg(lazy_frame: _pl.LazyFrame, col: str) -> tuple[float | None, float | None]:
         """Min/max(abs(``col``)) over finite non-zero rows.
@@ -392,6 +408,26 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             matrix_lo = lo
         if hi > matrix_hi:
             matrix_hi = hi
+
+    def _reduce_lhs_block(
+        rid_local: np.ndarray, col_id: np.ndarray, coef: np.ndarray
+    ) -> tuple[float | None, float | None]:
+        """Bounded min/max(abs(post-Layer-2 LHS coef)) for a block-COO
+        term.  Reproduces the side-vectors-on streaming magnitude
+        expression (``_ranges.py`` LHS dim branch) EXACTLY:
+
+            vals = coef * |_l2_rf[base_row + _rid]|
+            vals *= |_l2_cf[col_id]|        # only if _l2_cf is not None
+
+        then reduces via :func:`_reduce_abs` (same finite/non-zero mask).
+        ``_l2_rf`` is required (this primitive is only used on the side-
+        vectors-on path); ``base_row`` and the side vectors are captured
+        from the enclosing scope.  Shared with the D-2 RHS path.
+        """
+        vals = coef * np.abs(_l2_rf[base_row + rid_local])
+        if _l2_cf is not None:
+            vals = vals * np.abs(_l2_cf[col_id])
+        return _reduce_abs(vals)
 
     def _update_cost(lo: float | None, hi: float | None) -> None:
         nonlocal cost_lo, cost_hi
@@ -624,6 +660,111 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # and the ``_align`` / ``join(on=...)`` calls fail with
             # ColumnNotFoundError (the miss the prototype made on DES).
             term_lazy, term_dims = _bake_term(term)
+
+            # ---- Bounded block-COO LHS fast path (Phase D-1).
+            # For block-evaluable ``Var × Param-chain`` terms (and the
+            # bit-identical relabel Sum arm), build the exact
+            # ``(_rid, col_id, coef)`` triple via block-COO's bounded
+            # numpy builders instead of materialising the product through
+            # the polars streaming collect.  The reported magnitude is
+            # then BYTE-IDENTICAL to the streaming path: same coef values
+            # (block-COO is bit-identical to the polars chain), same
+            # ``base_row + _rid`` row-factor index, same ``col_id`` col-
+            # factor index, same ``_reduce_abs`` reduction.  Only fires
+            # on the side-vectors-on path (``_l2_rf is not None`` — the
+            # readout's production mode; ``row_index_lf_rid`` carries the
+            # ``_rid`` int-range the builder attaches).  Anything block-COO
+            # cannot reproduce bit-identically (classify -> None, a
+            # map-effect Where, the combining Sum branch, or a Sum
+            # fallback) drops through to the existing streaming path
+            # unchanged.  Mirror the dispatch shape in
+            # ``Problem._build_canonical_matrix``.
+            if (
+                term_dims
+                and row_index_lf is not None
+                and _l2_rf is not None
+                and row_index_lf_rid is not None
+                and dense_axes
+                and not _block_coo_disabled()
+            ):
+                blk_on = [d for d in term_dims if d in axis_cols]
+                _blk_spec = _block_coo_classify(
+                    term, axis_cols, blk_on, dense_axes
+                )
+                # A deferred map-effect Where introduces extras dims the
+                # block-COO seed (Var dims only) cannot carry; decline
+                # (mirrors the canonical builder's explicit guard).
+                if term.where_map_frames is not None:
+                    _blk_spec = None
+                _blk_df = None
+                if _blk_spec is not None:
+                    _verify_dense_sorted(
+                        term.var_source.frame,
+                        _blk_spec["non_dense_dims"],
+                        _blk_spec["dense_dims"],
+                        getattr(term.var_source, "name", None),
+                    )
+                    _blk_df = _build_block_coo_plan(
+                        row_index_lf_rid,
+                        axis_cols,
+                        term.var_source,
+                        term.param_sources,
+                        blk_on,
+                        term.coef_scalar,
+                        term.where_frames,
+                        _blk_spec,
+                    )
+                else:
+                    # Sum-wrapped Var × Param chain (var_source cleared by
+                    # Sum, recipe captured).  Only the RELABEL branch is
+                    # bit-identical to polars' group_by; the combining
+                    # branch is bit-EQUIVALENT, which would perturb the
+                    # reported magnitude — so decline unless the spec
+                    # routes to relabel (``reduce_dims ⊆ var.dims``), and
+                    # fall back on the builder's fallback sentinel too.
+                    _sum_spec = _sum_block_coo_classify(
+                        term, axis_cols, blk_on, dense_axes
+                    )
+                    if _sum_spec is not None:
+                        _sm = term.sum_block_meta
+                        _reduce_dims = set(_sum_spec["reduce_dims"])
+                        if _reduce_dims.issubset(set(_sm.var_source.dims)):
+                            _verify_dense_sorted(
+                                _sm.var_source.frame,
+                                _sum_spec["non_dense_dims"],
+                                _sum_spec["dense_dims"],
+                                getattr(_sm.var_source, "name", None),
+                            )
+                            try:
+                                _blk_df = _build_sum_block_coo_plan(
+                                    row_index_lf_rid,
+                                    axis_cols,
+                                    _sm,
+                                    blk_on,
+                                    _sum_spec,
+                                )
+                            except _SumBlockCooFallback:
+                                _blk_df = None
+                if _blk_df is not None:
+                    # Both block-COO builders return an eager DataFrame
+                    # with (_rid, col_id, coef).
+                    df = _blk_df.select("_rid", "col_id", "coef")
+                    if df.height == 0:
+                        lo, hi = None, None
+                    else:
+                        rids = df["_rid"].to_numpy().astype(np.int64)
+                        cids = df["col_id"].to_numpy().astype(np.int64)
+                        vals = df["coef"].to_numpy().astype(np.float64)
+                        lo, hi = _reduce_lhs_block(rids, cids, vals)
+                    _update_matrix(lo, hi)
+                    if _profile:
+                        _emit(
+                            "term_done", family=cname, term_idx=ti,
+                            has_dims=str(bool(term_dims)),
+                            block_coo="1",
+                        )
+                    continue
+
             if not term_dims or row_index_lf is None:
                 # Scalar (no row binding) — broadcast across the family
                 # rows.  ``_agg`` reduces |coef| only; when side vectors
