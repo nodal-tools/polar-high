@@ -288,6 +288,21 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _SumBlockCooFallback,
         _verify_dense_sorted,
     )
+    from ._coef_walk import (
+        CoefWalkRecipe as _CoefWalkRecipe,
+    )
+    from ._coef_walk import (
+        MinMaxAbsReducer as _MinMaxAbsReducer,
+    )
+    from ._coef_walk import (
+        bounded_coefficient_walk as _bounded_coefficient_walk,
+    )
+
+    # Batch size for the bounded coefficient walk that replaces the DECLINED
+    # LHS materialising collect.  The walk is BYTE-IDENTICAL for any positive
+    # batch size (min/max is order-independent); 256k keeps each batch's
+    # block-COO product comfortably small while amortising per-batch overhead.
+    _WALK_BATCH_ROWS = 256_000
 
     def _bake_term(term) -> tuple[_pl.LazyFrame, tuple[str, ...]]:
         """Bake any deferred Where pushdown frames (pure-filter
@@ -1237,8 +1252,55 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     continue
 
             # Reached only when the bounded block-COO LHS path declined or
-            # was inapplicable (it ``continue``s on success above): this is
-            # the OLD materialising collect.  Fallback cap guard — skip
+            # was inapplicable (it ``continue``s on success above).
+            #
+            # ---- Bounded coefficient-walk LHS fallback (Phase D-5 step 2).
+            # When the inline block-COO fast path declines BUT the term is a
+            # dim-bound LHS on the side-vectors-on production path (``_l2_rf``
+            # installed, ``row_index_lf_rid`` carrying the ``_rid`` int-range),
+            # the OLD fallback here was a materialising ``_collect_streaming``
+            # of the merged ``Var × Param …`` product — the exact spike that
+            # over the family-row cap got SKIPPED (loud) and dropped from the
+            # readout.  Instead walk the same block-COO ``(_rid, col_id, coef)``
+            # stream in bounded ``_WALK_BATCH_ROWS`` slices via
+            # :func:`bounded_coefficient_walk` + :class:`MinMaxAbsReducer`,
+            # which reconstructs the IDENTICAL per-cell coef (block-COO is
+            # bit-identical to the polars chain; the walk's backstops handle
+            # the bare-Var / map-Where / Sum-combining / sparse shapes the
+            # inline fast path declined) and applies the SAME side-vector scale
+            # ``|_l2_rf[base_row + _rid]| * |_l2_cf[col_id]|`` + the SAME
+            # finite/non-zero reduce.  The result is BYTE-IDENTICAL to the
+            # materialising collect, so the cap-skip no longer fires for this
+            # shape (the walk always bounds).
+            if (
+                term_dims
+                and row_index_lf is not None
+                and _l2_rf is not None
+                and row_index_lf_rid is not None
+            ):
+                recipe = _CoefWalkRecipe.from_term(term)
+                scale = (_l2_rf, base_row, _l2_cf)
+                (walk_minmax,) = _bounded_coefficient_walk(
+                    over,
+                    recipe,
+                    scale,
+                    [_MinMaxAbsReducer(scale)],
+                    batch_rows=_WALK_BATCH_ROWS,
+                    dense_axes=dense_axes,
+                )
+                lo, hi = walk_minmax
+                _update_matrix(lo, hi)
+                if _profile:
+                    _emit(
+                        "term_done", family=cname, term_idx=ti,
+                        has_dims=str(bool(term_dims)),
+                        coef_walk="1",
+                    )
+                continue
+
+            # Side-vectors-OFF readout or scalar (no row binding) shapes the
+            # walk's production scale path does not cover: keep the OLD
+            # materialising collect behind the fallback cap guard — skip
             # (loud) iff this family is over the cap.
             if _skip_unbounded_over_cap(cname, row_count, "lhs", term_idx=ti):
                 continue
@@ -1269,45 +1331,28 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             tiled_vals = np.outer(rf_slice, vals).ravel()
                             lo, hi = _reduce_abs(tiled_vals)
             else:
+                # Dim-bound LHS term, side-vectors OFF (``_l2_rf is None``).
+                # The side-vectors-ON dim-bound case is handled above by the
+                # bounded coefficient walk (which ``continue``s), so it never
+                # reaches here — only the no-row-factor readout does, and it
+                # has no deep-product spike to bound (it reduces ``|coef|`` /
+                # ``|coef · cf|`` directly off the semi-joined plan).
                 on = [d for d in term_dims if d in axis_cols]
-                if _l2_rf is None:
-                    rl_a, tl_a = _align(row_index_lf, term_lazy, on)
-                    keys = rl_a.select(on).unique()
-                    pruned = tl_a.join(keys, on=on, how="semi")
-                    if _l2_cf is None:
-                        lo, hi = _agg(pruned, "coef")
-                    else:
-                        df = _collect_streaming(
-                            pruned.select("col_id", "coef")
-                        )
-                        if df.height == 0:
-                            lo, hi = None, None
-                        else:
-                            cids = df["col_id"].to_numpy().astype(np.int64)
-                            vals = df["coef"].to_numpy().astype(np.float64)
-                            vals = vals * np.abs(_l2_cf[cids])
-                            lo, hi = _reduce_abs(vals)
+                rl_a, tl_a = _align(row_index_lf, term_lazy, on)
+                keys = rl_a.select(on).unique()
+                pruned = tl_a.join(keys, on=on, how="semi")
+                if _l2_cf is None:
+                    lo, hi = _agg(pruned, "coef")
                 else:
-                    # Side vectors on — left-join with ``_rid`` so the
-                    # collected frame carries the absolute row id needed
-                    # to index ``_l2_rf``.
-                    rl_a, tl_a = _align(row_index_lf_rid, term_lazy, on)
-                    keys = rl_a.select(on).unique()
-                    pruned = tl_a.join(keys, on=on, how="semi")
-                    plan = (
-                        rl_a.join(pruned, on=on, how="inner")
-                        .select("_rid", "col_id", "coef")
+                    df = _collect_streaming(
+                        pruned.select("col_id", "coef")
                     )
-                    df = _collect_streaming(plan)
                     if df.height == 0:
                         lo, hi = None, None
                     else:
-                        rids = df["_rid"].to_numpy().astype(np.int64)
                         cids = df["col_id"].to_numpy().astype(np.int64)
                         vals = df["coef"].to_numpy().astype(np.float64)
-                        vals = vals * np.abs(_l2_rf[base_row + rids])
-                        if _l2_cf is not None:
-                            vals = vals * np.abs(_l2_cf[cids])
+                        vals = vals * np.abs(_l2_cf[cids])
                         lo, hi = _reduce_abs(vals)
             _update_matrix(lo, hi)
             if _profile:
