@@ -137,6 +137,36 @@ def _block_coo_fires(builder, *, enable: bool = True) -> bool:
     return "phase=block_coo_term" in buf.getvalue()
 
 
+def _block_coo_paths(builder) -> list[str]:
+    """Return the ordered list of ``path=`` profile signals emitted by the
+    block-COO builder for ``builder`` (one per fired block-COO term).
+
+    The builder emits ``[block_coo profile]\\tpath=positional`` when the
+    positional per-block slice-multiply fires and ``path=joined`` when it
+    falls back to the order-preserving join backstop — gated by
+    ``POLAR_HIGH_BLOCK_COO_PROFILE=1`` (same lever as the
+    ``phase=block_coo_term`` line).  Mirrors :func:`_block_coo_fires`'
+    profile-sniffing."""
+    import io
+    import re
+    import sys as _sys
+
+    _clear_guard()
+    _set_enable()
+    os.environ["POLAR_HIGH_BLOCK_COO_PROFILE"] = "1"
+    buf = io.StringIO()
+    old = _sys.stderr
+    try:
+        _sys.stderr = buf
+        prob = builder()
+        prob._build_canonical_matrix()
+    finally:
+        _sys.stderr = old
+        os.environ.pop("POLAR_HIGH_BLOCK_COO_PROFILE", None)
+        _clear_guard()
+    return re.findall(r"\bpath=(\w+)", buf.getvalue())
+
+
 # --------------------------------------------------------------------- #
 # Frame builders — all rows in itertools.product order = sorted by      #
 # (lead..., d, t), satisfying the dense_axes contract.                  #
@@ -540,5 +570,98 @@ def test_block_coo_sparse_param_no_crash_and_parity():
 
     assert _block_coo_fires(builder), (
         "block-COO should fire on the sparse dense-axis chain"
+    )
+    _assert_parity(builder)
+
+
+# --------------------------------------------------------------------- #
+# Positional path: all three Param cases (lead-only, dense-only,         #
+# lead-subset+dense) over a dense-complete grid.                          #
+# --------------------------------------------------------------------- #
+
+
+def _build_three_case_problem(*, with_where_t: bool = False):
+    """Builder for a non-Sum LHS exercising ALL THREE positional Param
+    alignment cases at once:
+
+        Var(p, d, t)
+          × unit_size(p)          # lead-only  (shared = [p] ⊆ non_dense)
+          × step_duration(d, t)   # dense-only (shared = [d, t] == dense)
+          × efficiency(p, d, t)   # lead-subset + dense (shared = [p,d,t])
+
+    over the declared dense ``(d, t)`` suffix.  All frames are built in
+    ``itertools.product`` order (lead prefix, dense trailing) so the
+    dense_axes sort contract holds.  With ``with_where_t`` a pure-filter
+    ``Where`` on ``t`` makes the grid sparse → forces the joined fallback.
+    """
+    n_p, n_d, n_t = 4, 6, 50
+    ps, ds, ts = list(range(n_p)), list(range(n_d)), list(range(n_t))
+
+    def builder() -> Problem:
+        p = Problem(dense_axes=("d", "t"))
+        over = _vdt_over(ps, ds, ts)
+        v = p.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
+
+        # lead-only Param(p)
+        unit_size = Param(
+            ("p",),
+            pl.DataFrame({"p": ps, "value": np.linspace(10.0, 40.0, n_p)}),
+            name="unit_size",
+        )
+        # dense-only Param(d, t)
+        step_duration = _dt_param(ds, ts, "step_duration", 0.25, 3.0)
+        # lead-subset + dense Param(p, d, t)
+        pdt_cells = list(itertools.product(ps, ds, ts))
+        efficiency = Param(
+            ("p", "d", "t"),
+            pl.DataFrame(
+                {
+                    "p": [c[0] for c in pdt_cells],
+                    "d": [c[1] for c in pdt_cells],
+                    "t": [c[2] for c in pdt_cells],
+                    "value": np.linspace(0.3, 0.95, len(pdt_cells)),
+                }
+            ),
+            name="efficiency",
+        )
+        chain = v * unit_size * step_duration * efficiency
+        if with_where_t:
+            sel_t = ts[: max(1, n_t // 2)]
+            chain = Where(chain, pl.DataFrame({"t": sel_t}))
+        p.add_cstr(
+            "c",
+            over=over,
+            sense="<=",
+            lhs_terms={"lhs": chain},
+            rhs_terms={"rhs": 0.0},
+        )
+        return p
+
+    return builder
+
+
+def test_block_coo_positional_dense_complete_parity():
+    """``Var(p,d,t) × unit_size(p) × step_duration(d,t) × efficiency(p,d,t)``
+    over a dense-complete grid (no Where): all three positional Param cases
+    (lead-only, dense-only, lead-subset+dense) fire on the POSITIONAL path,
+    and ON vs OFF must be bit-identical."""
+    builder = _build_three_case_problem(with_where_t=False)
+    assert _block_coo_fires(builder), "three-case chain should fire block-COO"
+    # Positional path must be taken on the dense-complete grid.
+    assert _block_coo_paths(builder) == ["positional"], (
+        "dense-complete grid must take the positional slice-multiply path"
+    )
+    _assert_parity(builder)
+
+
+def test_block_coo_falls_back_when_sparse():
+    """Same three-case chain with a pure-filter ``Where`` on ``t`` carves
+    the grid sparse → the completeness guard forces the JOINED fallback;
+    bit-parity ON vs OFF must still hold."""
+    builder = _build_three_case_problem(with_where_t=True)
+    assert _block_coo_fires(builder), "sparse three-case chain should still fire"
+    # where_frames present ⇒ completeness guard falls back to joined.
+    assert _block_coo_paths(builder) == ["joined"], (
+        "a pure-filter Where must force the joined fallback path"
     )
     _assert_parity(builder)

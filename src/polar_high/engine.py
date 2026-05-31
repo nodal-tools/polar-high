@@ -856,7 +856,24 @@ def _block_coo_classify(
     }
 
 
-def _build_block_coo_plan(
+def _emit_block_coo_path(path: str, reason: str = "") -> None:
+    """Emit a one-line ``path=`` profile signal naming which evaluation
+    arm :func:`_build_block_coo_plan` took (``positional`` vs ``joined``).
+
+    Gated by ``POLAR_HIGH_BLOCK_COO_PROFILE=1`` (same lever as the
+    ``phase=block_coo_term`` line emitted at the dispatch site).  This is
+    real instrumentation — it tells an operator whether the fast
+    positional slice-multiply fired or the builder fell back to the
+    order-preserving joined backstop, and why — not a test-only hook.
+    """
+    if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") != "1":
+        return
+    extra = f"\treason={reason}" if reason else ""
+    sys.stderr.write(f"[block_coo profile]\tpath={path}{extra}\n")
+    sys.stderr.flush()
+
+
+def _build_block_coo_plan_joined(
     row_index_lf: pl.LazyFrame,
     axis_cols: list[str],
     var_source: Var,
@@ -1004,6 +1021,7 @@ def _build_block_coo_plan(
     acc_sorted = acc.sort(sort_keys).collect()
 
     n = acc_sorted.height
+    _emit_block_coo_path("joined")
     if n == 0:
         # Nothing survived the chain (empty seed or a sparse Param dropped
         # every row) — emit an empty (_rid, col_id, coef) frame matching
@@ -1032,6 +1050,232 @@ def _build_block_coo_plan(
 
     # --- Step 4: attach _rid via row_index inner-join on ``on``.
     result = acc_sorted.select(*var_dims, "col_id").with_columns(
+        coef=pl.Series("coef", coef, dtype=pl.Float64)
+    )
+    ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
+    joined_ri = ri_a.join(res_a, on=on, how="inner")
+    return joined_ri.select("_rid", "col_id", "coef").collect()
+
+
+def _build_block_coo_plan(
+    row_index_lf: pl.LazyFrame,
+    axis_cols: list[str],
+    var_source: Var,
+    param_sources: list[tuple[Param, int]],
+    on: list[str],
+    coef_scalar: float,
+    where_frames: tuple[pl.LazyFrame, ...] | None,
+    dense_spec: dict,
+) -> pl.DataFrame:
+    """Evaluate a non-Sum ``Var × Param-chain`` LHS term via *positional*
+    per-block numpy slice-multiply on the already-sorted Var grid, with NO
+    re-sort — falling back to :func:`_build_block_coo_plan_joined` (the
+    always-correct, order-preserving join backstop) the instant positional
+    alignment cannot be guaranteed.
+
+    Same signature and return contract as the joined builder: an eager
+    :class:`polars.DataFrame` with columns ``(_rid, col_id, coef)``, ready
+    for the existing emission code in
+    :meth:`Problem._build_canonical_matrix`.
+
+    Why positional is faster
+    -------------------------
+    The joined builder is correct but pays an ``O(n log n)`` re-sort
+    (``acc.sort(sort_keys)``) because polars joins do not preserve order,
+    and materialises every Param's value at full grid resolution.  When the
+    Var seed is dense-complete (see the completeness guard below) every
+    leading-dim block holds the SAME complete, identically-ordered set of
+    dense-axis tuples, so a dense-resolution factor aligns *positionally*
+    across blocks: we slice/tile/repeat numpy buffers onto the pre-sorted
+    seed and multiply in place — no join-induced reorder, no re-sort.
+
+    Bit-identity
+    ------------
+    The coef is seeded with ``coef_scalar`` and multiplied STRICTLY in
+    ``param_sources`` order (``*value`` for direction ``>= 0`` / ``/value``
+    for ``< 0``) — the exact same IEEE-double op sequence
+    :func:`_build_lhs_pruned_plan` and :func:`_build_block_coo_plan_joined`
+    use.  Same row set (the seed, pre-pruned identically) + same per-row
+    factor values + same multiply order ⇒ bit-identical coefficients.
+
+    Completeness guard (positional vs fallback)
+    --------------------------------------------
+    Positional slicing is valid only when every leading-dim block contains
+    the same complete, identically-ordered dense-axis tuple set.  Cheap
+    sufficient test, given the caller has already verified the seed is
+    lexicographically sorted by ``(non_dense_dims..., dense_dims...)``:
+
+        n == n_lead * n_dense   AND   where_frames is None
+
+    where ``n = seed.height``, ``n_lead`` = distinct ``non_dense_dims``
+    tuples, ``n_dense`` = distinct ``dense_dims`` tuples.  If the seed is
+    sorted and ``n == n_lead * n_dense`` then each of the ``n_lead`` blocks
+    is exactly the full ``n_dense``-row dense set in the same order (a
+    sorted frame with no row spillover can only be the full cartesian
+    product).  Any ``where_frames`` (a deferred pure-filter) can carve the
+    grid sparse/ragged, so its mere presence forces the fallback.
+
+    Anything else — sparse seed, ragged blocks, a filter present, or any
+    per-Param alignment that cannot be proven length-exact — returns
+    ``_build_block_coo_plan_joined(...)``.  False fallbacks cost speed,
+    never correctness.
+    """
+    var_dims = list(var_source.dims)
+    var_on = [d for d in var_dims if d in axis_cols]
+    dense_dims = list(dense_spec["dense_dims"])
+    non_dense_dims = list(dense_spec["non_dense_dims"])
+
+    _fallback_args = (
+        row_index_lf,
+        axis_cols,
+        var_source,
+        param_sources,
+        on,
+        coef_scalar,
+        where_frames,
+        dense_spec,
+    )
+
+    # --- Step 1: bake where_frames + pre-prune the Var seed.  Filtering
+    # (semi-join) preserves the seed's sort order, so the result stays
+    # lexicographically sorted by (non_dense_dims..., dense_dims...) — just
+    # possibly sparse.  Block-COO needs the seed eager.
+    var_lf = var_source.frame.lazy()
+    if where_frames is not None:
+        var_lf = _apply_where_frames(var_lf, var_dims, where_frames)
+    if var_on:
+        ri_keys = row_index_lf.select(var_on).unique()
+        var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
+        var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
+    seed = var_lf.select(*var_dims, "col_id").collect()
+
+    n = seed.height
+    if n == 0:
+        # Empty seed — emit the empty (_rid, col_id, coef) frame directly
+        # (cheaper than recursing; the joined builder produces the same).
+        _emit_block_coo_path("positional", reason="empty_seed")
+        return pl.DataFrame(
+            {
+                "_rid": pl.Series("_rid", [], dtype=pl.Int64),
+                "col_id": pl.Series("col_id", [], dtype=pl.Int64),
+                "coef": pl.Series("coef", [], dtype=pl.Float64),
+            }
+        )
+
+    # --- Step 2: completeness guard.  A deferred filter (where_frames) can
+    # leave the grid sparse/ragged ⇒ fall back.  Otherwise the seed is
+    # sorted (caller-verified) and dense-complete iff n == n_lead * n_dense.
+    if where_frames is not None:
+        return _build_block_coo_plan_joined(*_fallback_args)
+
+    n_dense = seed.select(dense_dims).n_unique()
+    n_lead = seed.select(non_dense_dims).n_unique() if non_dense_dims else 1
+    if n != n_lead * n_dense:
+        # Sparse or ragged seed — blocks are not the full dense set in
+        # identical order ⇒ positional slicing would mis-align.
+        return _build_block_coo_plan_joined(*_fallback_args)
+
+    # --- Step 3: positional path.  Block size = n_dense; there are n_lead
+    # blocks laid end-to-end on the pre-sorted seed.  Build coef in numpy,
+    # seeded with coef_scalar, multiplying each Param in chain order.
+    coef = np.full(n, float(coef_scalar), dtype=np.float64)
+    non_dense_set = set(non_dense_dims)
+    dense_set = set(dense_dims)
+
+    # Distinct lead-key table (one row per block, in seed block order).
+    # Reused by the lead-only case.  Sorted seed ⇒ unique(maintain_order)
+    # yields blocks in laid-out order.
+    lead_table = None
+    if non_dense_dims:
+        lead_table = seed.select(non_dense_dims).unique(maintain_order=True)
+        if lead_table.height != n_lead:
+            # Defensive: n_unique disagreed with the materialised distinct
+            # table (should never happen) ⇒ fall back.
+            return _build_block_coo_plan_joined(*_fallback_args)
+
+    for atomic, direction in param_sources:
+        # Under the classifier every Param dim ⊆ var.dims, so the shared
+        # dims (in var-dim order) are exactly the Param's dims, ordered.
+        shared = [d for d in var_dims if d in atomic.dims]
+        if not shared:
+            # No shared dim at all (cross-join broadcast) — let the joined
+            # builder reproduce polars's cross-join semantics.
+            return _build_block_coo_plan_joined(*_fallback_args)
+
+        shared_set = set(shared)
+        has_lead = bool(shared_set & non_dense_set)
+        has_dense = bool(shared_set & dense_set)
+
+        if has_lead and not has_dense:
+            # --- Case lead-only: Param constant within each block.  Align
+            # it to the per-block lead keys WITHOUT grid broadcast: left
+            # join the tiny (n_lead-row) distinct-lead table on `shared`
+            # (a subset of non_dense_dims), preserving block order, then
+            # np.repeat each block value over its n_dense rows.
+            atomic_lf = atomic.lazy
+            lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic_lf, shared)
+            aligned = lt_a.join(
+                at_a, on=shared, how="left", maintain_order="left"
+            ).collect()
+            if aligned.height != n_lead or aligned["value"].null_count() > 0:
+                # Param duplicated a lead key (expansion) or missed one
+                # (null) ⇒ positional repeat would be wrong ⇒ fall back.
+                return _build_block_coo_plan_joined(*_fallback_args)
+            block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
+            repeated = np.repeat(block_vals, n_dense)
+            if direction >= 0:
+                coef = coef * repeated
+            else:
+                coef = coef / repeated
+
+        elif has_dense and not has_lead and shared == dense_dims:
+            # --- Case dense-only: one dense vector shared by every block.
+            # Sort the (small) Param by dense_dims, read its value array
+            # (must be length n_dense — else it's sparse on the dense axis
+            # ⇒ fall back), tile across all blocks, multiply.
+            atomic_df = atomic.lazy.collect().sort(dense_dims)
+            if atomic_df.height != n_dense:
+                return _build_block_coo_plan_joined(*_fallback_args)
+            dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
+            tiled = np.tile(dense_vals, n_lead)
+            if direction >= 0:
+                coef = coef * tiled
+            else:
+                coef = coef / tiled
+
+        elif has_dense:
+            # --- Case lead-subset + dense (e.g. efficiency(p,d,t)): the
+            # Param has a contiguous length-n_dense slice per distinct
+            # shared-lead value.  Robust positional impl: left-join the
+            # Param onto the seed on the FULL `shared` with
+            # maintain_order="left" (verified to preserve seed row order in
+            # polars 1.40.1), read the aligned value array (must be length
+            # n with no nulls — else sparse/ragged ⇒ fall back), multiply.
+            # This case may materialise the Param at grid resolution (it is
+            # genuinely dense data) but incurs NO re-sort.
+            atomic_lf = atomic.lazy
+            seed_a, at_a = _align_enum_join_keys(seed.lazy(), atomic_lf, shared)
+            aligned = seed_a.join(
+                at_a, on=shared, how="left", maintain_order="left"
+            ).collect()
+            if aligned.height != n or aligned["value"].null_count() > 0:
+                return _build_block_coo_plan_joined(*_fallback_args)
+            vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
+            if direction >= 0:
+                coef = coef * vals
+            else:
+                coef = coef / vals
+
+        else:
+            # Shared dims overlap neither lead nor dense — impossible under
+            # the classifier (every Param dim ⊆ var.dims = non_dense ∪
+            # dense), but fall back defensively rather than mis-align.
+            return _build_block_coo_plan_joined(*_fallback_args)
+
+    # --- Step 4: emit.  Attach coef to the pre-sorted seed (positional —
+    # coef[i] is the product for seed row i), inner-join row_index on `on`.
+    _emit_block_coo_path("positional")
+    result = seed.select(*var_dims, "col_id").with_columns(
         coef=pl.Series("coef", coef, dtype=pl.Float64)
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
