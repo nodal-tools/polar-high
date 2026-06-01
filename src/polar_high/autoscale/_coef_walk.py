@@ -242,6 +242,37 @@ class CoefWalkRecipe:
             sum_block_meta=None,
         )
 
+    @staticmethod
+    def is_buildable(term: Any) -> bool:
+        """Routability predicate for the matrix / LHS coefficient walk.
+
+        Returns ``True`` iff :meth:`from_term` would SUCCEED for ``term``
+        (treated as a NON-``param_only`` term).  This MUST stay in lockstep
+        with :meth:`from_term`: that method raises ``TypeError`` from
+        ``__init__`` ("var_source must be a Var; got NoneType") whenever the
+        Var it selects is ``None``, and the Var it selects depends on
+        whether the term is ``Sum``-wrapped:
+
+        * ``term.sum_block_meta is not None`` → the recipe's Var is
+          ``meta.var_source`` (the meta branch); buildable iff
+          ``meta.var_source is not None``.
+        * ``term.sum_block_meta is None`` → the recipe's Var is
+          ``term.var_source`` (the non-Sum branch); buildable iff
+          ``term.var_source is not None``.
+
+        A SHALLOW ``var_source is not None OR sum_block_meta is not None``
+        check is WRONG: a ``Sum`` term whose ``meta.var_source`` is ``None``
+        (a fully-collapsed ``Sum``) passes that check yet still crashes in
+        :meth:`from_term` (it takes the meta branch and selects a ``None``
+        Var).  This predicate mirrors the real selection so callers route
+        such terms to their non-buildable collect fallback instead of
+        crashing.  Cheap (attribute reads only — no collects).
+        """
+        meta = getattr(term, "sum_block_meta", None)
+        if meta is not None:
+            return getattr(meta, "var_source", None) is not None
+        return getattr(term, "var_source", None) is not None
+
     @classmethod
     def from_rhs_chain(cls, rhs: Param) -> CoefWalkRecipe:
         """Build a Var-LESS (Param-only) recipe from a constraint RHS

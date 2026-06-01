@@ -39,12 +39,15 @@ reduction of the term's ``.lazy`` with the SAME side-vector scale.
 """
 from __future__ import annotations
 
+import dataclasses
 import itertools
 
 import numpy as np
 import polars as pl
+import pytest
 
 from polar_high.autoscale._coef_walk import CoefWalkRecipe
+from polar_high.autoscale._coef_walk import CoefWalkRecipe as _CWR
 from polar_high.autoscale._config import ScalingConfig
 from polar_high.autoscale._ranges import _ranges_via_streaming
 from polar_high.engine import Param, Problem, Sum, Where
@@ -226,3 +229,141 @@ def test_recipe_less_lhs_term_counts_col_factor() -> None:
 
     assert rep_b.matrix[0] == rep_a.matrix[0] * 0.5, (rep_a.matrix, rep_b.matrix)
     assert rep_b.matrix[1] == rep_a.matrix[1] * 0.5, (rep_a.matrix, rep_b.matrix)
+
+
+# ===CONTRACT_AND_SHAPE_B_TESTS===
+# Anti-regression for the PRECISE routability gap the first fix missed: the
+# matrix/LHS guard must use ``CoefWalkRecipe.is_buildable`` (the deep mirror
+# of ``from_term``'s precondition), NOT a shallow ``var_source is not None OR
+# sum_block_meta is not None`` (which lets a ``Sum`` term with
+# ``meta.var_source is None`` through, then crashes inside ``from_term``).
+
+
+class _DuckMeta:
+    """Minimal duck-typed ``SumBlockMeta`` (non-frozen, so the test can vary
+    ``var_source``) exposing exactly what ``from_term`` / ``is_buildable``
+    read off a meta."""
+
+    def __init__(self, var_source):
+        self.var_source = var_source
+        self.param_sources = ()
+        self.coef_scalar = 1.0
+        self.where_frames = None
+        self.where_map_frames = None
+        self.reduce_dims = ()
+        self.keep = ()
+
+
+class _DuckTerm:
+    """Minimal duck-typed ``_Term`` exposing exactly the attributes
+    ``from_term`` / ``is_buildable`` read."""
+
+    def __init__(self, var_source, sum_block_meta):
+        self.var_source = var_source
+        self.sum_block_meta = sum_block_meta
+        self.param_sources = ()
+        self.coef_scalar = 1.0
+        self.where_frames = None
+        self.where_map_frames = None
+        self.dims = ("d",)
+        # ``term.lazy`` carries ``(*dims, col_id, coef)`` so the meta-branch
+        # ``from_term`` (which captures it as ``reduced_lazy``) builds cleanly.
+        self.lazy = pl.DataFrame(
+            {"d": ["a", "b"], "col_id": [0, 1], "coef": [1.0, 2.0]}
+        ).lazy()
+
+
+def _make_real_var():
+    """A genuine (frozen) ``Var`` so the non-collapsed combinations build."""
+    p = Problem()
+    return p.add_var("v", ("d",), pl.DataFrame({"d": ["a", "b"]}),
+                     lower=0.0, upper=1.0)
+
+
+def _from_term_succeeds(term) -> bool:
+    """Ground truth: does ``from_term`` succeed for a NON-param_only term?
+    It raises ``TypeError`` from ``__init__`` when the selected Var is None."""
+    try:
+        _CWR.from_term(term)
+        return True
+    except TypeError:
+        return False
+
+
+@pytest.mark.parametrize(
+    "meta_kind", ["none", "meta_var_none", "meta_var_real"]
+)
+@pytest.mark.parametrize("term_has_var", [False, True])
+def test_is_buildable_matches_from_term_exactly(meta_kind, term_has_var):
+    """For EVERY (sum_block_meta in {None, meta var None, meta var real}) x
+    (term.var_source in {None, real Var}) the predicate must EQUAL whether
+    ``from_term`` succeeds — including the meta-present-var-None shape that
+    crashed DES (which a shallow ``var or meta`` check gets WRONG)."""
+    if meta_kind == "none":
+        meta = None
+    elif meta_kind == "meta_var_none":
+        meta = _DuckMeta(var_source=None)
+    else:
+        meta = _DuckMeta(var_source=_make_real_var())
+    term_var = _make_real_var() if term_has_var else None
+    term = _DuckTerm(var_source=term_var, sum_block_meta=meta)
+
+    expected = _from_term_succeeds(term)
+    got = _CWR.is_buildable(term)
+    assert got is expected, (
+        f"is_buildable(meta={meta_kind}, term_var={term_has_var})={got} "
+        f"but from_term-succeeds={expected}"
+    )
+
+
+def _force_meta_present_var_none(prob: Problem) -> None:
+    """Manufacture SHAPE (b): ``term.sum_block_meta`` PRESENT but
+    ``meta.var_source`` None (and the term's own ``var_source`` cleared) — the
+    exact field combination that crashed DES Layer 3.  ``SumBlockMeta`` is a
+    FROZEN dataclass, so rebuild it via ``dataclasses.replace(meta,
+    var_source=None)`` and assign back to the (non-frozen) ``_Term`` — the
+    post-build state of a Sum term whose Var seed is no longer reconstructable
+    from the meta, where the reduced ``term.lazy`` is the only source of truth
+    (precisely what the non-buildable collect path consumes)."""
+    term = prob._cstrs[0][1].expr.terms[0]
+    assert term.sum_block_meta is not None, "fixture term must be Sum-wrapped"
+    assert tuple(term.dims), "fixture term must keep non-empty dims"
+    term.var_source = None
+    term.sum_block_meta = dataclasses.replace(
+        term.sum_block_meta, var_source=None
+    )
+
+
+def test_meta_present_var_none_is_not_buildable():
+    """Shape (b) precondition: meta present + ``meta.var_source`` None is NOT
+    buildable (the SHALLOW guard WOULD have passed it — meta is not None — then
+    crashed in ``from_term``); and ``from_term`` genuinely raises on it, so the
+    guard is load-bearing, not vacuous."""
+    prob = _build_problem()
+    _force_meta_present_var_none(prob)
+    term = prob._cstrs[0][1].expr.terms[0]
+    assert term.sum_block_meta is not None
+    assert term.sum_block_meta.var_source is None
+    assert _CWR.is_buildable(term) is False
+    try:
+        _CWR.from_term(term)
+    except TypeError as exc:
+        assert "var_source must be a Var" in str(exc)
+    else:
+        raise AssertionError("from_term must raise on meta-present-var-None")
+
+
+def test_meta_present_var_none_readout_byte_identical():
+    """End-to-end SHAPE (b): a dim-bound ``Sum`` LHS term with
+    ``sum_block_meta`` present but ``meta.var_source`` None routes to the
+    non-buildable collect — the readout must NOT raise and the matrix range
+    must be BYTE-IDENTICAL to an independent materialise-and-reduce of the
+    term's ``.lazy`` with the SAME side-vector scale."""
+    prob = _build_problem()
+    _force_meta_present_var_none(prob)
+    _install_layer2(prob, col_factor=0.5)
+    expected = _reference_matrix_range(prob)
+    rep = _ranges_via_streaming(prob, ScalingConfig())  # must NOT raise
+    assert rep is not None
+    assert rep.matrix == expected, (rep.matrix, expected)
+    assert expected[0] > 0.0 and np.isfinite(expected[1])

@@ -1323,10 +1323,19 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # the materialising collect below, which STILL folds its
             # coefficient magnitude into the matrix range (byte-identically to
             # the pre-block-COO dim-bound readout).
-            _routable = (
-                getattr(term, "var_source", None) is not None
-                or getattr(term, "sum_block_meta", None) is not None
-            )
+            # Routability: only enter the bounded walk when
+            # ``_CoefWalkRecipe.from_term(term)`` would SUCCEED.  Mirror its
+            # EXACT precondition via ``is_buildable`` (meta present →
+            # ``meta.var_source is not None``; else ``term.var_source is not
+            # None``).  A SHALLOW ``var_source is not None OR sum_block_meta
+            # is not None`` is WRONG: a fully-collapsed ``Sum`` whose
+            # ``meta.var_source`` is None passes it yet still raises
+            # ``TypeError`` inside ``from_term`` (the meta branch selects a
+            # None Var) — the L3 crash this guard exists to prevent.  A
+            # non-buildable dim-bound term falls through to the materialising
+            # collect below, which STILL folds its coefficient magnitude into
+            # the matrix range (byte-identically to the pre-block-COO readout).
+            _routable = _CoefWalkRecipe.is_buildable(term)
             if (
                 _routable
                 and term_dims
