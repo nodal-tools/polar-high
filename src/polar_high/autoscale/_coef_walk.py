@@ -981,6 +981,32 @@ def _column_whole_product(
         coef = np.full(cids.size, recipe.coef_scalar, dtype=np.float64)
         return cids, coef
 
+    # Pure-relabel Sum objective: the term's OWN reduced lazy plan already
+    # carries exactly one ``(col_id, coef)`` per LP column.  For a relabel
+    # Sum (``reduce_dims ⊆ var.dims``, no map-effect Where frames) ``col_id``
+    # is 1:1 with Var cells, so the reduced plan's ``group_by(col_id).sum()``
+    # is over single-element groups — the reduced ``coef`` EQUALS the per-cell
+    # product coef the joined whole-product build would emit.  Read it
+    # directly: no identity self-join, no rebuild of the ~unreduced
+    # ``Var × Param`` whole product through ``_build_block_coo_plan``'s joined
+    # branch (the 40 s/term hot spot).  Same ``(col_id, coef)`` the
+    # ``_ref_histogram_column`` reference / the ranges reduced-plan collect
+    # read.  Strictly less memory: ~one row per LP column vs the whole
+    # product.  Non-relabel column terms (bare Var with a Param chain, or any
+    # recipe failing this gate) fall through to the identity-row_index build
+    # below, unchanged.
+    if (
+        recipe.reduced_lazy is not None
+        and recipe.sum_block_meta is not None
+        and recipe.where_map_frames is None
+        and set(recipe.reduced_dims or ()).issubset(set(var_dims))
+    ):
+        df = recipe.reduced_lazy.select("col_id", "coef").collect()
+        return (
+            df["col_id"].to_numpy().astype(np.int64),
+            df["coef"].to_numpy().astype(np.float64),
+        )
+
     axis_cols = list(var_dims)
     # Identity row_index: the whole seed keyed on the var dims (every row
     # joins to itself).  The injected _rid is ignored (column mode reports
