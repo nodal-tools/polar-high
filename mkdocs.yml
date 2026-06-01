@@ -60,7 +60,7 @@ markdown_extensions:
       generic: true
 
 extra_javascript:
-  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  # MathJax 3 renders on every current browser without an ES6 polyfill.
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 plugins:
