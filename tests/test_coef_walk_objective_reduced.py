@@ -52,15 +52,32 @@ from polar_high.engine import Param, Problem, Sum, Where
 
 
 def _new_gate(recipe: CoefWalkRecipe) -> bool:
-    """The TIGHTENED ``_column_whole_product`` reduced-plan fast-path gate,
-    transcribed verbatim from production so a future edit that loosens the
-    real predicate makes these tests fail.
+    """The ``_column_whole_product`` reduced-plan fast-path gate, transcribed
+    verbatim from production so a future edit that narrows the real predicate
+    makes these tests fail.
 
-    The two load-bearing tightenings vs the prior version: it checks
-    ``meta.reduce_dims`` (the dims actually SUMMED) — NOT ``recipe.reduced_dims``
-    (the post-Sum ``keep``, which is ``()`` for an objective ⇒ vacuously true) —
-    and it requires ``meta.where_frames is None`` (a pure-filter ``Where`` before
-    the ``Sum`` carves the grid, so the reduced coef is not the per-cell coef)."""
+    The reduced per-column ``coef`` IS the LP cost vector for EVERY Sum term
+    (relabel, fan-out, or Where-carved alike) — ``set_objective`` builds a
+    collapse-all ``Sum`` whose ``term.lazy = group_by("col_id").agg(coef.sum())``
+    is one row per LP column.  So the gate fires whenever a Sum recipe carries a
+    reduced plan; it is NOT conditioned on ``reduce_dims``, ``where_frames``, or
+    ``where_map_frames`` (those only distinguish whether the reduced coef equals
+    the per-cell coef — which the histogram must NOT depend on; the LP-facing
+    reduced coef is the correct bucket source in every case)."""
+    meta = recipe.sum_block_meta
+    if meta is None:
+        return False
+    return recipe.reduced_lazy is not None
+
+
+def _old_relabel_only_gate(recipe: CoefWalkRecipe) -> bool:
+    """The PRIOR (too-tight) gate — fired ONLY for a single-element relabel Sum
+    with no Where frames of any kind (``meta.reduce_dims ⊆ var.dims`` AND
+    ``where_frames``/``where_map_frames`` all ``None``).  It MISSED the real DES
+    objective flow terms (``Sum(Where(v_flow, idx) * params)`` — the ``Where``
+    sets ``meta.where_frames``) and every fan-out term, sending them to the
+    ~40 s/term per-cell rebuild.  Used only to PROVE the new gate is strictly
+    WIDER (it admits the terms this one wrongly excluded)."""
     meta = recipe.sum_block_meta
     if meta is None:
         return False
@@ -71,25 +88,6 @@ def _new_gate(recipe: CoefWalkRecipe) -> bool:
         and meta.where_map_frames is None
         and recipe.where_map_frames is None
         and set(meta.reduce_dims).issubset(set(var_dims))
-    )
-
-
-def _old_keep_gate(recipe: CoefWalkRecipe) -> bool:
-    """The PRIOR (loose) gate — keyed on ``recipe.reduced_dims`` (the
-    post-Sum ``keep``) instead of ``meta.reduce_dims`` (the summed dims), and
-    WITHOUT the ``meta.where_frames is None`` clause.  For a collapse-all
-    objective ``keep == ()`` so the ``issubset`` is vacuously true: this gate
-    WRONGLY admits a fan-out / pure-filter term to the fast path.  Used only to
-    PROVE the new gate is strictly tighter (the regression this file guards)."""
-    meta = recipe.sum_block_meta
-    if meta is None:
-        return False
-    var_dims = list(recipe.var_source.dims)
-    return (
-        recipe.reduced_lazy is not None
-        and meta.where_map_frames is None
-        and recipe.where_map_frames is None
-        and set(recipe.reduced_dims or ()).issubset(set(var_dims))
     )
 
 
@@ -354,18 +352,21 @@ def test_column_walk_histogram_matches_old_build(sparse):
 
 
 # ---------------------------------------------------------------------------
-# Tightened-gate regression coverage.
+# Widened-gate regression coverage.
 #
-# The reduced-plan fast path is byte-identical to the per-cell whole-product
-# build ONLY when every ``col_id`` group in the reduced plan is single-element.
-# A *fan-out* term — a ``Param`` carrying a dim the ``Var`` LACKS, summed out by
-# ``Sum`` — collapses MANY product cells into one ``col_id``, so the reduced
-# ``coef`` is a genuine SUM ≠ the per-cell coef ``_column_whole_product`` must
-# return.  The tightened gate (``meta.reduce_dims ⊆ var.dims``) EXCLUDES such
-# terms; the prior keep-based gate (``recipe.reduced_dims ⊆ var.dims``, with
-# ``keep == ()`` for an objective) WRONGLY admitted them.  These tests pin both
-# the exclusion AND that the excluded term still gets a correct per-cell result
-# via the rebuild path.
+# The reduced per-column ``coef`` is the LP cost vector for EVERY Sum objective
+# term, so the fast path fires for ALL of them.  The reduced coef equals the
+# per-cell whole-product coef ONLY for a single-element relabel; for a *fan-out*
+# term (a ``Param`` dim the ``Var`` LACKS, summed out by ``Sum``) or a grid-
+# carving ``Where`` the reduced ``group_by`` genuinely sums several product
+# cells into one ``col_id`` — and THAT summed value is the correct LP-facing
+# objective coefficient the histogram must bucket, NOT the per-cell coef the old
+# per-cell rebuild emitted.  (The old rebuild bucketed per-cell coefs that never
+# appear in the LP, and ``_build_column_batch_triple``'s ``searchsorted``, which
+# assumes unique ``col_id``, silently collapsed the duplicates anyway.)  These
+# tests pin: fan-out / Where-carved terms now ALSO take the fast path, their
+# ``(col_id, coef)`` is the unique-per-column reduced reference, and the prior
+# (too-tight) relabel-only gate wrongly excluded them.
 
 
 def _build_fanout_objective():
@@ -457,14 +458,14 @@ def _build_filtered_relabel_objective():
     return prob, v, term, CoefWalkRecipe.from_term(term)
 
 
-def test_fanout_term_excluded_by_tightened_gate():
-    """The key new assertion: a fan-out objective term is EXCLUDED by the
-    tightened gate, while the prior keep-based gate WRONGLY admitted it.
+def test_fanout_term_admitted_by_widened_gate():
+    """A fan-out objective term is now ADMITTED by the widened gate, whereas the
+    prior relabel-only gate WRONGLY excluded it (sending it to the per-cell
+    rebuild).
 
-    This is the regression anchor: a future edit that reverts the gate to key
-    on ``recipe.reduced_dims`` (the empty ``keep``) — or drops the
-    ``meta.reduce_dims`` check — flips ``_new_gate`` back to ``True`` and fails
-    here."""
+    Regression anchor: a future edit that re-narrows the gate to require
+    ``meta.reduce_dims`` subset of var dims (or any Where-frame clause) flips
+    ``_new_gate`` back to ``False`` and fails here."""
     _prob, _v, _term, recipe = _build_fanout_objective()
     meta = recipe.sum_block_meta
     assert meta is not None
@@ -475,23 +476,21 @@ def test_fanout_term_excluded_by_tightened_gate():
     assert meta.where_frames is None
     assert meta.where_map_frames is None
     assert recipe.where_map_frames is None
-    # Excluded by the TIGHTENED gate; admitted by the PRIOR (vacuous-keep) gate.
-    assert _new_gate(recipe) is False
-    assert recipe.reduced_dims == ()  # the post-Sum keep is empty …
-    assert _old_keep_gate(recipe) is True  # … so the old gate was vacuously true
+    # Admitted by the WIDENED gate; excluded by the PRIOR relabel-only gate.
+    assert _new_gate(recipe) is True
+    assert _old_relabel_only_gate(recipe) is False
 
 
-def test_fanout_skips_reduced_plan_fastpath():
-    """``_column_whole_product`` must NOT take the reduced-plan fast path for a
+def test_fanout_takes_reduced_plan_fastpath():
+    """``_column_whole_product`` now TAKES the reduced-plan fast path for a
     fan-out term — verified by instrumenting ``_collect_streaming`` (the fast
-    path's signature collect) AND confirming the rebuild path runs instead.
+    path's signature collect) AND confirming the per-cell rebuild does NOT run.
 
     The fast path collects ``reduced_lazy.select("col_id","coef")`` via
-    ``_collect_streaming``; the rebuild path collects the per-cell product via
-    ``_lhs_prune_down_collect`` (``spec=None`` ⇒ no block-COO plan).  We assert
-    the fast-path collect is NOT invoked and the rebuild collect IS, and that
-    the result has one row per *product* cell (``> n_cols``), not one per LP
-    column (the reduced fast-path shape)."""
+    ``_collect_streaming``; we assert that collect IS invoked, the rebuild
+    collect (``_lhs_prune_down_collect``) is NOT, and the result is the REDUCED
+    shape: one unique row per LP column (``== n_cols``), NOT the per-cell
+    product (``n_cols * |h|``)."""
     _prob, v, _term, recipe = _build_fanout_objective()
     seed = _seed_of(v)
     n_cols = seed.height
@@ -516,83 +515,75 @@ def test_fanout_skips_reduced_plan_fastpath():
         cw._collect_streaming = o_stream
         cw._lhs_prune_down_collect = o_prune
 
-    # Fast-path streaming collect NEVER ran; the rebuild collect DID.
-    assert hits["stream"] == 0
-    assert hits["prune"] == 1
-    # Rebuild emits the UNREDUCED per-cell product (one row per (p,d,t,h)),
-    # which is strictly more rows than the n_cols the fast path would emit.
-    assert cid.size > n_cols > 0
-    assert cid.size == n_cols * 2  # |h| == 2
+    # Fast-path streaming collect ran; the per-cell rebuild did NOT.
+    assert hits["stream"] == 1
+    assert hits["prune"] == 0
+    # Reduced shape: one row per LP column (col_id unique), NOT the per-cell
+    # product (which would be n_cols * |h|).
+    assert cid.size == n_cols > 0
+    assert np.unique(cid).size == cid.size
 
 
-def test_fanout_rebuild_matches_per_cell_reference_and_genuine_objective():
-    """Correctness: the fan-out term still gets the CORRECT per-cell result via
-    the rebuild path.
+def test_fanout_fastpath_matches_reduced_reference_not_per_cell():
+    """Correctness: the fan-out fast path emits the REDUCED (LP-facing) coef —
+    the summed-over-``h`` value per LP column — which is the CORRECT objective
+    coefficient and DIFFERS from the old per-cell rebuild.
 
     Two anchors:
-      1. ``_column_whole_product`` is byte-identical to the per-cell rebuild
-         reference ``_old_whole_product`` (one row per product cell, the
-         documented ``_column_whole_product`` contract).
-      2. Grouping that per-cell product by ``col_id`` and summing recovers the
-         GENUINE reduced objective coefficient (``reduced_lazy`` == one summed
-         coef per LP column) — proving the rebuild carries the full coefficient
-         support a fast-path raw-reduced collect would have *also* produced but
-         in the WRONG (already-summed) per-row shape."""
+      1. ``_column_whole_product`` is byte-identical to the directly collected
+         reduced plan ``reduced_lazy.select("col_id","coef")`` — one UNIQUE
+         ``col_id`` per LP column, the LP cost vector.
+      2. The reduced coef DIFFERS from the per-cell rebuild
+         (``_old_whole_product`` emits ``n_cols * |h|`` rows with repeated
+         col_ids), proving the fan-out genuinely sums multiple product cells —
+         the old per-cell histogram source was WRONG for the objective."""
     _prob, v, _term, recipe = _build_fanout_objective()
     seed = _seed_of(v)
 
     cid_new, coef_new = _sorted_pair(
         *_column_whole_product(seed, recipe, None, None)
     )
+    cid_red, coef_red = _reduced_reference(recipe)
     cid_old, coef_old = _old_whole_product(seed, recipe)
 
-    # 1. Per-cell byte-identity to the rebuild reference.
-    assert cid_new.size == seed.height * 2 > 0  # |h| product fan-out
-    assert np.array_equal(cid_new, cid_old)
-    assert np.array_equal(coef_new, coef_old)
+    # 1. Byte-identical to the reduced reference: one unique col_id per LP col.
+    assert cid_new.size == seed.height > 0
+    assert np.unique(cid_new).size == cid_new.size
+    assert np.array_equal(cid_new, cid_red)
+    assert np.array_equal(coef_new, coef_red)
 
-    # The per-cell product genuinely fans out: col_ids repeat (NOT 1:1 with
-    # LP columns), so a raw reduced-plan fast path would have been wrong here.
-    assert np.unique(cid_new).size == seed.height
-    assert cid_new.size > np.unique(cid_new).size
+    # 2. The per-cell rebuild fans out (n_cols * |h| rows, repeated col_ids) and
+    # its raw coef differs — proving the reduced (LP-facing) coef is the right
+    # source and the old per-cell build was wrong for the objective histogram.
+    assert cid_old.size == seed.height * 2  # |h| == 2
+    assert np.unique(cid_old).size < cid_old.size
 
-    # 2. Grouping the per-cell product by col_id recovers the genuine reduced
-    # objective coefficient (the summed-over-h coef per LP column).
+    # Grouping the per-cell product by col_id recovers EXACTLY the reduced coef
+    # (the fast path reads it directly instead of rebuilding + re-summing).
     grouped = (
-        pl.DataFrame({"col_id": cid_new, "coef": coef_new})
+        pl.DataFrame({"col_id": cid_old, "coef": coef_old})
         .group_by("col_id")
         .agg(pl.col("coef").sum())
         .sort("col_id")
     )
-    reduced = (
-        recipe.reduced_lazy.select("col_id", "coef").collect().sort("col_id")
-    )
     assert np.array_equal(
-        grouped["col_id"].to_numpy().astype(np.int64),
-        reduced["col_id"].to_numpy().astype(np.int64),
+        grouped["col_id"].to_numpy().astype(np.int64), cid_new
     )
     assert np.allclose(
-        grouped["coef"].to_numpy(),
-        reduced["coef"].to_numpy(),
-        rtol=1e-12,
-        atol=0.0,
+        grouped["coef"].to_numpy(), coef_new, rtol=1e-12, atol=0.0
     )
 
 
-def test_fanout_column_product_histogram_matches_per_cell_reference():
-    """The histogram over ``_column_whole_product``'s emitted ``(col_id,
-    coef)`` for the fan-out term equals the histogram over the per-cell rebuild
-    reference (count / min / max EXACT, log2-sum exact).
+def test_fanout_fastpath_histogram_matches_reduced_reference():
+    """The histogram over ``_column_whole_product``'s emitted ``(col_id, coef)``
+    for the fan-out term equals the histogram over the REDUCED reference
+    (count / min / max EXACT, log2-sum exact) — NOT the per-cell rebuild.
 
-    This pins ``_column_whole_product``'s CONTRACT for an excluded term: it
-    emits the per-cell product (one row per ``(p,d,t,h)``), so each per-cell
-    magnitude bins separately — the reference is the per-cell rebuild, NOT the
-    already-summed reduced plan.  (The downstream column-mode ``searchsorted``
-    lookup in ``bounded_coefficient_walk`` assumes col_id is 1:1 with LP
-    columns and so only supports relabel objective terms — the production
-    objective path only routes 1:1 terms through the column walk — which is why
-    this asserts at the ``_column_whole_product`` boundary the gate governs,
-    not the full walk.)"""
+    This pins the corrected ``_column_whole_product`` contract for a fan-out
+    objective term: it emits the reduced LP cost vector (one unique row per LP
+    column), so the histogram buckets exactly the coefficients that appear in
+    the LP — matching ``_ref_histogram_column`` over the reduced plan, the same
+    source ``engine``'s objective scatter / ``_layer2`` / ``_ranges`` bucket."""
     _prob, v, _term, recipe = _build_fanout_objective()
     seed = _seed_of(v)
     cf = _side_vectors(_prob._next_col)
@@ -602,10 +593,10 @@ def test_fanout_column_product_histogram_matches_per_cell_reference():
         return "even" if cid % 2 == 0 else "odd"
 
     cid_new, coef_new = _column_whole_product(seed, recipe, None, None)
-    cid_old, coef_old = _old_whole_product(seed, recipe)
+    cid_red, coef_red = _reduced_reference(recipe)
 
     got = _ref_histogram_column(cid_new, coef_new, scale, classify)
-    ref = _ref_histogram_column(cid_old, coef_old, scale, classify)
+    ref = _ref_histogram_column(cid_red, coef_red, scale, classify)
 
     assert set(got) == set(ref)
     for k in ref:
@@ -614,55 +605,68 @@ def test_fanout_column_product_histogram_matches_per_cell_reference():
         assert gn == rn
         assert gmin == rmin and gmax == rmax
         assert gs == pytest.approx(rs, rel=1e-12, abs=1e-9)
-    # The per-cell histogram bins EVERY product row (one per (p,d,t,h)), so
-    # each bucket's count is the per-cell count, NOT the reduced-column count.
-    assert sum(v[1] for v in got.values()) == cid_new.size
+    # The reduced histogram bins one row per LP column (col_id unique), so the
+    # total count is n_cols — NOT the per-cell n_cols * |h|.
+    assert sum(v[1] for v in got.values()) == cid_new.size == seed.height
 
 
-def test_prefilter_where_term_excluded_by_where_frames_clause():
-    """A pre-``Sum`` pure-filter ``Where`` sets ``meta.where_frames`` while the
-    summed dims stay ⊆ Var dims and no map frames exist — so it passes the
-    ``reduce_dims`` / ``where_map_frames`` clauses yet is excluded by the
-    freshly-added ``meta.where_frames is None`` clause.
+def test_prefilter_where_term_admitted_and_matches_reduced():
+    """A pre-``Sum`` pure-filter ``Where`` (``meta.where_frames`` set) — the
+    EXACT shape of the real DES objective flow terms ``Sum(Where(v_flow, idx) *
+    params)`` — now TAKES the fast path.  The prior relabel-only gate excluded
+    it on its ``meta.where_frames is None`` clause, sending the whole DES
+    objective to the ~40 s/term per-cell rebuild; the widened gate fires.
 
-    Also confirms the excluded term still gets the correct per-cell result via
-    the rebuild path (no fast-path streaming collect)."""
+    Asserts: the gate is now ``True`` (was ``False``), the fast-path streaming
+    collect runs (the per-cell rebuild does not), and the emitted ``(col_id,
+    coef)`` matches the reduced reference (the LP cost vector over the carved
+    grid) — one unique row per LP column.  This is the DES-shape regression
+    anchor."""
     _prob, v, _term, recipe = _build_filtered_relabel_objective()
     meta = recipe.sum_block_meta
     assert meta is not None
-    # Passes the reduce_dims subset check and has no map frames …
     assert set(meta.reduce_dims).issubset(set(recipe.var_source.dims))
     assert meta.where_map_frames is None
     assert recipe.where_map_frames is None
-    # … but carries a pre-Sum pure-filter Where frame.
+    # Carries a pre-Sum pure-filter Where frame (the DES flow-term shape).
     assert meta.where_frames is not None
-    # Excluded by the new where_frames clause; the old gate (no such clause)
-    # would have admitted it.
-    assert _new_gate(recipe) is False
-    assert _old_keep_gate(recipe) is True
+    # Admitted by the WIDENED gate; the prior relabel-only gate (with its
+    # where_frames clause) wrongly excluded it.
+    assert _new_gate(recipe) is True
+    assert _old_relabel_only_gate(recipe) is False
 
-    # The excluded term takes the rebuild path (no fast-path streaming collect)
-    # and is byte-identical to the per-cell rebuild reference.
+    # The term takes the fast path (streaming collect runs; no per-cell rebuild).
     seed = _seed_of(v)
-    hits = {"stream": 0}
+    hits = {"stream": 0, "prune": 0}
     o_stream = cw._collect_streaming
+    o_prune = cw._lhs_prune_down_collect
 
     def wrap_stream(*a, **k):
         hits["stream"] += 1
         return o_stream(*a, **k)
 
+    def wrap_prune(*a, **k):
+        hits["prune"] += 1
+        return o_prune(*a, **k)
+
     cw._collect_streaming = wrap_stream
+    cw._lhs_prune_down_collect = wrap_prune
     try:
         cid_new, coef_new = _sorted_pair(
             *_column_whole_product(seed, recipe, None, None)
         )
     finally:
         cw._collect_streaming = o_stream
+        cw._lhs_prune_down_collect = o_prune
 
-    assert hits["stream"] == 0
-    cid_old, coef_old = _old_whole_product(seed, recipe)
-    assert np.array_equal(cid_new, cid_old)
-    assert np.array_equal(coef_new, coef_old)
-    # The pre-Sum filter actually carved the grid (p ∈ {0,1} ⇒ fewer columns).
-    assert cid_new.size > 0
-    assert cid_new.size < seed.height
+    assert hits["stream"] == 1
+    assert hits["prune"] == 0
+
+    # Emits the reduced reference (LP cost vector over the carved grid): one
+    # unique col_id per surviving LP column.
+    cid_red, coef_red = _reduced_reference(recipe)
+    assert np.array_equal(cid_new, cid_red)
+    assert np.array_equal(coef_new, coef_red)
+    assert np.unique(cid_new).size == cid_new.size
+    # The pre-Sum filter actually carved the grid (p in {0,1} -> fewer columns).
+    assert 0 < cid_new.size < seed.height

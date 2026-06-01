@@ -1003,42 +1003,48 @@ def _column_whole_product(
         coef = np.full(cids.size, recipe.coef_scalar, dtype=np.float64)
         return cids, coef
 
-    # Pure-relabel Sum objective: the term's OWN reduced lazy plan already
-    # carries exactly one ``(col_id, coef)`` per LP column.  For a relabel
-    # Sum (``meta.reduce_dims ⊆ var.dims``, no Where frames) ``col_id`` is 1:1
-    # with Var cells, so the reduced plan's ``group_by(col_id).sum()`` is over
-    # single-element groups — the reduced ``coef`` EQUALS the per-cell product
-    # coef the joined whole-product build would emit.  Read it directly: no
-    # identity self-join, no rebuild of the ~unreduced ``Var × Param`` whole
-    # product through ``_build_block_coo_plan``'s joined branch (the 40 s/term
-    # hot spot).  Same ``(col_id, coef)`` the ``_ref_histogram_column``
-    # reference / the ranges reduced-plan collect read.  Strictly less memory:
-    # ~one row per LP column vs the whole product, AND collected with the
-    # STREAMING engine (mirroring ``_ranges``' proven objective collect) so
-    # the deep ``Var × Param`` product is reduced in-stream rather than
-    # materialised before the group-by.
+    # Sum objective: the term's OWN reduced lazy plan (``term.lazy`` =
+    # ``group_by("col_id").agg(coef.sum())`` for a collapse-all objective Sum —
+    # see ``engine.set_objective`` / the Sum reduction) carries exactly one
+    # ``(col_id, coef)`` per LP column.  That reduced per-column ``coef`` IS the
+    # LP cost vector — the value the objective histogram must bucket — and is
+    # the SAME source the four reference paths read: ``engine``'s objective
+    # scatter ``np.add.at(col_obj, cids, vals)`` over the col_id-reduced
+    # ``t.lazy``; ``_layer2._collect_term_agg``; ``_ref_histogram_column``; and
+    # the ``_ranges`` objective reduced-plan collect.  Read it directly for ANY
+    # Sum term: no identity self-join, no rebuild of the ~unreduced ``Var ×
+    # Param`` whole product through ``_build_block_coo_plan``'s joined branch
+    # (the ~40 s/term DES hot spot).  Strictly less memory — ~one row per LP
+    # column vs the whole product — and collected with the STREAMING engine
+    # (mirroring ``_ranges``' proven objective collect) so the deep ``Var ×
+    # Param`` product is reduced in-stream rather than materialised before the
+    # group-by.
     #
-    # The gate mirrors ``_ranges._obj_chain_bounded`` / FlexTool's
-    # ``_obj_term_recipe`` EXACTLY so the primitive is correct independent of
-    # its caller: the equivalence holds iff every ``col_id`` group is
-    # single-element, which requires (a) the dims actually summed
-    # (``meta.reduce_dims``) are all Var dims — a fan-out Param whose dim is
-    # summed out would collapse many cells into one ``col_id`` and make the
-    # reduced ``coef`` a genuine SUM ≠ per-cell coef — and (b) no Where
-    # (pure-filter ``where_frames`` or map-effect ``where_map_frames``) carves
-    # or extends the grid.  We check ``meta.reduce_dims`` (the SUMMED dims),
-    # NOT ``recipe.reduced_dims`` (the post-Sum ``keep``, which is ``()`` for
-    # an objective and would make the test vacuously true).  Anything outside
-    # this regime falls through to the identity-row_index build below.
+    # Why this is correct for EVERY Sum term, not just single-element relabels:
+    #
+    # * **Relabel** (``meta.reduce_dims ⊆ var.dims``, no Where): ``col_id`` is
+    #   1:1 with Var cells, so the reduced ``group_by`` is over single-element
+    #   groups — the reduced ``coef`` EQUALS the per-cell whole-product coef.
+    #   This case stays BYTE-IDENTICAL to the old per-cell build.
+    # * **Fan-out** (a Param dim summed out, ``reduce_dims ⊄ var.dims``) or a
+    #   pre-/post-Sum **Where** carving the grid: the reduced ``group_by``
+    #   genuinely sums several product cells into one ``col_id``.  The reduced
+    #   ``coef`` is then the CORRECT LP cost coefficient and DIFFERS from the
+    #   old per-cell rebuild — the old per-cell histogram bucketed coefs that
+    #   never appear in the LP (and ``_build_column_batch_triple``'s
+    #   ``searchsorted``, which assumes unique ``col_id``, silently collapsed
+    #   the duplicates anyway).  Reading ``reduced_lazy`` yields unique
+    #   ``col_id`` (one row per LP column) and the LP-facing coef — a
+    #   correctness IMPROVEMENT, matching ``_ref_histogram_column``.
+    #
+    # The reduced plan is the correct AND bounded source for every Sum term, so
+    # the gate fires whenever a reduced plan exists (``sum_block_meta`` set ⇒
+    # ``from_term`` captured ``reduced_lazy = term.lazy``).  The only fallthrough
+    # is ``meta is None`` (a bare Var WITH a Param chain but no Sum — handled by
+    # the identity-row_index build below; for the objective such terms do not
+    # arise, the bare-Var early-return above covers a Var with no chain).
     meta = recipe.sum_block_meta
-    if (
-        recipe.reduced_lazy is not None
-        and meta is not None
-        and meta.where_frames is None
-        and meta.where_map_frames is None
-        and recipe.where_map_frames is None
-        and set(meta.reduce_dims).issubset(set(var_dims))
-    ):
+    if meta is not None and recipe.reduced_lazy is not None:
         df = _collect_streaming(recipe.reduced_lazy.select("col_id", "coef"))
         return (
             df["col_id"].to_numpy().astype(np.int64),
