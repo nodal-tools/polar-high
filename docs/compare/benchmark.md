@@ -129,6 +129,14 @@ saves (+6 % peak for +84 % time) — HiGHS's transient allocations
 during this build-only solve are smaller than the temporary MPS
 buffer the roundtrip allocates.
 
+Note the real axis here is **how much work HiGHS actually does**, not
+model size. HiGHS's allocator slack only grows during a real solve;
+the network N=10000 row above is build-only, so there is nothing for
+the roundtrip to flush. A full HiGHS solve on the same model would
+likely flip `save_memory` back to a peak win — we don't show that
+cell because a full solve at N=10000 would take long enough to
+clutter the benchmark.
+
 The default (`regular`) gives you warm-restart capability and a
 free re-solve from the previous basis on follow-up `solve()` or
 `WarmProblem` updates, with the visible RSS retention shown above.
