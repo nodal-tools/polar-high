@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.4.3] — 2026-06-01
+
+Benchmark-methodology + docs release. **No runtime or public-API
+changes** — the LP build, autoscale, and solve paths are byte-identical
+to 2.4.1.
+
+> **Note on 2.4.2.** The `v2.4.2` git tag was pushed before the
+> `pyproject.toml` version bump landed, so the published 2.4.2 wheel
+> carries `version = "2.4.1"` in its metadata. 2.4.2 has been yanked
+> on PyPI; use 2.4.3, which contains the same source as 2.4.2 plus
+> the correct version string. Pinned `polar-high==2.4.2` installs
+> are unaffected — yanking does not remove the wheel.
+
+### Changed
+
+- Benchmark harness wraps each cell in a fresh `systemd-run --user
+  --scope`. The worker reads cgroup v2 `memory.peak` from its own
+  cgroup and emits it as a new `cgroup_peak_mb` column — the
+  kernel-level peak the OOM killer would charge against a budget,
+  less noisy across reps than the process-level `ru_maxrss` we
+  previously plotted. Auto-falls back to plain subprocess on hosts
+  where `systemd-run --user` is unavailable; `--no-cgroup-scope`
+  forces the fallback. In the fallback path `cgroup_peak_mb` is NaN
+  and `peak_rss_mb` continues to work.
+- Benchmark grows two new polar variants alongside the existing
+  `polar` / `polar_net` tools:
+  - `polar_sm` / `polar_sm_net` — exercise `save_memory=True` so the
+    harness produces directly comparable regular-mode and
+    one-shot-mode numbers on the same hardware.
+  - `polar_da` / `polar_da_net` — exercise the explicit
+    `Problem(dense_axes=...)` contract on the dense and network LPs.
+- `docs/compare/benchmark.md` refreshed against v2.4.x:
+  - headline cells show both polar modes side-by-side with the
+    cgroup peaks;
+  - "Measuring memory" leads with `cgroup_peak_mb` as the canonical
+    peak metric and demotes `peak_rss_mb` to a process-level note;
+  - dense full-solve N=3000 peak drops 38.1 GB → 33.2 GB on polar
+    regular (the autoscale memory-bounding work from 2.4.0 shows up
+    here);
+  - network-LP threading speedup at N=10 000 ticks up from 1.35× to
+    1.40×; other rows refreshed accordingly.
+
 ## [2.4.1] — 2026-06-01
 
 CI / test-tooling release. **No runtime or public-API changes** — the LP
