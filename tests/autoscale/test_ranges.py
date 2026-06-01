@@ -577,22 +577,28 @@ def test_ranges_streaming_collect_sweep_is_bounded_or_cheap() -> None:
 
     src = inspect.getsource(_rmod._ranges_via_streaming)
 
-    # The four bounded / cheap collect sites in the streaming readout.
+    # The bounded / cheap collect sites in the streaming readout.
     # ``_agg``           — single-column ``select(abs).filter`` streaming
     #                      aggregate; polars streams a one-column scan, no
     #                      wide join (cheap, side-vectors-OFF path only).
     # ``_obj_chain_bounded`` — Phase D-3: objective relabel positional
     #                      product, no deep Var×Param materialisation.
-    # ``_rhs_chain_bounded_coef`` — Phase D-2: RHS Param chain positional
-    #                      product.
-    # ``_build_block_coo_plan`` / ``_build_sum_block_coo_plan`` — Phase
-    #                      D-1: LHS block-COO builders.
+    # ``_build_block_coo_plan`` — Phase D-1: LHS block-COO builder (non-Sum
+    #                      arm; the Sum arm is classified via
+    #                      ``_sum_block_coo_classify`` and routed through the
+    #                      bounded walk).
+    # ``_sum_block_coo_classify`` — Phase D-1: Sum-arm block-COO classifier
+    #                      (the relabel/combining decision feeding the walk).
+    # ``_bounded_coefficient_walk`` — Phase D-5: the general batched coef
+    #                      walk that replaced the per-family ``_build_sum_
+    #                      block_coo_plan`` collect on the LHS range path, so
+    #                      the wide Sum product is never materialised.
     for name in (
         "_agg",
         "_obj_chain_bounded",
-        "_rhs_chain_bounded_coef",
         "_build_block_coo_plan",
-        "_build_sum_block_coo_plan",
+        "_sum_block_coo_classify",
+        "_bounded_coefficient_walk",
     ):
         assert name in src, (
             f"{name} no longer referenced in _ranges_via_streaming — the "
