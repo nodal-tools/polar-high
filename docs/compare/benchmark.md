@@ -42,7 +42,7 @@ shows both side by side. At N=3000 (an 18 M-variable LP):
 
 | | total time | peak | p50 during solve | post-trim |
 |---|---:|---:|---:|---:|
-| polar-high (regular, default) | 86 s | 16.1 GB | 10.9 GB | 5.9 GB |
+| polar-high (regular, default) | 87 s | 16.4 GB | 10.9 GB | 6.2 GB |
 | polar-high (save_memory=True) | 131 s | 15.1 GB | 10.3 GB | 6.2 GB |
 | linopy (io_api="lp") | 300 s | 23.7 GB | 2.0 GB | 6.0 GB |
 | Pyomo | caps at N=1000 | 4.6 GB at N=1000 | 3.8 GB at N=1000 | 1.9 GB at N=1000 |
@@ -52,8 +52,8 @@ accounting the OOM killer would use against a memory budget. See
 *Measuring memory* below for the column choices. Both polar modes
 finish 2.3×–3.5× faster than linopy on this column with peak ~30 %
 below linopy; on this cell the `regular` vs `save_memory` swap costs
-+52 % time for −6 % peak, a much milder shape than on the full HiGHS
-solve where it's +75 % time for −26 % peak (see *Two modes*). Pyomo's
++51 % time for −8 % peak, a much milder shape than on the full HiGHS
+solve where it's +59 % time for −15 % peak (see *Two modes*). Pyomo's
 per-coefficient Python overhead makes it unable to keep up past
 N≈1000 in our 10-minute timeout.
 
@@ -81,9 +81,9 @@ final `h.run()`:
    MPS file, the original `Highs` instance is cleared and disposed,
    `malloc_trim(0)` is called to return glibc's freed arenas to the
    OS, and a fresh `Highs` is created and `readModel`'d from the
-   file. This costs ~+100 s wall time at N=3000 dense full-solve
+   file. This costs ~+90 s wall time at N=3000 dense full-solve
    but eliminates the allocator slack `addRows` leaves behind when
-   fed a model incrementally — net ~10 GB lower peak in that cell.
+   fed a model incrementally — net ~5 GB lower peak in that cell.
    The spill file lands in the system temp dir (`$TMPDIR` / `/tmp`)
    by default; pass `solve(save_memory=True, tmp_dir=...)` to redirect
    it to a specific volume (e.g. the same filesystem as the workspace,
@@ -110,22 +110,22 @@ free `h.run()` re-solve from the previous basis.
 
 | cell | mode | total time | peak | p50 | post-trim |
 |---|---|---:|---:|---:|---:|
-| dense build-only N=3000 | regular | 86 s | 16.1 GB | 10.9 GB | 5.9 GB |
+| dense build-only N=3000 | regular | 87 s | 16.4 GB | 10.9 GB | 6.2 GB |
 | dense build-only N=3000 | save_memory | 131 s | 15.1 GB | 10.3 GB | 6.2 GB |
-| dense full-solve N=3000 | regular | 135 s | 38.1 GB | 14.9 GB | 6.6 GB |
+| dense full-solve N=3000 | regular | 148 s | 33.2 GB | 14.9 GB | 1.0 GB |
 | dense full-solve N=3000 | save_memory | 236 s | 28.1 GB | 12.0 GB | 5.9 GB |
-| network N=10000 build-only | regular | 53 s | 11.6 GB | 7.1 GB | 5.5 GB |
+| network N=10000 build-only | regular | 51 s | 11.5 GB | 7.0 GB | 5.4 GB |
 | network N=10000 build-only | save_memory | 94 s | 12.2 GB | 6.9 GB | 5.1 GB |
 
 The trade-off shape varies cell by cell. On the dense full HiGHS
 solve the MPS disk roundtrip pays off — HiGHS's `addRows` allocator
 slack is the bulk of peak when it's doing real work, and the
-roundtrip flushes it (−26 % peak for +75 % time). On the dense
-build-only column the gap is smaller (−6 % peak for +52 % time)
+roundtrip flushes it (−15 % peak for +59 % time). On the dense
+build-only column the gap is smaller (−8 % peak for +51 % time)
 because HiGHS only allocates the matrix once before the time-limit
 short-circuit fires, so there's little slack to flush. On the
 network LP at N=10000 the disk roundtrip costs more peak than it
-saves (+5 % peak for +75 % time) — HiGHS's transient allocations
+saves (+6 % peak for +84 % time) — HiGHS's transient allocations
 during this build-only solve are smaller than the temporary MPS
 buffer the roundtrip allocates.
 
@@ -250,11 +250,11 @@ threading does start paying as N grows:
 
 | N | polar 1 thread | polar 32 threads | speedup |
 |---:|---:|---:|---:|
-| 100 | 0.30 s | 0.29 s | 1.06× |
-| 300 | 1.04 s | 0.86 s | 1.21× |
-| 1 000 | 3.91 s | 3.16 s | 1.24× |
-| 3 000 | 13.5 s | 10.9 s | 1.24× |
-| 10 000 | 53.8 s | 40.0 s | **1.35×** |
+| 100 | 0.30 s | 0.29 s | 1.02× |
+| 300 | 1.00 s | 0.84 s | 1.20× |
+| 1 000 | 3.99 s | 3.24 s | 1.23× |
+| 3 000 | 13.3 s | 10.7 s | 1.24× |
+| 10 000 | 53.7 s | 38.5 s | **1.40×** |
 
 The default (`regular` mode, save_memory=False) is what these
 numbers use; in `save_memory=True` the MPS write+read disk
@@ -309,12 +309,12 @@ At N=10 000 (≈ 8.4 M variables, ≈ 10 M constraints):
 
 | | total time | peak | p50 during solve | post-trim |
 |---|---:|---:|---:|---:|
-| polar-high (regular, default) | 53 s | 11.6 GB | 7.1 GB | 5.5 GB |
+| polar-high (regular, default) | 51 s | 11.5 GB | 7.0 GB | 5.4 GB |
 | polar-high (save_memory=True) | 94 s | 12.2 GB | 6.9 GB | 5.1 GB |
 | linopy (io_api="lp") | 165 s | 14.1 GB | 1.6 GB | 4.0 GB |
 | Pyomo | timed out at N=3000 | — | — | — |
 
-polar (regular) is ~3.1× faster than linopy at this cell with peak
+polar (regular) is ~3.2× faster than linopy at this cell with peak
 ~18 % below linopy. `save_memory=True` doesn't help here — it ends
 up slightly *higher* on peak than `regular` and ~1.8× slower —
 because the MPS-roundtrip's transient buffer costs more than
