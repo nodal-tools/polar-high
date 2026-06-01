@@ -865,73 +865,21 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     if _profile:
         _emit("obj_done")
 
-    # Per-family size guard — FALLBACK-ONLY (no longer a blanket skip).
+    # No per-family size cap.
     #
-    # A family is ALWAYS range-scanned when the bounded path applies
-    # (Phase D-1 LHS block-COO, D-2 RHS Param-chain, D-3 objective): the
-    # bounded builders compute the per-row/per-cell coef magnitude WITHOUT
-    # materialising the deep Param product, so the memory spike that this
-    # cap originally dodged is gone for everything we can bound — including
-    # huge families like the FlexTool DES LP's ``profile_flow_upper_limit``
-    # (1.5 M rows × multi-Param rhs), whose RHS is bounded by D-2.  Those
-    # families must NOT be skipped: their coefficient ranges have to reach
-    # the scaler.
-    #
-    # The size cap now applies ONLY as a last-resort fallback: when a
-    # specific term/RHS branch DECLINES the bounded path (deferred
-    # map-Where, Sum-combining, non-dense-suffix, sparse grid, or the
-    # side-vectors-off readout) AND would take the OLD materialising
-    # ``_collect_streaming`` collect AND the family's row count exceeds the
-    # cap, that single collect is skipped — and a LOUD stderr line names
-    # the family + row count + that it hit an un-boundable shape over the
-    # cap.  So an over-cap un-boundable shape is a VISIBLE gap to fix, never
-    # a silent skip.  Override the cap with
-    # ``POLAR_HIGH_RANGES_MAX_FAMILY_ROWS=<int>`` — set to 0 to disable the
-    # fallback skip entirely and accept the OOM risk on un-boundable shapes.
-    try:
-        _max_family_rows = int(
-            _os.environ.get("POLAR_HIGH_RANGES_MAX_FAMILY_ROWS", "1000000")
-        )
-    except (ValueError, TypeError):
-        _max_family_rows = 1_000_000
-
-    def _skip_unbounded_over_cap(
-        cname: str, row_count: int, kind: str, term_idx: int | None = None
-    ) -> bool:
-        """Last-resort fallback guard for a DECLINED bounded branch.
-
-        Returns ``True`` (skip the materialising collect) iff the cap is
-        active and this family exceeds it — and, when it does, emits a
-        LOUD stderr line so the over-cap un-boundable shape is a visible
-        gap to fix, never a silent skip.  Returns ``False`` otherwise (the
-        caller proceeds with the existing materialising collect).
-
-        ``kind`` names the declined branch (``"rhs"`` / ``"lhs"``) and is
-        included in the log so the gap can be pinpointed.  Always reached
-        ONLY after the bounded path declined, so a ``True`` here never
-        drops a family the bounded path could have read.
-        """
-        if _max_family_rows <= 0 or row_count <= _max_family_rows:
-            return False
-        loc = f"{cname}" if term_idx is None else f"{cname}[term {term_idx}]"
-        print(
-            "[ranges-stream SKIP] un-boundable LP shape over the family-row "
-            f"cap — family={loc} kind={kind} row_count={row_count} "
-            f"cap={_max_family_rows}: bounded range path DECLINED and the "
-            "materialising collect would exceed the cap, so this family's "
-            f"{kind} coefficient range is NOT folded into the autoscale "
-            "readout. This is a visible coverage gap — extend the bounded "
-            "path to this shape (set POLAR_HIGH_RANGES_MAX_FAMILY_ROWS=0 to "
-            "force the collect and accept the OOM risk).",
-            file=_sys.stderr, flush=True,
-        )
-        if _profile:
-            _emit(
-                "family_branch_skipped", family=cname,
-                kind=kind, row_count=row_count,
-                threshold=_max_family_rows,
-            )
-        return True
+    # Every LP shape now routes through a BOUNDED path — the LHS block-COO
+    # fast path / bounded coefficient walk, the RHS positional fast path /
+    # param-only walk (composite ``_sources`` chain AND single frame Param),
+    # the collapsed-``Sum`` reduced-``.lazy`` collect, and the bounded
+    # objective relabel — in BOTH the production (side-vectors-on) AND the
+    # ranges-PRE (side-vectors-off) passes.  None of them materialise the
+    # deep ``Var × P1 × P2 …`` product, so the memory spike a size-blind cap
+    # once dodged is gone for every family — including the FlexTool DES LP's
+    # ``profile_flow_upper_limit`` (1.5 M rows × multi-Param rhs) and
+    # ``maxToSink`` (frame-Param rhs).  A cap here would re-introduce a
+    # silent coverage gap (a wide family's coefficient range dropped from the
+    # readout, shifting the L3 scaling decision), so there is NO cap: every
+    # family's range reaches the scaler.
 
     # Matrix + RHS — per constraint family.  ``base_row`` is the 0-based
     # absolute constraint row id (same indexing space as
@@ -982,141 +930,93 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         elif isinstance(rhs, _Param):
             if over is not None and rhs.dims:
                 on = list(rhs.dims)
-                # When row_factor is on, we need per-row alignment with
-                # ``_rid`` so we can multiply ``value`` by
-                # ``row_factor[base_row + _rid]`` before reducing.  Mirror
-                # ``_build_canonical_matrix``'s rhs build: carry an
-                # ``_rid`` column on the row index.
-                if _l2_rf is None:
-                    # Side-vectors-off readout: no bounded path applies, so
-                    # this is the materialising collect.  Fallback cap guard.
-                    if _skip_unbounded_over_cap(cname, row_count, "rhs"):
-                        pass
-                    else:
-                        ri_a, rf_a = _align(over.lazy(), rhs.lazy, on)
-                        keys = ri_a.select(on).unique()
-                        rf_pruned = rf_a.join(keys, on=on, how="semi")
-                        plan = ri_a.join(
-                            rf_pruned, on=on, how="left"
-                        ).select("value")
-                        j = _collect_streaming(plan)
-                        if j.height > 0:
-                            vals = j["value"].fill_null(0.0).to_numpy()
-                            lo, hi = _reduce_abs(vals)
-                            if lo is not None:
-                                if lo < rhs_lo:
-                                    rhs_lo = lo
-                                if hi > rhs_hi:
-                                    rhs_hi = hi
-                else:
-                    # ---- Bounded RHS Param-chain fast path (Phase D-2).
-                    # The dominant DES autoscale spike is THIS readout: the
-                    # multi-Param RHS chain (e.g. profile_flow_upper_limit's
-                    # ``profile · existing_count · availability``) gets
-                    # MATERIALISED by the merged-lazy left-join below because
-                    # the polars streaming engine can't push the row-key
-                    # semi-join into a 3+ Param product.  When the chain is
-                    # positionally alignable on the constraint's pre-sorted
-                    # dense-trailing ``over`` grid, build ``rhs_coef`` per
-                    # ``_rid`` via the no-Var bounded numpy product instead —
-                    # bit-identical to what the streaming collect would read,
-                    # so the reported magnitude is BYTE-IDENTICAL.  ``_rid`` is
-                    # exactly the grid's positional row index (0..n-1), so the
-                    # row-factor index is ``base_row + arange(n)`` — the same
-                    # ``_l2_rf[base_row + _rid]`` the streaming branch applies.
-                    # Anything not positionally alignable returns ``None`` and
-                    # drops through to the existing merged-lazy path unchanged.
-                    rhs_coef = _rhs_chain_bounded_coef(
-                        over, list(over.columns), rhs, cname
-                    )
-                    if rhs_coef is not None:
-                        if rhs_coef.size > 0:
+                # ---- Bounded RHS Param readout (one mechanism, both passes).
+                # The dominant DES autoscale spike is THIS readout: the
+                # multi-Param RHS chain (e.g. profile_flow_upper_limit's
+                # ``profile · existing_count · availability``) gets
+                # MATERIALISED by a merged-lazy left-join because the polars
+                # streaming engine can't push the row-key semi-join into a 3+
+                # Param product.  Every dim-bound RHS Param routes through a
+                # bounded path that NEVER materialises the wide product:
+                #
+                # 1. the inline positional fast path
+                #    (:func:`_rhs_chain_bounded_coef`) for a dense-complete,
+                #    dense-trailing ``over`` grid;
+                # 2. otherwise the bounded coefficient walk — a composite
+                #    ``_sources`` chain via :meth:`CoefWalkRecipe.from_rhs_chain`,
+                #    a single frame ``Param`` (``_sources is None``) via
+                #    :meth:`CoefWalkRecipe.from_rhs_param` (one ``value``
+                #    column, one row per over-row — NO deep product; the DES
+                #    ``maxToSink`` shape).
+                #
+                # ``scale = (_l2_rf, base_row, None)`` applies the row factor
+                # ``|_l2_rf[base_row + _rid]|`` (NO col factor on the RHS) in
+                # the production pass; in the ranges-PRE pass ``_l2_rf is
+                # None`` so the scale is ``(None, base_row, None)`` and the
+                # reducer reduces raw ``|value|`` natively (row-factor multiply
+                # skipped).  Either way the result is BYTE-IDENTICAL to the
+                # whole-collect (``over ⋈ rhs.lazy`` left-join, ``value``,
+                # ``fill_null(0.0)``, finite/non-zero ``_reduce_abs``) — min/
+                # max is order-free and the bounded builders reproduce the
+                # same coef values.  Gating the positional row-factor apply on
+                # ``_l2_rf is not None`` (the production-only prototype) left
+                # ranges-pre's wide RHS families to the materialising collect /
+                # size-blind skip — the gap this un-gate closes.  No RHS shape
+                # remains un-boundable, so there is NO cap-skip here.
+                rhs_coef = _rhs_chain_bounded_coef(
+                    over, list(over.columns), rhs, cname
+                )
+                if rhs_coef is not None:
+                    if rhs_coef.size > 0:
+                        if _l2_rf is not None:
                             rids = np.arange(rhs_coef.size, dtype=np.int64)
                             vals = rhs_coef * np.abs(_l2_rf[base_row + rids])
-                            lo, hi = _reduce_abs(vals)
-                            if lo is not None:
-                                if lo < rhs_lo:
-                                    rhs_lo = lo
-                                if hi > rhs_hi:
-                                    rhs_hi = hi
-                        if _profile:
-                            _emit(
-                                "rhs_bounded", family=cname,
-                                rhs_bound="1",
-                            )
-                    elif (
-                        isinstance(rhs._sources, list)
-                        and rhs._sources
-                    ):
-                        # ---- Bounded coefficient-walk RHS fallback
-                        # (Phase D-5 step 2b).  The inline D-2 positional
-                        # fast path DECLINED (the over grid was not
-                        # dense-complete, an atomic carried a foreign dim,
-                        # an alignment surfaced a null, …), but the RHS is
-                        # still a Var-LESS composite Param chain tracking
-                        # its atomic constituents via ``_sources``.  The OLD
-                        # fallback here materialised the merged ``over ⋈
-                        # rhs`` product (the >30 GB DES spike) and, over the
-                        # family-row cap, SKIPPED it (loud) — dropping the
-                        # family's RHS range from the readout (the DES
-                        # ``maxToSink`` RHS gap).  Instead walk the SAME
-                        # Var-less Param chain in bounded ``_WALK_BATCH_ROWS``
-                        # slices via :func:`bounded_coefficient_walk` +
-                        # :class:`MinMaxAbsReducer`: each batch seeds ``coef
-                        # = rhs._value_scalar`` over the batch's ``over``
-                        # rows and multiplies the chain (positional fast path
-                        # or batched prune-down), applying the SAME row-factor
-                        # scale ``|_l2_rf[base_row + _rid]|`` (NO col factor —
-                        # the RHS has none) + the SAME finite/non-zero
-                        # ``_reduce_abs`` mask.  Byte-identical to the collect,
-                        # so the cap-skip never fires for an RHS chain routed
-                        # through the walk.
-                        recipe = _CoefWalkRecipe.from_rhs_chain(rhs)
-                        scale = (_l2_rf, base_row, None)
-                        (walk_minmax,) = _bounded_coefficient_walk(
-                            over,
-                            recipe,
-                            scale,
-                            [_MinMaxAbsReducer(scale)],
-                            batch_rows=_WALK_BATCH_ROWS,
-                            dense_axes=dense_axes,
-                        )
-                        lo, hi = walk_minmax
+                        else:
+                            vals = rhs_coef
+                        lo, hi = _reduce_abs(vals)
                         if lo is not None:
                             if lo < rhs_lo:
                                 rhs_lo = lo
                             if hi > rhs_hi:
                                 rhs_hi = hi
-                        if _profile:
-                            _emit(
-                                "rhs_walk", family=cname,
-                                rhs_walk="1",
-                            )
-                    elif _skip_unbounded_over_cap(cname, row_count, "rhs"):
-                        # Bounded D-2 path declined AND the chain is not a
-                        # composite ``_sources`` chain the walk can rebuild
-                        # (single / anonymous Param) — the materialising
-                        # collect would exceed the cap — fallback skip (loud).
-                        pass
-                    else:
-                        over_rid = over.with_columns(
-                            _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
+                    if _profile:
+                        _emit(
+                            "rhs_bounded", family=cname,
+                            rhs_bound="1",
                         )
-                        ri_a, rf_a = _align(over_rid.lazy(), rhs.lazy, on)
-                        keys = ri_a.select(on).unique()
-                        rf_pruned = rf_a.join(keys, on=on, how="semi")
-                        plan = ri_a.join(rf_pruned, on=on, how="left").select("_rid", "value")
-                        j = _collect_streaming(plan)
-                        if j.height > 0:
-                            rids = j["_rid"].to_numpy().astype(np.int64)
-                            vals = j["value"].fill_null(0.0).to_numpy().astype(np.float64)
-                            vals = vals * np.abs(_l2_rf[base_row + rids])
-                            lo, hi = _reduce_abs(vals)
-                            if lo is not None:
-                                if lo < rhs_lo:
-                                    rhs_lo = lo
-                                if hi > rhs_hi:
-                                    rhs_hi = hi
+                else:
+                    # Positional fast path declined (over grid not dense-
+                    # complete, foreign atomic dim, alignment null, …).  Route
+                    # through the bounded coefficient walk: a composite
+                    # ``_sources`` chain via ``from_rhs_chain``, a single frame
+                    # Param via ``from_rhs_param``.  Both walk the Var-less
+                    # chain in bounded slices (positional fast path or batched
+                    # prune-down) with the SAME ``fill_null(0.0)`` /
+                    # finite-non-zero mask the collect applies — byte-identical.
+                    if isinstance(rhs._sources, list) and rhs._sources:
+                        recipe = _CoefWalkRecipe.from_rhs_chain(rhs)
+                    else:
+                        recipe = _CoefWalkRecipe.from_rhs_param(rhs)
+                    scale = (_l2_rf, base_row, None)
+                    (walk_minmax,) = _bounded_coefficient_walk(
+                        over,
+                        recipe,
+                        scale,
+                        [_MinMaxAbsReducer(scale)],
+                        batch_rows=_WALK_BATCH_ROWS,
+                        dense_axes=dense_axes,
+                    )
+                    lo, hi = walk_minmax
+                    if lo is not None:
+                        if lo < rhs_lo:
+                            rhs_lo = lo
+                        if hi > rhs_hi:
+                            rhs_hi = hi
+                    if _profile:
+                        _emit(
+                            "rhs_walk", family=cname,
+                            rhs_walk="1",
+                        )
             else:
                 # Dimless Param: a single scalar value broadcast across
                 # the family rows.  Apply row_factor slice same as the
@@ -1154,12 +1054,17 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             axis_cols = list(over.columns)
             row_index_lf = over.lazy()
 
-        # If side vectors are off, use the existing minimal path (just
-        # the abs-only collect).  If on, we need ``_rid`` + ``col_id``
-        # in the collected frame so we can index ``_l2_rf[base_row +
-        # _rid]`` and ``_l2_cf[col_id]`` before the magnitude reduce.
-        # Mirror ``_build_canonical_matrix``'s LHS join.
-        if row_index_lf is not None and (_l2_rf is not None):
+        # The bounded LHS walk needs ``_rid`` on the row index so each
+        # batch's ``base_row + _rid`` can index ``_l2_rf`` (when side
+        # vectors are on) — and it runs the SAME bounded walk in ranges-PRE
+        # (side vectors OFF, ``_l2_rf is None``), where the reducer's scale
+        # is ``(None, base_row, None)`` and the row factor multiply is
+        # skipped natively.  So build ``row_index_lf_rid`` whenever there
+        # is a row index at all, not only on the side-vectors-on path —
+        # otherwise ranges-pre's wide families fall through to the
+        # materialising collect / size-blind skip.  Mirror
+        # ``_build_canonical_matrix``'s LHS join.
+        if row_index_lf is not None:
             row_index_lf_rid = over.with_columns(
                 _rid=_pl.int_range(0, over.height, dtype=_pl.Int64)
             ).lazy()
@@ -1183,19 +1088,27 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # then BYTE-IDENTICAL to the streaming path: same coef values
             # (block-COO is bit-identical to the polars chain), same
             # ``base_row + _rid`` row-factor index, same ``col_id`` col-
-            # factor index, same ``_reduce_abs`` reduction.  Only fires
-            # on the side-vectors-on path (``_l2_rf is not None`` — the
-            # readout's production mode; ``row_index_lf_rid`` carries the
-            # ``_rid`` int-range the builder attaches).  Anything block-COO
-            # cannot reproduce bit-identically (classify -> None, a
-            # map-effect Where, the combining Sum branch, or a Sum
-            # fallback) drops through to the existing streaming path
-            # unchanged.  Mirror the dispatch shape in
+            # factor index, same ``_reduce_abs`` reduction.  Fires on BOTH
+            # the side-vectors-on production path (``_l2_rf`` installed) AND
+            # the ranges-PRE pass (side vectors OFF, ``_l2_rf is None``):
+            # the walk's ``scale=(_l2_rf, base_row, _l2_cf)`` is
+            # ``(None, base_row, None)`` in ranges-pre, which
+            # :class:`MinMaxAbsReducer` / :func:`_scaled_abs` handle natively
+            # (the row/col factor multiplies are skipped when their vector is
+            # ``None``), so the readout produces byte-identical raw |coef|
+            # min/max without materialising the wide product.  Gating this on
+            # ``_l2_rf is not None`` (as the production-only prototype did)
+            # left ranges-pre's wide families to the materialising collect /
+            # size-blind skip — the dominant DES autoscale spike.
+            # ``row_index_lf_rid`` carries the ``_rid`` int-range the builder
+            # attaches.  Anything block-COO cannot reproduce bit-identically
+            # (classify -> None, a map-effect Where, the combining Sum
+            # branch, or a Sum fallback) drops through to the bounded
+            # coefficient-walk fallback below.  Mirror the dispatch shape in
             # ``Problem._build_canonical_matrix``.
             if (
                 term_dims
                 and row_index_lf is not None
-                and _l2_rf is not None
                 and row_index_lf_rid is not None
                 and dense_axes
                 and not _block_coo_disabled()
@@ -1292,22 +1205,27 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             #
             # ---- Bounded coefficient-walk LHS fallback (Phase D-5 step 2).
             # When the inline block-COO fast path declines BUT the term is a
-            # dim-bound LHS on the side-vectors-on production path (``_l2_rf``
-            # installed, ``row_index_lf_rid`` carrying the ``_rid`` int-range),
-            # the OLD fallback here was a materialising ``_collect_streaming``
-            # of the merged ``Var × Param …`` product — the exact spike that
-            # over the family-row cap got SKIPPED (loud) and dropped from the
-            # readout.  Instead walk the same block-COO ``(_rid, col_id, coef)``
-            # stream in bounded ``_WALK_BATCH_ROWS`` slices via
+            # dim-bound LHS, the OLD fallback here was a materialising
+            # ``_collect_streaming`` of the merged ``Var × Param …`` product
+            # — the exact spike that over the family-row cap got SKIPPED
+            # (loud) and dropped from the readout.  Instead walk the same
+            # block-COO ``(_rid, col_id, coef)`` stream in bounded
+            # ``_WALK_BATCH_ROWS`` slices via
             # :func:`bounded_coefficient_walk` + :class:`MinMaxAbsReducer`,
             # which reconstructs the IDENTICAL per-cell coef (block-COO is
             # bit-identical to the polars chain; the walk's backstops handle
             # the bare-Var / map-Where / Sum-combining / sparse shapes the
-            # inline fast path declined) and applies the SAME side-vector scale
-            # ``|_l2_rf[base_row + _rid]| * |_l2_cf[col_id]|`` + the SAME
-            # finite/non-zero reduce.  The result is BYTE-IDENTICAL to the
-            # materialising collect, so the cap-skip no longer fires for this
-            # shape (the walk always bounds).
+            # inline fast path declined) and applies the SAME side-vector
+            # scale ``|_l2_rf[base_row + _rid]| * |_l2_cf[col_id]|`` + the
+            # SAME finite/non-zero reduce.  In the ranges-PRE pass the side
+            # vectors are OFF (``_l2_rf is None``) and the scale is
+            # ``(None, base_row, None)`` — handled natively by the reducer
+            # (row/col factor multiplies skipped), so the walk emits
+            # byte-identical raw |coef| min/max there too.  The result is
+            # BYTE-IDENTICAL to the materialising collect, so the cap-skip
+            # no longer fires for this shape (the walk always bounds) — which
+            # is why the gate below is on the genuine preconditions only,
+            # NOT ``_l2_rf is not None``.
             # ``_CoefWalkRecipe.from_term`` can ONLY rebuild a term that
             # carries a Var seed (``var_source``) or a ``Sum`` meta
             # (``sum_block_meta``).  A fully-collapsed ``Sum(over=ALL)`` LHS
@@ -1340,7 +1258,6 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 _routable
                 and term_dims
                 and row_index_lf is not None
-                and _l2_rf is not None
                 and row_index_lf_rid is not None
             ):
                 recipe = _CoefWalkRecipe.from_term(term)
@@ -1363,32 +1280,35 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     )
                 continue
 
-            # ---- Non-routable dim-bound term, side-vectors ON.
+            # ---- Non-routable dim-bound term (collapsed ``Sum(over=ALL)``).
             # A fully-collapsed ``Sum(over=ALL)`` LHS term has ``term_dims``
             # (non-empty) + a real ``over`` grid but NO block-COO recipe
             # (``var_source`` None AND ``sum_block_meta`` None), so it could
-            # NOT enter the bounded walk above.  When the row factor is
-            # installed (``_l2_rf`` on, ``row_index_lf_rid`` carrying the
-            # ``_rid`` int-range) it must STILL contribute its coefficient
-            # magnitude to the matrix range — dropping it would change the L3
-            # ranges and therefore the scaling decision.  Handled HERE, BEFORE
-            # the fallback cap guard below, because it is bounded by
-            # construction (a reduced term's ``.lazy`` is small — the ``Sum``
-            # already collapsed the wide product), so it must never be
-            # cap-skipped.  Reproduce the PRE-block-COO side-vectors-on
-            # dim-bound collect EXACTLY: align the ``_rid``-carrying row index
-            # with the term's reduced ``.lazy`` on the shared axis dims,
-            # inner-join to attach ``_rid`` per surviving (row, col) cell, then
-            # reduce ``|coef| * |_l2_rf[base_row + _rid]| * |_l2_cf[col_id]|``
-            # with the SAME finite/non-zero mask ``_reduce_abs`` uses — the
-            # SAME numpy op sequence :class:`MinMaxAbsReducer` applies, so the
+            # NOT enter the bounded walk above.  It must STILL contribute its
+            # coefficient magnitude to the matrix range — dropping it would
+            # change the L3 ranges and therefore the scaling decision.
+            # Handled HERE, in BOTH the side-vectors-on production pass
+            # (``_l2_rf`` installed) AND the ranges-PRE pass (``_l2_rf is
+            # None``): it is bounded by construction in either pass (a reduced
+            # term's ``.lazy`` is small — the ``Sum`` already collapsed the
+            # wide product), so it must never reach a size-blind skip.
+            # Reproduce the dim-bound collect EXACTLY: align the
+            # ``_rid``-carrying row index with the term's reduced ``.lazy`` on
+            # the shared axis dims, inner-join to attach ``_rid`` per
+            # surviving (row, col) cell, then reduce ``|coef| * |_l2_rf[
+            # base_row + _rid]| * |_l2_cf[col_id]|`` with the SAME finite/non-
+            # zero mask ``_reduce_abs`` uses — the row-factor and col-factor
+            # multiplies are each skipped when their side vector is ``None``
+            # (ranges-pre reduces raw ``|coef|``), the SAME numpy op sequence
+            # :class:`MinMaxAbsReducer` / :func:`_scaled_abs` applies, so the
             # contribution is byte-identical to both the walk and the legacy
-            # materialising path.
+            # materialising path.  Gating this on ``_l2_rf is not None`` (the
+            # production-only prototype) left a collapsed-Sum term in ranges-
+            # pre to fall to the size-blind cap; the un-gate removes that gap.
             if (
                 not _routable
                 and term_dims
                 and row_index_lf_rid is not None
-                and _l2_rf is not None
             ):
                 on = [d for d in term_dims if d in axis_cols]
                 rl_a, tl_a = _align(row_index_lf_rid, term_lazy, on)
@@ -1402,7 +1322,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     rids = df["_rid"].to_numpy().astype(np.int64)
                     cids = df["col_id"].to_numpy().astype(np.int64)
                     vals = df["coef"].to_numpy().astype(np.float64)
-                    vals = vals * np.abs(_l2_rf[base_row + rids])
+                    if _l2_rf is not None:
+                        vals = vals * np.abs(_l2_rf[base_row + rids])
                     if _l2_cf is not None:
                         vals = vals * np.abs(_l2_cf[cids])
                     lo, hi = _reduce_abs(vals)
@@ -1413,13 +1334,6 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                         has_dims=str(bool(term_dims)),
                         non_routable_collect="1",
                     )
-                continue
-
-            # Side-vectors-OFF readout or scalar (no row binding) shapes the
-            # walk's production scale path does not cover: keep the OLD
-            # materialising collect behind the fallback cap guard — skip
-            # (loud) iff this family is over the cap.
-            if _skip_unbounded_over_cap(cname, row_count, "lhs", term_idx=ti):
                 continue
 
             if not term_dims or row_index_lf is None:
@@ -1448,12 +1362,19 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             tiled_vals = np.outer(rf_slice, vals).ravel()
                             lo, hi = _reduce_abs(tiled_vals)
             else:
-                # Dim-bound LHS term, side-vectors OFF (``_l2_rf is None``).
-                # The side-vectors-ON dim-bound case is handled above by the
-                # bounded coefficient walk (which ``continue``s), so it never
-                # reaches here — only the no-row-factor readout does, and it
-                # has no deep-product spike to bound (it reduces ``|coef|`` /
-                # ``|coef · cf|`` directly off the semi-joined plan).
+                # Defensive dim-bound backstop.  After the un-gate, EVERY
+                # dim-bound term with a row index routes earlier and
+                # ``continue``s: routable terms through the bounded
+                # coefficient walk, non-routable collapsed-``Sum`` terms
+                # through the reduced-``.lazy`` inner-join collect (both in
+                # the production AND ranges-pre passes, since ``row_index_lf
+                # _rid`` is now built whenever a row index exists).  This
+                # branch is therefore unreachable for a dim-bound term, but
+                # is kept as an always-correct backstop: it reduces ``|coef|``
+                # (or ``|coef · cf|``) directly off the semi-joined plan,
+                # applying whichever side vectors are installed.  No deep-
+                # product spike to bound here — the semi-join prunes to the
+                # family's keys before the collect.
                 on = [d for d in term_dims if d in axis_cols]
                 rl_a, tl_a = _align(row_index_lf, term_lazy, on)
                 keys = rl_a.select(on).unique()

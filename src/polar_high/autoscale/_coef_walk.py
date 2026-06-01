@@ -328,6 +328,58 @@ class CoefWalkRecipe:
             param_only=True,
         )
 
+    @classmethod
+    def from_rhs_param(cls, rhs: Param) -> CoefWalkRecipe:
+        """Build a Var-LESS (Param-only) recipe from a SINGLE frame-built
+        constraint RHS ``Param`` (``_sources is None``, non-empty ``dims``).
+
+        A frame-constructed ``Param(dims, frame)`` (e.g. the DES
+        ``maxToSink`` RHS, eagerly ``.collect()``-ed) carries its value in
+        a single ``value`` column — one row per over-row, NO deep Param
+        product — and tracks no atomic constituents (``_sources is None``),
+        so :meth:`from_rhs_chain` cannot describe it.  We wrap the Param
+        itself as a ONE-element chain ``param_sources=[(rhs, +1)]`` with
+        ``coef_scalar=rhs._value_scalar``, so the per-batch Var-less build
+        seeds ``coef = rhs._value_scalar`` over the batch ``over`` rows and
+        multiplies the single frame Param's ``value`` onto them — the SAME
+        numpy op sequence the canonical builder's single-Param RHS left-join
+        (``_build_canonical_matrix``'s ``elif on:`` arm) produces, reading
+        ``value`` with the SAME ``fill_null(0.0)``.  ``var_source`` is
+        ``None`` (no Var, no ``col_id`` on the RHS).
+
+        A directly frame-constructed Param has ``_value_scalar == 1.0``
+        (the constructor default), so ``coef_scalar`` is the identity and
+        the chain multiply reproduces the Param's ``value`` column
+        value-for-value; if a scalar was folded onto the composite
+        (``_value_scalar != 1.0``) that same scalar is ALREADY baked into
+        the Param's ``value`` column by ``Param.__mul__`` — but such a Param
+        carries ``_sources`` (it came from an algebra op) and so routes
+        through :meth:`from_rhs_chain`, never here.  This classmethod is for
+        the genuinely atomic frame Param only.
+
+        Raises ``ValueError`` if the Param exposes a ``_sources`` list (a
+        composite chain — use :meth:`from_rhs_chain`) or carries no dims (a
+        dimless scalar broadcast, handled by the caller's scalar branch).
+        """
+        if isinstance(rhs._sources, list):
+            raise ValueError(
+                "CoefWalkRecipe.from_rhs_param requires a single frame "
+                "Param with _sources=None; the given Param tracks atomic "
+                "constituents via _sources (use from_rhs_chain instead)."
+            )
+        if not rhs.dims:
+            raise ValueError(
+                "CoefWalkRecipe.from_rhs_param requires a Param with "
+                "non-empty dims; a dimless scalar Param is handled by the "
+                "caller's scalar-broadcast branch."
+            )
+        return cls(
+            var_source=None,
+            param_sources=[(rhs, 1)],
+            coef_scalar=rhs._value_scalar,
+            param_only=True,
+        )
+
 
 class CoefBatch:
     """One batch's ``(rid, col_id, coef)`` numpy triple handed to reducers.

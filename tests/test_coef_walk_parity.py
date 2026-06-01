@@ -680,6 +680,143 @@ def test_rhs_chain_param_only_no_scale():
 
 
 # ---------------------------------------------------------------------------
+# Shape 9: SINGLE frame-built RHS Param (``_sources is None``, non-empty
+# dims).  ``CoefWalkRecipe.from_rhs_param`` wraps it as a 1-element
+# param_only chain; the walk's (_rid, coef) stream must match the
+# whole-collect RHS range (``over ⋈ rhs.lazy`` left-join, fill_null(0.0))
+# byte-for-byte, across batch sizes — the DES ``maxToSink`` shape.
+
+
+def _build_rhs_frame_param():
+    """A single frame-constructed ``Param`` RHS over ``(p, d, t)`` with the
+    declared dense suffix ``(d, t)`` — dense-complete, so the param-only
+    POSITIONAL fast path can fire.  No ``_sources`` (a directly-built frame
+    Param), one ``value`` column, one row per over-row — NO deep product."""
+    ps, ds, ts = [0, 1, 2], [10, 11], [100, 101, 102, 103]
+    rows = list(itertools.product(ps, ds, ts))
+    over = pl.DataFrame(
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
+         "t": [r[2] for r in rows]}
+    )
+    rhs = Param(("p", "d", "t"), pl.DataFrame(
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
+         "t": [r[2] for r in rows],
+         "value": np.linspace(1e-3, 5e2, len(rows))}), name="maxToSink")
+    return over, rhs
+
+
+def _build_rhs_frame_param_sparse():
+    """A single frame-constructed ``Param`` RHS that is SPARSE on ``(d, t)``
+    (drops cells), so the over grid is NOT dense-complete ⇒ the param-only
+    positional fast path declines and the PRUNE-DOWN backstop fires (which
+    must reproduce the left-join ``fill_null(0.0)`` byte-identically)."""
+    ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101, 102]
+    rows = list(itertools.product(ps, ds, ts))
+    over = pl.DataFrame(
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
+         "t": [r[2] for r in rows]}
+    )
+    # Drop a few (p, d, t) cells from the RHS frame so the left-join surfaces
+    # nulls (filled to 0.0) and the dense-completeness guard fails.
+    keep = [c for i, c in enumerate(rows) if i % 7 != 0]
+    rhs = Param(("p", "d", "t"), pl.DataFrame(
+        {"p": [r[0] for r in keep], "d": [r[1] for r in keep],
+         "t": [r[2] for r in keep],
+         "value": np.linspace(1e-2, 9e2, len(keep))}), name="maxToSink_sparse")
+    return over, rhs
+
+
+def test_from_rhs_param_unit_builds_recipe():
+    """``from_rhs_param`` on a frame Param (``_sources is None``, non-empty
+    dims) builds a Var-less param_only recipe wrapping the single Param as a
+    1-element chain with ``coef_scalar == rhs._value_scalar``."""
+    _over, rhs = _build_rhs_frame_param()
+    assert rhs._sources is None  # genuinely a frame Param
+    recipe = CoefWalkRecipe.from_rhs_param(rhs)
+    assert recipe.param_only is True
+    assert recipe.var_source is None
+    assert recipe.sum_block_meta is None
+    assert len(recipe.param_sources) == 1
+    atomic, direction = recipe.param_sources[0]
+    assert atomic is rhs
+    assert direction == 1
+    assert recipe.coef_scalar == rhs._value_scalar == 1.0
+
+
+def test_from_rhs_param_rejects_composite_chain():
+    """A composite ``_sources`` chain (an algebra result) must route through
+    ``from_rhs_chain``, not ``from_rhs_param`` — the latter rejects it."""
+    _over, rhs = _build_rhs_chain_dense()
+    assert isinstance(rhs._sources, list)
+    with pytest.raises(ValueError, match="from_rhs_chain"):
+        CoefWalkRecipe.from_rhs_param(rhs)
+
+
+def test_from_rhs_param_rejects_dimless():
+    """A dimless scalar Param has no over-row alignment — rejected (the
+    caller's scalar-broadcast branch handles it)."""
+    rhs = Param((), pl.DataFrame({"value": [3.5]}))
+    with pytest.raises(ValueError, match="non-empty dims"):
+        CoefWalkRecipe.from_rhs_param(rhs)
+
+
+def test_rhs_frame_param_dense_param_only():
+    """Frame-Param RHS, dense-complete (positional fast path): byte-identical
+    to the whole-collect across batch sizes, with the row factor applied."""
+    over, rhs = _build_rhs_frame_param()
+    n = over.height
+    rf, _cf = _side_vectors(n, 8)
+    scale = (rf, 0, None)  # row factor on, NO col factor (RHS has none)
+    recipe = CoefWalkRecipe.from_rhs_param(rhs)
+    ref = _ref_minmax_rhs_chain(rhs, over, scale)
+    assert ref != (None, None)
+    for bs in _batch_sizes(n):
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def test_rhs_frame_param_sparse_param_only():
+    """Frame-Param RHS, SPARSE (prune-down backstop): the walk must apply the
+    SAME ``fill_null(0.0)`` the whole-collect left-join applies — byte-
+    identical across batch sizes (this is the byte-identity guarantee for the
+    frame-Param mask/fill that the un-gated ranges-pre RHS readout relies on)."""
+    over, rhs = _build_rhs_frame_param_sparse()
+    n = over.height
+    rf, _cf = _side_vectors(n, 8)
+    scale = (rf, 0, None)
+    recipe = CoefWalkRecipe.from_rhs_param(rhs)
+    ref = _ref_minmax_rhs_chain(rhs, over, scale)
+    assert ref != (None, None)
+    for bs in _batch_sizes(n):
+        (got,) = bounded_coefficient_walk(
+            over, recipe, scale, [MinMaxAbsReducer(scale)],
+            batch_rows=bs, dense_axes=("d", "t"),
+        )
+        assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
+
+
+def test_rhs_frame_param_no_scale():
+    """Frame-Param RHS with scale all-None (the ranges-PRE pass) reduces raw
+    ``|value|`` and still matches the whole-collect, dense AND sparse."""
+    for builder in (_build_rhs_frame_param, _build_rhs_frame_param_sparse):
+        over, rhs = builder()
+        n = over.height
+        scale = (None, 0, None)
+        recipe = CoefWalkRecipe.from_rhs_param(rhs)
+        ref = _ref_minmax_rhs_chain(rhs, over, scale)
+        assert ref != (None, None), builder.__name__
+        for bs in _batch_sizes(n):
+            (got,) = bounded_coefficient_walk(
+                over, recipe, scale, [MinMaxAbsReducer(scale)],
+                batch_rows=bs, dense_axes=("d", "t"),
+            )
+            assert got == ref, f"{builder.__name__} batch_rows={bs}"
+
+
+# ---------------------------------------------------------------------------
 # No-scale path: scale all-None must still match a whole-collect |coef|.
 
 
