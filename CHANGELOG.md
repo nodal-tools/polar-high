@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.4.0] — 2026-06-01
+
+### Block-COO coefficient evaluation + bounded-memory autoscale
+
+This release makes LP **build** and **autoscale** memory-bounded: no
+constraint or objective family can spike RAM by materialising a wide
+coefficient product. Two pillars:
+
+**Block-COO evaluation (Phase C).** A polars frame sorted with its dense
+axis trailing is physically a sequence of contiguous Arrow blocks; the
+new path slices each block as a zero-copy numpy view and multiplies the
+factors with ufuncs — no wide relational join, no wide intermediate. The
+client declares its dense trailing axes once via the new
+`Problem(dense_axes=...)` / `Problem.declare_dense_axes(...)` contract
+(verified cheaply, O(n), no re-sort). `Sum`-wrapped chains are evaluated
+in one pass via a captured `SumBlockMeta` reconstruction recipe, with a
+relabel fast-path (reduce dims ⊆ var dims ⇒ a pure relabel, bit-identical
+to the polars reduce) — the memory win for `Sum`-heavy families. Genuine
+coefficient-combining sums stay bit-equivalent (FP reassociation ~1e-9).
+
+**Bounded-memory autoscale (Phase D).** The autoscale Layer-1 range
+readout and Layer-2 magnitude-bucketing used to materialise the wide
+coefficient product just to read a statistic. Both now route through a
+new general primitive, `bounded_coefficient_walk`, which iterates the
+constraint/column spine in fixed row-batches and rebuilds each batch's
+`(rid/col_id, coef)` via the block-COO builders + a prune-down backstop —
+never holding more than one batch's product. Pluggable reducers compute
+min/max (byte-identical, order-free) and the log2-magnitude histogram
+(exponents may shift ±1 = an objective-invariant scaling change). The
+reconstruction recipe is forwarded through post-`Sum` Expr-algebra
+(scalar/Param mul+div, negation, subtraction, `Where`, and
+`set_objective`'s collapse-all `Sum`) so every wide-product term — the
+objective and negated-`Sum` constraints included — routes through the
+walk instead of a materialising collect. The size-blind family-row skip
+is retired: every shape is now bounded, with no silent coverage gaps.
+
+Validated on a 9-roll rolling-horizon LP (FlexTool DES / RETO-Africa):
+autoscale priv_dirty peak 46 → 23 GB, all objectives byte-identical,
+~15% faster. The DSL is unchanged.
+
+### Added
+- `Problem(dense_axes=...)` / `Problem.declare_dense_axes(...)` — declare
+  the pre-sorted dense trailing axes that enable block-COO evaluation.
+- `bounded_coefficient_walk` + `CoefWalkRecipe` (`.from_term`,
+  `.from_rhs_chain`, `.from_rhs_param`, `.is_buildable`) +
+  `MinMaxAbsReducer` / `Log2HistogramReducer` in `autoscale/_coef_walk.py`.
+- `POLAR_HIGH_DISABLE_BLOCK_COO=1` — fall every term back to the polars
+  path (A/B rollback).
+- `POLAR_HIGH_BLOCK_COO_PROFILE` / `POLAR_HIGH_RANGES_PROFILE` /
+  `POLAR_HIGH_LAYER2_PROFILE` — env-gated instrumentation (no-op when off).
+
+### Changed
+- Autoscale Layer-1 (`_ranges.py`) and Layer-2 (`_layer2.py`) read
+  coefficient ranges / magnitudes via the bounded walk. The ranges-PRE
+  pass no longer gates the walk on the (not-yet-installed) Layer-2 side
+  vectors, so it bounds every family there too.
+- The `Sum` block-COO path defers map-effect `Where` via
+  `_Term.where_map_frames` and forwards `sum_block_meta` through
+  Expr-algebra; a re-reducing outer `Sum` still correctly drops the recipe.
+
+### Removed
+- `_skip_unbounded_over_cap` and `POLAR_HIGH_RANGES_MAX_FAMILY_ROWS` — the
+  size-blind family-row cap, superseded by the bounded walk.
+
 ## [2.3.0] — 2026-05-29
 
 ### Where pushdown (added in the same release window as the prune-down work below)
