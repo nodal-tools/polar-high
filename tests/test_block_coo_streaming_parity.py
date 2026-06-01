@@ -226,8 +226,7 @@ def test_streaming_block_coo_fires_positional():
     builder = _build_streaming_problem(with_where_t=False)
     out = _streaming_profile(builder)
     assert "phase=block_coo_term" in out, (
-        "block-COO must fire on the STREAMING path (Site 2) for the "
-        "dense-complete chain"
+        "block-COO must fire on the STREAMING path (Site 2) for the dense-complete chain"
     )
     assert re.findall(r"\bpath=(\w+)", out) == ["positional"], (
         "dense-complete grid must take the positional path on streaming"

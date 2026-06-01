@@ -20,6 +20,9 @@ same trigger.
 from __future__ import annotations
 
 import math
+import os as _os
+import threading as _threading
+import time as _time
 
 import numpy as np
 import polars as pl
@@ -31,6 +34,7 @@ from polar_high.autoscale import (
     ranges_from_arrays,
     ranges_from_streamed,
 )
+from polar_high.engine import Param, Problem
 
 
 def _config(threshold: float = 9.0) -> ScalingConfig:
@@ -205,16 +209,9 @@ def test_detect_ranges_rejects_unrecognised_input() -> None:
 # ----------------------------------------------------------------------
 
 
-import os as _os
-import threading as _threading
-import time as _time
-
-from polar_high.engine import Param, Problem
-
-
 def _read_vmrss_mb() -> float:
     """VmRSS in MB from /proc/self/status — Linux only."""
-    with open("/proc/self/status", "r") as f:
+    with open("/proc/self/status") as f:
         for line in f:
             if line.startswith("VmRSS:"):
                 parts = line.split()
@@ -289,9 +286,7 @@ def test_detect_ranges_param_chain_does_not_explode() -> None:
 
     p_tk = Param(
         ("t", "k"),
-        pl.DataFrame(
-            {"t": tt, "k": kk, "value": np.linspace(1.0, 2.0, T * K)}
-        ),
+        pl.DataFrame({"t": tt, "k": kk, "value": np.linspace(1.0, 2.0, T * K)}),
     )
     p_k = Param(
         ("k",),
@@ -304,8 +299,11 @@ def test_detect_ranges_param_chain_does_not_explode() -> None:
 
     expr = x * p_tk * p_k * p_t1
     pb.add_cstr(
-        "chain", over=idx_cstr, sense="<=",
-        lhs_terms={"lhs": expr}, rhs_terms={"r": 5.0},
+        "chain",
+        over=idx_cstr,
+        sense="<=",
+        lhs_terms={"lhs": expr},
+        rhs_terms={"r": 5.0},
     )
     pb.set_objective(x, sense="min")
 
@@ -363,9 +361,7 @@ def test_ranges_via_streaming_honors_side_vectors() -> None:
     x = pb.add_var("x", "i", idx, lower=0.0, upper=10.0)
     # All LHS coefficients are 1.0 (literal-coefficient term over the
     # row axis); rhs is 1.0; obj coefficient is 1.0.
-    pb.add_cstr(
-        "c", over=idx, sense="<=", lhs_terms={"x": x}, rhs_terms={"r": 1.0}
-    )
+    pb.add_cstr("c", over=idx, sense="<=", lhs_terms={"x": x}, rhs_terms={"r": 1.0})
     pb.set_objective(x, sense="min")
 
     n_cols = int(pb._next_col)
@@ -400,8 +396,7 @@ def test_ranges_via_streaming_honors_side_vectors() -> None:
     )
     # RHS entries: raw 1.0 * rf = 8.0.
     assert scaled.rhs == pytest.approx((rf, rf)), (
-        f"rhs range expected to scale by row_factor = {rf}; "
-        f"got {scaled.rhs}"
+        f"rhs range expected to scale by row_factor = {rf}; got {scaled.rhs}"
     )
     # Objective: raw 1.0 * cf_inv = 4.0 (no row factor on the cost row,
     # per GLPK convention).
@@ -452,14 +447,12 @@ def _deep_objective_problem() -> tuple[Problem, np.ndarray]:
             )
         ),
     )
-    dt_idx = pl.DataFrame(
-        {"d": np.repeat(np.arange(D), Tn), "t": np.tile(np.arange(Tn), D)}
-    ).sort(["d", "t"])
+    dt_idx = pl.DataFrame({"d": np.repeat(np.arange(D), Tn), "t": np.tile(np.arange(Tn), D)}).sort(
+        ["d", "t"]
+    )
     p_dt = Param(
         ("d", "t"),
-        dt_idx.with_columns(
-            value=pl.Series("value", np.linspace(0.5, 5.0, D * Tn))
-        ),
+        dt_idx.with_columns(value=pl.Series("value", np.linspace(0.5, 5.0, D * Tn))),
     )
     p_p = Param(
         ("p",),
@@ -525,12 +518,8 @@ def test_obj_chain_bounded_is_byte_identical(capsys) -> None:
     assert bounded.cost == reference.cost, (
         f"bounded cost range {bounded.cost} != reference {reference.cost}"
     )
-    assert math.isclose(
-        bounded.cost[0], reference.cost[0], rel_tol=0.0, abs_tol=0.0
-    )
-    assert math.isclose(
-        bounded.cost[1], reference.cost[1], rel_tol=0.0, abs_tol=0.0
-    )
+    assert math.isclose(bounded.cost[0], reference.cost[0], rel_tol=0.0, abs_tol=0.0)
+    assert math.isclose(bounded.cost[1], reference.cost[1], rel_tol=0.0, abs_tol=0.0)
     # Whole report identical (matrix/bound/rhs unaffected, same trigger).
     assert bounded == reference
 

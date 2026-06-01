@@ -603,9 +603,7 @@ def _bake_map_before_mul(
         *(extras for (_, extras) in t.where_map_frames)
     )
     if pending_extras and (set(factor_dims) & pending_extras):
-        baked_lazy, baked_dims = _apply_where_map_frames(
-            t.lazy, t.dims, t.where_map_frames
-        )
+        baked_lazy, baked_dims = _apply_where_map_frames(t.lazy, t.dims, t.where_map_frames)
         return baked_lazy, baked_dims, None
     return t.lazy, t.dims, t.where_map_frames
 
@@ -664,9 +662,7 @@ def _build_lhs_pruned_plan(
     # the chain rebuild via _apply_where_map_frames.  Up front we only
     # use the frame components to narrow the seed by their shared cols
     # (mirror of where_frames) so the rebuilt chain stays bounded.
-    _map_semi = (
-        tuple(f for (f, _) in where_map_frames) if where_map_frames else ()
-    )
+    _map_semi = tuple(f for (f, _) in where_map_frames) if where_map_frames else ()
     if where_frames is not None:
         # Apply any where_frames whose shared cols overlap the Var's
         # dims up front — narrows the seed before row_index pre-prune.
@@ -679,9 +675,9 @@ def _build_lhs_pruned_plan(
         ri_keys = row_index_lf.select(var_on).unique()
         var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
         var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
-    acc = var_lf.with_columns(
-        coef=pl.lit(float(coef_scalar), dtype=pl.Float64)
-    ).select(*var_dims, "col_id", "coef")
+    acc = var_lf.with_columns(coef=pl.lit(float(coef_scalar), dtype=pl.Float64)).select(
+        *var_dims, "col_id", "coef"
+    )
     acc_dims: list[str] = list(var_dims)
     for atomic, direction in param_sources:
         shared = [d for d in acc_dims if d in atomic.dims]
@@ -693,13 +689,9 @@ def _build_lhs_pruned_plan(
             # join below stays bounded by ``acc`` height.
             acc_a, atomic_a = _align_enum_join_keys(acc, atomic_lf, shared)
             acc_keys = acc_a.select(shared).unique()
-            acc_keys_a, atomic_a2 = _align_enum_join_keys(
-                acc_keys, atomic_a, shared
-            )
+            acc_keys_a, atomic_a2 = _align_enum_join_keys(acc_keys, atomic_a, shared)
             atomic_pruned = atomic_a2.join(acc_keys_a, on=shared, how="semi")
-            acc_b, atomic_pruned_b = _align_enum_join_keys(
-                acc_a, atomic_pruned, shared
-            )
+            acc_b, atomic_pruned_b = _align_enum_join_keys(acc_a, atomic_pruned, shared)
             joined = acc_b.join(
                 atomic_pruned_b,
                 on=shared,
@@ -715,13 +707,13 @@ def _build_lhs_pruned_plan(
         # name would apply.  The inner-join Param branch above does not
         # rename ``value`` so the direct reference is correct.
         if direction >= 0:
-            acc = joined.with_columns(
-                coef=pl.col("coef") * pl.col("value")
-            ).select(*new_dims, "col_id", "coef")
+            acc = joined.with_columns(coef=pl.col("coef") * pl.col("value")).select(
+                *new_dims, "col_id", "coef"
+            )
         else:
-            acc = joined.with_columns(
-                coef=pl.col("coef") / pl.col("value")
-            ).select(*new_dims, "col_id", "coef")
+            acc = joined.with_columns(coef=pl.col("coef") / pl.col("value")).select(
+                *new_dims, "col_id", "coef"
+            )
         acc_dims = new_dims
         if where_frames is not None:
             # After each atomic step, narrow the accumulator by any
@@ -928,7 +920,7 @@ def _block_coo_classify(
     # otherwise (fall back) — the firing decision is perf-only.
     if len(dense_axes) > len(var_dims):
         return None
-    if tuple(var_dims[-len(dense_axes):]) != tuple(dense_axes):
+    if tuple(var_dims[-len(dense_axes) :]) != tuple(dense_axes):
         return None
 
     dense_dims = list(dense_axes)
@@ -1126,13 +1118,9 @@ def _build_block_coo_plan_joined(
             # drop semantics for sparse Params.
             acc_a, atomic_a = _align_enum_join_keys(acc, atomic_lf, shared)
             acc_keys = acc_a.select(shared).unique()
-            acc_keys_a, atomic_a2 = _align_enum_join_keys(
-                acc_keys, atomic_a, shared
-            )
+            acc_keys_a, atomic_a2 = _align_enum_join_keys(acc_keys, atomic_a, shared)
             atomic_pruned = atomic_a2.join(acc_keys_a, on=shared, how="semi")
-            acc_b, atomic_pruned_b = _align_enum_join_keys(
-                acc_a, atomic_pruned, shared
-            )
+            acc_b, atomic_pruned_b = _align_enum_join_keys(acc_a, atomic_pruned, shared)
             acc = acc_b.join(
                 atomic_pruned_b,
                 on=shared,
@@ -1184,9 +1172,7 @@ def _build_block_coo_plan_joined(
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select(
-        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
-    ).collect()
+    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
 
 
 def _build_block_coo_plan(
@@ -1373,9 +1359,7 @@ def _build_block_coo_plan(
             # np.repeat each block value over its n_dense rows.
             atomic_lf = atomic.lazy
             lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic_lf, shared)
-            aligned = lt_a.join(
-                at_a, on=shared, how="left", maintain_order="left"
-            ).collect()
+            aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
             if aligned.height != n_lead or aligned["value"].null_count() > 0:
                 # Param duplicated a lead key (expansion) or missed one
                 # (null) ⇒ positional repeat would be wrong ⇒ fall back.
@@ -1396,17 +1380,13 @@ def _build_block_coo_plan(
             # it pre-collected via ``dense_param_vectors`` (keyed by id) — use
             # the cached buffer when present, else collect+sort inline.
             dense_vals = (
-                dense_param_vectors.get(id(atomic))
-                if dense_param_vectors is not None
-                else None
+                dense_param_vectors.get(id(atomic)) if dense_param_vectors is not None else None
             )
             if dense_vals is None:
                 atomic_df = atomic.lazy.collect().sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return _build_block_coo_plan_joined(*_fallback_args)
-                dense_vals = (
-                    atomic_df["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
             elif dense_vals.size != n_dense:
                 return _build_block_coo_plan_joined(*_fallback_args)
             tiled = np.tile(dense_vals, n_lead)
@@ -1427,9 +1407,7 @@ def _build_block_coo_plan(
             # genuinely dense data) but incurs NO re-sort.
             atomic_lf = atomic.lazy
             seed_a, at_a = _align_enum_join_keys(seed.lazy(), atomic_lf, shared)
-            aligned = seed_a.join(
-                at_a, on=shared, how="left", maintain_order="left"
-            ).collect()
+            aligned = seed_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
             if aligned.height != n or aligned["value"].null_count() > 0:
                 return _build_block_coo_plan_joined(*_fallback_args)
             vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1452,9 +1430,7 @@ def _build_block_coo_plan(
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select(
-        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
-    ).collect()
+    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
 
 
 def _sum_block_coo_classify(
@@ -1518,7 +1494,7 @@ def _sum_block_coo_classify(
     # re-sort under the client's sort promise.
     if len(dense_axes) > len(var_dims):
         return None
-    if tuple(var_dims[-len(dense_axes):]) != tuple(dense_axes):
+    if tuple(var_dims[-len(dense_axes) :]) != tuple(dense_axes):
         return None
 
     # Map-effect extras: dims the deferred map-Where introduces (e.g. ``n``
@@ -1734,9 +1710,7 @@ def _build_sum_block_coo_relabel(
             # Lead-only: Param constant within each block.
             atomic_lf = atomic.lazy
             lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic_lf, shared)
-            aligned = lt_a.join(
-                at_a, on=shared, how="left", maintain_order="left"
-            ).collect()
+            aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
             if aligned.height != n_lead or aligned["value"].null_count() > 0:
                 raise _SumBlockCooFallback("relabel: lead-only mis-align")
             block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1752,17 +1726,13 @@ def _build_sum_block_coo_relabel(
             # it pre-collected via ``dense_param_vectors`` (keyed by id) — use
             # the cached buffer when present, else collect+sort inline.
             dense_vals = (
-                dense_param_vectors.get(id(atomic))
-                if dense_param_vectors is not None
-                else None
+                dense_param_vectors.get(id(atomic)) if dense_param_vectors is not None else None
             )
             if dense_vals is None:
                 atomic_df = atomic.lazy.collect().sort(dense_dims)
                 if atomic_df.height != n_dense:
                     raise _SumBlockCooFallback("relabel: dense-only sparse")
-                dense_vals = (
-                    atomic_df["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
             elif dense_vals.size != n_dense:
                 raise _SumBlockCooFallback("relabel: dense-only sparse")
             tiled = np.tile(dense_vals, n_lead)
@@ -1776,9 +1746,7 @@ def _build_sum_block_coo_relabel(
             # with maintain_order="left" (order-preserving in polars 1.40.1).
             atomic_lf = atomic.lazy
             seed_a, at_a = _align_enum_join_keys(seed.lazy(), atomic_lf, shared)
-            aligned = seed_a.join(
-                at_a, on=shared, how="left", maintain_order="left"
-            ).collect()
+            aligned = seed_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
             if aligned.height != n or aligned["value"].null_count() > 0:
                 raise _SumBlockCooFallback("relabel: lead+dense mis-align")
             vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1812,9 +1780,7 @@ def _build_sum_block_coo_relabel(
     reduced = res_lf.select(*keep, "col_id", "coef")
     ri_a, res_a = _align_enum_join_keys(row_index_lf, reduced, on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select(
-        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
-    ).collect()
+    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
 
 
 def _build_sum_block_coo_plan(
@@ -1925,9 +1891,7 @@ def _build_sum_block_coo_plan(
     acc_lf = _apply_where_frames(acc_lf, acc_dims, meta.where_frames)
 
     # --- Step 3: bake map-effect Where frames (inner-join, dim-extending).
-    acc_lf, acc_dims_t = _apply_where_map_frames(
-        acc_lf, acc_dims, meta.where_map_frames
-    )
+    acc_lf, acc_dims_t = _apply_where_map_frames(acc_lf, acc_dims, meta.where_map_frames)
     acc_dims = list(acc_dims_t)
 
     # --- Step 4: multiply the FULL Param chain in order.  Use a left-join
@@ -1962,9 +1926,7 @@ def _build_sum_block_coo_plan(
             atomic_df = atomic.lazy.collect()
             if atomic_df.height != 1:
                 raise _SumBlockCooFallback("no-shared multi-row Param")
-            aligned = acc.with_columns(
-                pl.lit(float(atomic_df["value"][0])).alias("__sb_val")
-            )
+            aligned = acc.with_columns(pl.lit(float(atomic_df["value"][0])).alias("__sb_val"))
         if aligned.height != n:
             # A left join that changed the row count means a Param key
             # expansion (duplicate keys) — the recipe's product is no longer
@@ -2007,25 +1969,23 @@ def _build_sum_block_coo_plan(
     # array so np.flatnonzero / np.add.reduceat operate on contiguous data.
     is_new = (
         unreduced.select(
-            (
-                pl.struct(group_keys) != pl.struct(group_keys).shift(1)
-            ).fill_null(True).alias("__new")
+            (pl.struct(group_keys) != pl.struct(group_keys).shift(1)).fill_null(True).alias("__new")
         )["__new"]
         .to_numpy()
         .astype(bool, copy=False)
     )
     starts = np.flatnonzero(is_new)
     reduced_coef = np.add.reduceat(coef_sorted, starts)
-    reduced = unreduced[starts].select(*keep, "col_id").with_columns(
-        coef=pl.Series("coef", reduced_coef, dtype=pl.Float64)
+    reduced = (
+        unreduced[starts]
+        .select(*keep, "col_id")
+        .with_columns(coef=pl.Series("coef", reduced_coef, dtype=pl.Float64))
     )
 
     # --- Step 6: attach _rid via row_index inner-join on ``on``.
     ri_a, res_a = _align_enum_join_keys(row_index_lf, reduced.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select(
-        "_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)
-    ).collect()
+    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
 
 
 def _where_pushdown_disabled() -> bool:
@@ -2105,9 +2065,7 @@ class Var:
                 .with_columns(coef=pl.lit(float(other)))
                 .select(*self.dims, "col_id", "coef")
             )
-            return Expr([
-                _Term(f, self.dims, var_source=self, coef_scalar=float(other))
-            ])
+            return Expr([_Term(f, self.dims, var_source=self, coef_scalar=float(other))])
         if isinstance(other, Param):
             shared = [d for d in self.dims if d in other.dims]
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
@@ -2119,15 +2077,17 @@ class Var:
                 j = lf.join(other.lazy, how="cross")
             j = j.rename({"value": "coef"}).select(*new_dims, "col_id", "coef")
             psrc = other._sources_for_propagation()
-            return Expr([
-                _Term(
-                    j,
-                    new_dims,
-                    param_sources=psrc,
-                    var_source=self,
-                    coef_scalar=other._value_scalar,
-                )
-            ])
+            return Expr(
+                [
+                    _Term(
+                        j,
+                        new_dims,
+                        param_sources=psrc,
+                        var_source=self,
+                        coef_scalar=other._value_scalar,
+                    )
+                ]
+            )
         return NotImplemented
 
     __rmul__ = __mul__
@@ -2226,13 +2186,9 @@ def _forward_sum_block_meta_param_mul(
     reduce_set = set(meta.reduce_dims)
     if q_dims.issubset(keep_set) and not (q_dims & reduce_set):
         psrc_other = q._sources_for_propagation()
-        merged = _merge_param_sources(
-            list(meta.param_sources), psrc_other, flip_other=flip
-        )
+        merged = _merge_param_sources(list(meta.param_sources), psrc_other, flip_other=flip)
         new_scalar = (
-            meta.coef_scalar / q._value_scalar
-            if flip
-            else meta.coef_scalar * q._value_scalar
+            meta.coef_scalar / q._value_scalar if flip else meta.coef_scalar * q._value_scalar
         )
         return replace(
             meta,
@@ -2255,7 +2211,7 @@ def _forward_sum_block_meta_param_mul(
         f"(in reduce_dims); term keep={meta.keep!r} "
         f"reduce_dims={meta.reduce_dims!r}. The term reverts to the "
         "bounded fallback. To carry it, extend the block builder with a "
-        "dim-extending branch (\"option a\") for this Param shape.",
+        'dim-extending branch ("option a") for this Param shape.',
         UserWarning,
         stacklevel=2,
     )
@@ -2476,9 +2432,7 @@ class Expr:
             psrc_other = scalar._sources_for_propagation()
             new = []
             for t in self.terms:
-                use_lazy, use_dims, out_where_map_frames = _bake_map_before_mul(
-                    t, scalar.dims
-                )
+                use_lazy, use_dims, out_where_map_frames = _bake_map_before_mul(t, scalar.dims)
                 # ``use_lazy`` may not physically carry every entry of
                 # ``use_dims`` when extras are still deferred — compute
                 # ``shared`` and the final ``.select`` against the
@@ -2502,18 +2456,21 @@ class Expr:
                 # kept rows (SAFE); else DECLINE (drop the recipe + emit the
                 # loud marker).
                 fwd_meta = (
-                    _forward_sum_block_meta_param_mul(
-                        t.sum_block_meta, scalar, flip=False
-                    )
+                    _forward_sum_block_meta_param_mul(t.sum_block_meta, scalar, flip=False)
                     if t.sum_block_meta is not None
                     else None
                 )
                 new.append(
-                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
-                          coef_scalar=t.coef_scalar * scalar._value_scalar,
-                          where_frames=t.where_frames,
-                          where_map_frames=out_where_map_frames,
-                          sum_block_meta=fwd_meta)
+                    _Term(
+                        j,
+                        new_dims,
+                        param_sources=merged,
+                        var_source=t.var_source,
+                        coef_scalar=t.coef_scalar * scalar._value_scalar,
+                        where_frames=t.where_frames,
+                        where_map_frames=out_where_map_frames,
+                        sum_block_meta=fwd_meta,
+                    )
                 )
             return Expr(new)
         return NotImplemented
@@ -2527,9 +2484,7 @@ class Expr:
             psrc_other = other._sources_for_propagation()
             new = []
             for t in self.terms:
-                use_lazy, use_dims, out_where_map_frames = _bake_map_before_mul(
-                    t, other.dims
-                )
+                use_lazy, use_dims, out_where_map_frames = _bake_map_before_mul(t, other.dims)
                 lazy_cols = set(use_lazy.collect_schema().names())
                 shared = [d for d in use_dims if d in other.dims and d in lazy_cols]
                 new_dims = tuple(dict.fromkeys(tuple(use_dims) + other.dims))
@@ -2547,18 +2502,21 @@ class Expr:
                 # D1: forward the block-COO recipe through the post-Sum
                 # Param divide (direction flipped) when SAFE; else DECLINE.
                 fwd_meta = (
-                    _forward_sum_block_meta_param_mul(
-                        t.sum_block_meta, other, flip=True
-                    )
+                    _forward_sum_block_meta_param_mul(t.sum_block_meta, other, flip=True)
                     if t.sum_block_meta is not None
                     else None
                 )
                 new.append(
-                    _Term(j, new_dims, param_sources=merged, var_source=t.var_source,
-                          coef_scalar=t.coef_scalar / other._value_scalar,
-                          where_frames=t.where_frames,
-                          where_map_frames=out_where_map_frames,
-                          sum_block_meta=fwd_meta)
+                    _Term(
+                        j,
+                        new_dims,
+                        param_sources=merged,
+                        var_source=t.var_source,
+                        coef_scalar=t.coef_scalar / other._value_scalar,
+                        where_frames=t.where_frames,
+                        where_map_frames=out_where_map_frames,
+                        sum_block_meta=fwd_meta,
+                    )
                 )
             return Expr(new)
         return NotImplemented
@@ -2845,10 +2803,8 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                 m = t.sum_block_meta
                 fwd_meta = replace(
                     m,
-                    where_map_frames=(m.where_map_frames or ())
-                    + ((frame_lf, frozenset(extra)),),
-                    keep=tuple(m.keep)
-                    + tuple(d for d in extra if d not in m.keep),
+                    where_map_frames=(m.where_map_frames or ()) + ((frame_lf, frozenset(extra)),),
+                    keep=tuple(m.keep) + tuple(d for d in extra if d not in m.keep),
                 )
             new.append(
                 _Term(
@@ -2891,9 +2847,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
         fwd_meta = None
         if t.sum_block_meta is not None:
             m = t.sum_block_meta
-            fwd_meta = replace(
-                m, where_frames=(m.where_frames or ()) + (frame_lf,)
-            )
+            fwd_meta = replace(m, where_frames=(m.where_frames or ()) + (frame_lf,))
         new.append(
             _Term(
                 t.lazy,
@@ -3020,8 +2974,8 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
         # ``over``) over a meta-bearing term still drops the recipe: the
         # capture guard above blocks re-capture, and this forward clause is
         # gated on ``not over`` so it fires ONLY for the no-op collapse.
-        out_meta = block_meta if block_meta is not None else (
-            t.sum_block_meta if not over else None
+        out_meta = (
+            block_meta if block_meta is not None else (t.sum_block_meta if not over else None)
         )
         new_terms.append(_Term(f, keep, param_sources=psrc, sum_block_meta=out_meta))
     return Expr(new_terms)
@@ -3133,12 +3087,9 @@ class Problem:
         if axes is None:
             self._dense_axes = None
             return
-        if not isinstance(axes, (tuple, list)) or not all(
-            isinstance(a, str) for a in axes
-        ):
+        if not isinstance(axes, (tuple, list)) or not all(isinstance(a, str) for a in axes):
             raise TypeError(
-                "declare_dense_axes expects a tuple/list of str (or None); "
-                f"got {axes!r}"
+                f"declare_dense_axes expects a tuple/list of str (or None); got {axes!r}"
             )
         self._dense_axes = tuple(axes) if axes else None
 
@@ -3679,6 +3630,7 @@ class Problem:
         if _profile:
             try:
                 import psutil as _ps_cm
+
                 _cm_proc = _ps_cm.Process()
                 _cm_t0 = time.monotonic()
 
@@ -3693,6 +3645,7 @@ class Problem:
                         + "\n"
                     )
                     sys.stderr.flush()
+
                 _cm_emit("canonicalise_enter", n_cstrs=len(self._cstrs))
             except ImportError:
                 _profile = False
@@ -3725,9 +3678,7 @@ class Problem:
             else:
                 row_count = int(over.height)
                 axis_cols = list(over.columns)
-                row_index = over.with_columns(
-                    _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-                )
+                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
 
             if _profile:
                 _cm_emit(
@@ -3749,8 +3700,7 @@ class Problem:
                 missing = [d for d in rhs.dims if d not in axis_cols]
                 if missing:
                     raise ValueError(
-                        f"constraint {cname!r}: rhs Param has dim {missing} "
-                        f"not in over={axis_cols}"
+                        f"constraint {cname!r}: rhs Param has dim {missing} not in over={axis_cols}"
                     )
                 on = list(rhs.dims)
                 # Prefer the prune-down path when the composite RHS Param
@@ -3772,10 +3722,7 @@ class Problem:
                 # we don't perturb existing parity.
                 sources = rhs._sources if isinstance(rhs._sources, list) else None
                 use_prune_down = (
-                    on
-                    and sources is not None
-                    and len(sources) >= 2
-                    and not _prune_down_disabled()
+                    on and sources is not None and len(sources) >= 2 and not _prune_down_disabled()
                 )
                 if use_prune_down:
                     # Start the accumulator from row_index with value=1.0.
@@ -3806,9 +3753,7 @@ class Problem:
                             keys_a, atomic_a = _align_enum_join_keys(
                                 keys_lazy, atomic_lazy, atomic_on
                             )
-                            atomic_pruned = atomic_a.join(
-                                keys_a, on=atomic_on, how="semi"
-                            )
+                            atomic_pruned = atomic_a.join(keys_a, on=atomic_on, how="semi")
                             acc_a, atomic_pruned_a = _align_enum_join_keys(
                                 acc_for_keys, atomic_pruned, atomic_on
                             )
@@ -3820,26 +3765,20 @@ class Problem:
                             )
                             if direction >= 0:
                                 acc = joined.with_columns(
-                                    value=pl.col("value")
-                                    * pl.col("value__rhs_chain")
+                                    value=pl.col("value") * pl.col("value__rhs_chain")
                                 ).drop("value__rhs_chain")
                             else:
                                 acc = joined.with_columns(
-                                    value=pl.col("value")
-                                    / pl.col("value__rhs_chain")
+                                    value=pl.col("value") / pl.col("value__rhs_chain")
                                 ).drop("value__rhs_chain")
                         else:
                             # Scalar atomic — fold the constant into the
                             # running value column directly.
                             scalar_val = float(atomic.frame["value"][0])
                             if direction >= 0:
-                                acc = acc.with_columns(
-                                    value=pl.col("value") * scalar_val
-                                )
+                                acc = acc.with_columns(value=pl.col("value") * scalar_val)
                             else:
-                                acc = acc.with_columns(
-                                    value=pl.col("value") / scalar_val
-                                )
+                                acc = acc.with_columns(value=pl.col("value") / scalar_val)
                     if _profile:
                         _cm_emit(
                             "family_rhs_pruned_down",
@@ -3890,10 +3829,7 @@ class Problem:
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
             else:
-                raise TypeError(
-                    f"constraint {cname!r}: unsupported rhs type "
-                    f"{type(rhs).__name__}"
-                )
+                raise TypeError(f"constraint {cname!r}: unsupported rhs type {type(rhs).__name__}")
 
             if _profile:
                 _cm_emit(
@@ -3928,14 +3864,11 @@ class Problem:
                 ub_vec = rhs_vec
             else:
                 raise ValueError(
-                    f"constraint {cname!r}: sense must be '<=', '>=' or "
-                    f"'=='; got {sense!r}"
+                    f"constraint {cname!r}: sense must be '<=', '>=' or '=='; got {sense!r}"
                 )
             rows_lb_chunks.append(lb_vec)
             rows_ub_chunks.append(ub_vec)
-            sense_chunks.append(
-                np.full(row_count, ord(sc), dtype=np.uint8)
-            )
+            sense_chunks.append(np.full(row_count, ord(sc), dtype=np.uint8))
 
             if _profile:
                 _cm_emit(
@@ -3994,11 +3927,7 @@ class Problem:
                     # / no-Param / Sum-collapsed terms (var_source is
                     # None after Sum/Where/Lag) fall through to the
                     # original semi-join path verbatim.
-                    _lhs_psrc = (
-                        term.param_sources
-                        if isinstance(term.param_sources, list)
-                        else None
-                    )
+                    _lhs_psrc = term.param_sources if isinstance(term.param_sources, list) else None
                     _use_lhs_prune = (
                         term.var_source is not None
                         and _lhs_psrc is not None
@@ -4021,9 +3950,7 @@ class Problem:
                     # prune-down path; a separate task wires them.)
                     _block_spec = None
                     if not _block_coo_disabled():
-                        _block_spec = _block_coo_classify(
-                            term, axis_cols, on, self._dense_axes
-                        )
+                        _block_spec = _block_coo_classify(term, axis_cols, on, self._dense_axes)
                     # A deferred map-effect Where (non-None
                     # where_map_frames) introduces extras dims that the
                     # block-COO seed (Var dims only) cannot carry.  The
@@ -4155,14 +4082,11 @@ class Problem:
                                 term.dims,
                                 term.where_map_frames,
                             )
-                            rl_a, tl_a = _align_enum_join_keys(
-                                row_index_lf, term_lazy_filtered, on
-                            )
+                            rl_a, tl_a = _align_enum_join_keys(row_index_lf, term_lazy_filtered, on)
                             keys_lazy = rl_a.select(on).unique()
                             tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                            plan = (
-                                rl_a.join(tl_pruned, on=on, how="inner")
-                                .select("_rid", "col_id", "coef")
+                            plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                                "_rid", "col_id", "coef"
                             )
                     elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
@@ -4195,20 +4119,15 @@ class Problem:
                         term_lazy_filtered, _ = _apply_where_map_frames(
                             term_lazy_filtered, term.dims, term.where_map_frames
                         )
-                        rl_a, tl_a = _align_enum_join_keys(
-                            row_index_lf, term_lazy_filtered, on
-                        )
+                        rl_a, tl_a = _align_enum_join_keys(row_index_lf, term_lazy_filtered, on)
                         keys_lazy = rl_a.select(on).unique()
                         tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                        plan = (
-                            rl_a.join(tl_pruned, on=on, how="inner")
-                            .select("_rid", "col_id", "coef")
+                        plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                            "_rid", "col_id", "coef"
                         )
                     term_plans.append(("dim", plan, list(on)))
                 else:
-                    term_plans.append(
-                        ("scalar", term.lazy.select("col_id", "coef"), [])
-                    )
+                    term_plans.append(("scalar", term.lazy.select("col_id", "coef"), []))
 
             if _profile:
                 _cm_emit(
@@ -4222,17 +4141,14 @@ class Problem:
                 # so it can't introduce new failure modes.
                 try:
                     import os as _os_pl
+
                     _plans_dir = "/tmp/polar_high_canonicalise_plans"
                     _os_pl.makedirs(_plans_dir, exist_ok=True)
                     _safe_cname = "".join(
-                        c if c.isalnum() or c in "._-" else "_"
-                        for c in str(cname)
+                        c if c.isalnum() or c in "._-" else "_" for c in str(cname)
                     )
                     for _i, (_kind, _p, _on) in enumerate(term_plans):
-                        _fname = (
-                            f"{_plans_dir}/{_fam_idx:04d}_"
-                            f"{_safe_cname}_term{_i}.txt"
-                        )
+                        _fname = f"{_plans_dir}/{_fam_idx:04d}_{_safe_cname}_term{_i}.txt"
                         try:
                             _txt = _p.explain(optimized=True)
                         except Exception:
@@ -4327,9 +4243,7 @@ class Problem:
                     if cids.size == 0:
                         continue
                     rs = np.repeat(
-                        np.arange(
-                            base_row, base_row + row_count, dtype=np.int64
-                        ),
+                        np.arange(base_row, base_row + row_count, dtype=np.int64),
                         cids.size,
                     )
                     tiled_cols = np.tile(cids, row_count)
@@ -4418,9 +4332,7 @@ class Problem:
             # production path — but it keeps the bake-before-consume
             # invariant uniform across every ``term.lazy`` consumer.
             _obj_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
-            _obj_lazy, _ = _apply_where_map_frames(
-                _obj_lazy, t.dims, t.where_map_frames
-            )
+            _obj_lazy, _ = _apply_where_map_frames(_obj_lazy, t.dims, t.where_map_frames)
             f = _obj_lazy.collect()
             if f.height == 0:
                 del f
@@ -4745,9 +4657,7 @@ class Problem:
             row_names: list[str] = ["cost"] + list(m.row_names)
             col_names: list[str] = list(m.col_names)
         else:
-            row_names = ["cost"] + [
-                f"R{i + 2:07d}" for i in range(n_constraint_rows)
-            ]
+            row_names = ["cost"] + [f"R{i + 2:07d}" for i in range(n_constraint_rows)]
             col_names = [f"C{j + 1:07d}" for j in range(n_cols)]
             # Note: cost row externally appears as "cost"; constraint
             # rows are R0000002, R0000003, ... so the generic numbering
@@ -4755,9 +4665,7 @@ class Problem:
             # would count rows in the file.
 
         # ---- Integer-col set from m.col_int (1 bit per column).
-        integer_cols: set[int] = set(
-            int(c) for c in np.nonzero(m.col_int)[0].tolist()
-        )
+        integer_cols: set[int] = set(int(c) for c in np.nonzero(m.col_int)[0].tolist())
 
         # Sense characters per constraint row, decoded from m.sense_char.
         sense_chars = m.sense_char.tobytes().decode("ascii") if n_constraint_rows else ""
@@ -4805,16 +4713,10 @@ class Problem:
                 is_int = j in integer_cols
                 if is_int and not in_integer:
                     int_marker_id += 1
-                    f.write(
-                        "    MARKER                 'MARKER'"
-                        "                 'INTORG'\n"
-                    )
+                    f.write("    MARKER                 'MARKER'                 'INTORG'\n")
                     in_integer = True
                 elif (not is_int) and in_integer:
-                    f.write(
-                        "    MARKER                 'MARKER'"
-                        "                 'INTEND'\n"
-                    )
+                    f.write("    MARKER                 'MARKER'                 'INTEND'\n")
                     in_integer = False
                 cname = col_names[j]
                 if obj_nz:
@@ -4823,14 +4725,9 @@ class Problem:
                 # rows; MPS row name is row_names[rid + 1].
                 for k in range(start, end):
                     r = int(row_idx[k])
-                    f.write(
-                        f"    {cname}  {row_names[r + 1]}  {_fmt(val[k])}\n"
-                    )
+                    f.write(f"    {cname}  {row_names[r + 1]}  {_fmt(val[k])}\n")
             if in_integer:
-                f.write(
-                    "    MARKER                 'MARKER'"
-                    "                 'INTEND'\n"
-                )
+                f.write("    MARKER                 'MARKER'                 'INTEND'\n")
                 in_integer = False
 
             if profile:
@@ -4851,9 +4748,7 @@ class Problem:
                 rhs_arr = np.where(lb_fin, lb, ub)
                 nz = np.nonzero(np.isfinite(rhs_arr) & (rhs_arr != 0.0))[0]
                 for rid in nz.tolist():
-                    f.write(
-                        f"    rhs  {row_names[rid + 1]}  {_fmt(rhs_arr[rid])}\n"
-                    )
+                    f.write(f"    rhs  {row_names[rid + 1]}  {_fmt(rhs_arr[rid])}\n")
 
             if profile:
                 _emit("rhs_emitted")
@@ -4887,9 +4782,7 @@ class Problem:
                 elif math.isfinite(lo) and math.isinf(hi) and hi > 0:
                     if lo != 0.0:
                         for cid in ids.tolist():
-                            f.write(
-                                f" LO bnd  {col_names[int(cid)]}  {_fmt(lo)}\n"
-                            )
+                            f.write(f" LO bnd  {col_names[int(cid)]}  {_fmt(lo)}\n")
                 elif math.isfinite(lo) and math.isfinite(hi):
                     for cid in ids.tolist():
                         nm = col_names[int(cid)]
@@ -5072,9 +4965,7 @@ class Problem:
             # Defensive bake-before-consume (see _build_canonical_matrix
             # objective loop) — Sum(over=None) already bakes both slots.
             _obj_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
-            _obj_lazy, _ = _apply_where_map_frames(
-                _obj_lazy, t.dims, t.where_map_frames
-            )
+            _obj_lazy, _ = _apply_where_map_frames(_obj_lazy, t.dims, t.where_map_frames)
             f = _obj_lazy.collect()
             cids = f["col_id"].to_numpy()
             vals = f["coef"].to_numpy()
@@ -5336,7 +5227,12 @@ class Problem:
                             f"{on!r} — left join from row_index (rows={row_count}) "
                             f"produced {j.height} rows. Sample duplicates:\n{sample}"
                         )
-                    rhs_vec = j.sort("_rid")["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
+                    rhs_vec = (
+                        j.sort("_rid")["value"]
+                        .fill_null(0.0)
+                        .to_numpy()
+                        .astype(np.float64, copy=False)
+                    )
                 else:
                     rhs_vec[:] = float(rhs.frame["value"][0])
             else:
@@ -5347,9 +5243,7 @@ class Problem:
             # 0-indexed over constraints (HiGHS row index space starts
             # at 0 here — no cost row in the constraint space).
             if self._layer2_row_factor is not None and row_count:
-                rhs_vec = rhs_vec * self._layer2_row_factor[
-                    base_row : base_row + row_count
-                ]
+                rhs_vec = rhs_vec * self._layer2_row_factor[base_row : base_row + row_count]
 
             if sense == "<=":
                 row_lb = np.full(row_count, -inf, dtype=np.float64)
@@ -5413,11 +5307,7 @@ class Problem:
                     # _build_canonical_matrix's LHS prune-down branch.
                     # Single-Param / Sum-collapsed terms (var_source is
                     # None) keep the original semi-join path verbatim.
-                    _lhs_psrc = (
-                        term.param_sources
-                        if isinstance(term.param_sources, list)
-                        else None
-                    )
+                    _lhs_psrc = term.param_sources if isinstance(term.param_sources, list) else None
                     _use_lhs_prune = (
                         term.var_source is not None
                         and _lhs_psrc is not None
@@ -5441,9 +5331,7 @@ class Problem:
                     # ``_collect_one``.
                     _block_spec = None
                     if not _block_coo_disabled():
-                        _block_spec = _block_coo_classify(
-                            term, axis_cols, on, self._dense_axes
-                        )
+                        _block_spec = _block_coo_classify(term, axis_cols, on, self._dense_axes)
                     # See _build_canonical_matrix: a deferred map-effect
                     # Where cannot be carried by the block-COO seed —
                     # bake-before-block (route to prune / fallback) keeps
@@ -5561,14 +5449,11 @@ class Problem:
                                 term.dims,
                                 term.where_map_frames,
                             )
-                            rl_a, tl_a = _align_enum_join_keys(
-                                row_index_lf, term_lazy_filtered, on
-                            )
+                            rl_a, tl_a = _align_enum_join_keys(row_index_lf, term_lazy_filtered, on)
                             keys_lazy = rl_a.select(on).unique()
                             tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                            plan = (
-                                rl_a.join(tl_pruned, on=on, how="inner")
-                                .select("_rid", "col_id", "coef")
+                            plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                                "_rid", "col_id", "coef"
                             )
                     elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
@@ -5600,9 +5485,7 @@ class Problem:
                         term_lazy_filtered, _ = _apply_where_map_frames(
                             term_lazy_filtered, term.dims, term.where_map_frames
                         )
-                        rl_a, tl_a = _align_enum_join_keys(
-                            row_index_lf, term_lazy_filtered, on
-                        )
+                        rl_a, tl_a = _align_enum_join_keys(row_index_lf, term_lazy_filtered, on)
                         # Semi-join + streaming pattern, mirroring write_mps
                         # and _build_lp_arrays: prune the term plan against
                         # the row-index key set so polars can prune Param-
@@ -5610,9 +5493,8 @@ class Problem:
                         # intermediate.  Same bug class on the LHS as RHS.
                         keys_lazy = rl_a.select(on).unique()
                         tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                        plan = (
-                            rl_a.join(tl_pruned, on=on, how="inner")
-                            .select("_rid", "col_id", "coef")
+                        plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                            "_rid", "col_id", "coef"
                         )
                     term_plans.append(("dim", plan))
                 else:
@@ -5663,9 +5545,7 @@ class Problem:
                         vals = j["coef"].to_numpy().astype(np.float64, copy=False)
                         if cids.size == 0:
                             continue
-                        tiled_rows = np.repeat(
-                            np.arange(row_count, dtype=np.int64), cids.size
-                        )
+                        tiled_rows = np.repeat(np.arange(row_count, dtype=np.int64), cids.size)
                         tiled_cols = np.tile(cids, row_count)
                         tiled_vals = np.tile(vals, row_count)
                         if _rf is not None:
@@ -5875,9 +5755,7 @@ class Problem:
             mps_path = (
                 _mps_out_path
                 if _mps_out_path is not None
-                else tempfile.NamedTemporaryFile(
-                    suffix=".mps", delete=False, dir=tmp_dir
-                ).name
+                else tempfile.NamedTemporaryFile(suffix=".mps", delete=False, dir=tmp_dir).name
             )
             try:
                 # Silence HiGHS' own "Writing the model to ..." /
@@ -6902,9 +6780,7 @@ class WarmProblem:
             else:
                 row_count = int(over.height)
                 axis_cols = list(over.columns)
-                row_index = over.with_columns(
-                    _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-                )
+                row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
 
             base_row = next_row
             next_row += row_count
@@ -6959,11 +6835,7 @@ class WarmProblem:
                     # Sum-collapsed terms (var_source=None) fall back to
                     # the original merged-lazy semi-join path verbatim so
                     # the warm-path output matches the canonical build.
-                    _lhs_psrc = (
-                        term.param_sources
-                        if isinstance(term.param_sources, list)
-                        else None
-                    )
+                    _lhs_psrc = term.param_sources if isinstance(term.param_sources, list) else None
                     _use_lhs_prune = (
                         term.var_source is not None
                         and _lhs_psrc is not None
@@ -6995,9 +6867,7 @@ class WarmProblem:
                     # ``_collect_streaming`` like the other warm arms.
                     _block_spec = None
                     if not _block_coo_disabled():
-                        _block_spec = _block_coo_classify(
-                            term, axis_cols, on, p._dense_axes
-                        )
+                        _block_spec = _block_coo_classify(term, axis_cols, on, p._dense_axes)
                     # See _build_canonical_matrix: a deferred map-effect
                     # Where cannot be carried by the block-COO seed —
                     # bake-before-block (route to prune / fallback) keeps
@@ -7035,9 +6905,7 @@ class WarmProblem:
                         if _sum_block_spec is not None:
                             _keep_set = set(_sum_block_spec["keep"])
                             _var_dims_set = set(_sum_block_spec["var_dims"])
-                            _relabel = set(
-                                _sum_block_spec["reduce_dims"]
-                            ).issubset(_var_dims_set)
+                            _relabel = set(_sum_block_spec["reduce_dims"]).issubset(_var_dims_set)
                             _keep_in_var = _keep_set.issubset(_var_dims_set)
                             _tracked_ok = all(
                                 set(pobj.dims).issubset(_keep_set)
@@ -7144,14 +7012,12 @@ class WarmProblem:
                                 term.dims,
                                 term.where_map_frames,
                             )
-                            rl_a, tl_a = _align_enum_join_keys(
-                                row_index_lf, term_lazy_filtered, on
-                            )
+                            rl_a, tl_a = _align_enum_join_keys(row_index_lf, term_lazy_filtered, on)
                             keys_lazy = rl_a.select(on).unique()
                             tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
-                            plan = rl_a.join(
-                                tl_pruned, on=on, how="inner"
-                            ).select("_rid", "col_id", "coef", *term.dims)
+                            plan = rl_a.join(tl_pruned, on=on, how="inner").select(
+                                "_rid", "col_id", "coef", *term.dims
+                            )
                     elif _use_lhs_prune:
                         plan = _build_lhs_pruned_plan(
                             row_index_lf,
@@ -7183,9 +7049,7 @@ class WarmProblem:
                         term_lazy_filtered, _ = _apply_where_map_frames(
                             term_lazy_filtered, term.dims, term.where_map_frames
                         )
-                        rl_a, tl_a = _align_enum_join_keys(
-                            row_index_lf, term_lazy_filtered, on
-                        )
+                        rl_a, tl_a = _align_enum_join_keys(row_index_lf, term_lazy_filtered, on)
                         keys_lazy = rl_a.select(on).unique()
                         tl_pruned = tl_a.join(keys_lazy, on=on, how="semi")
                         plan = rl_a.join(tl_pruned, on=on, how="inner").select(
@@ -7221,12 +7085,8 @@ class WarmProblem:
                             keys_df = j.select(*pdims)
                             _kd_lhs = keys_df.with_row_index("__ridx")
                             _pdims_on = list(pdims)
-                            _kd_lhs, _pf_rhs = _align_enum_join_keys(
-                                _kd_lhs, pobj.frame, _pdims_on
-                            )
-                            joined = _kd_lhs.join(
-                                _pf_rhs, on=_pdims_on, how="left"
-                            ).sort("__ridx")
+                            _kd_lhs, _pf_rhs = _align_enum_join_keys(_kd_lhs, pobj.frame, _pdims_on)
+                            joined = _kd_lhs.join(_pf_rhs, on=_pdims_on, how="left").sort("__ridx")
                             old_vals = (
                                 joined["value"]
                                 .fill_null(0.0)
@@ -7235,9 +7095,7 @@ class WarmProblem:
                             )
                             if pdir == 1:
                                 safe = np.where(old_vals == 0.0, 1.0, old_vals)
-                                factor = np.where(
-                                    old_vals == 0.0, 0.0, coefs / safe
-                                )
+                                factor = np.where(old_vals == 0.0, 0.0, coefs / safe)
                             else:
                                 factor = coefs * old_vals
                             track_acc.setdefault(pname, []).append(
@@ -7246,9 +7104,7 @@ class WarmProblem:
                                     cols=cids.copy(),
                                     dim_keys=keys_df,
                                     factor=factor,
-                                    direction=np.full(
-                                        coefs.size, pdir, dtype=np.int8
-                                    ),
+                                    direction=np.full(coefs.size, pdir, dtype=np.int8),
                                     dim_signature=tuple(pdims),
                                 )
                             )
@@ -7267,9 +7123,7 @@ class WarmProblem:
                                     cols=cids.copy(),
                                     dim_keys=None,
                                     factor=factor,
-                                    direction=np.full(
-                                        coefs.size, pdir, dtype=np.int8
-                                    ),
+                                    direction=np.full(coefs.size, pdir, dtype=np.int8),
                                     dim_signature=(),
                                 )
                             )

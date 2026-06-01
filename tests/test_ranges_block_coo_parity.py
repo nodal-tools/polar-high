@@ -85,9 +85,7 @@ def _build_problem() -> Problem:
         }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(
-        ("p",), pl.DataFrame({"p": p_idx, "value": [2.0, 30.0]}), name="P_unit"
-    )
+    P_unit = Param(("p",), pl.DataFrame({"p": p_idx, "value": [2.0, 30.0]}), name="P_unit")
     dt_rows = list(itertools.product(d_idx, t_idx))
     P_step = Param(
         ("d", "t"),
@@ -110,9 +108,7 @@ def _build_problem() -> Problem:
     )
     nb = Sum(Where(v * P_unit, map_to_n) * P_step, over=("p", "s"))
     nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique()
-    prob.add_cstr(
-        "nb", over=nb_over, sense="<=", lhs_terms={"lhs": nb}, rhs_terms={"rhs": 0.0}
-    )
+    prob.add_cstr("nb", over=nb_over, sense="<=", lhs_terms={"lhs": nb}, rhs_terms={"rhs": 0.0})
 
     # ---- Family 2: non-Sum Var(p,d,t) × Pa(d,t) × Pb(d,t).
     n_p, n_d, n_t = 3, 4, 5
@@ -168,12 +164,8 @@ def _install_side_vectors(prob: Problem) -> None:
     n_rows = sum(over.height for _c, _p, over in prob._cstrs)
     n_cols = int(prob._next_col)
     # Deterministic spread across several decades (powers of ten cycled).
-    rf = np.array(
-        [10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
-    cf = np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    rf = np.array([10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
+    cf = np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
     prob._layer2_row_factor = rf
     prob._layer2_col_factor = cf
 
@@ -181,6 +173,7 @@ def _install_side_vectors(prob: Problem) -> None:
 def _report_tuple(rep) -> tuple:
     """Flatten a RangeReport into a comparable tuple of raw floats /
     bools, NaN-safe (NaN compared by ``repr``)."""
+
     def _pair(x):
         return (repr(x[0]), repr(x[1]))
 

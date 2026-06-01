@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.4.1] — 2026-06-01
+
+CI / test-tooling release. **No runtime or public-API changes** — the LP
+build, autoscale, and solve paths are byte-identical to 2.4.0.
+
+### Fixed
+
+- `psutil` added to the `test` optional-dependencies. The bounded-memory
+  branch-fired profile tests detect which evaluation branch ran via the
+  env-gated profile lines on stderr, and those lines are `psutil`-gated:
+  without `psutil` installed, `autoscale/_ranges.py` sets `_profile=False`
+  and the signals never print, so the four branch-fired tests
+  (`test_ranges_block_coo_branch_fired`, `test_ranges_rhs_bound_branch_fired`,
+  `test_walk_fallback_profile_signal_fires`,
+  `test_rhs_walk_fallback_no_skip_and_fires`) skipped their assertions in
+  CI's lean `pip install -e ".[test]"` environment. Declaring `psutil` as a
+  test dependency makes CI exercise the profiling signals. The bounded-memory
+  feature itself was always correct and is unaffected — the byte-identical
+  parity gate passes with or without `psutil`.
+
+### Changed
+
+- `ruff` lint + format cleanup of `src/` and `tests/` (import sorting, an
+  unnecessary `open(..., "r")` mode argument, a stray unused local, and a
+  whole-tree `ruff format` reflow) so the `lint` CI job passes under the
+  latest `ruff`. No behavioural change.
+
 ## [2.4.0] — 2026-06-01
 
 ### Block-COO coefficient evaluation + bounded-memory autoscale

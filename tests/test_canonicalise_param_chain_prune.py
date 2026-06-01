@@ -163,9 +163,7 @@ def test_param_chain_prune_down_matches_merged_path():
     assert np.array_equal(np.isfinite(row_lb_pruned), np.isfinite(row_lb_merged))
     finite_lb = np.isfinite(row_lb_pruned)
     if finite_lb.any():
-        np.testing.assert_array_equal(
-            row_lb_pruned[finite_lb], row_lb_merged[finite_lb]
-        )
+        np.testing.assert_array_equal(row_lb_pruned[finite_lb], row_lb_merged[finite_lb])
 
     # row_ub is finite (the RHS vector) — must match byte-for-byte.
     np.testing.assert_array_equal(row_ub_pruned, row_ub_merged)
@@ -296,6 +294,4 @@ def test_single_param_rhs_unchanged():
         rhs_terms={"r": rhs_atomic},
     )
     m = p.canonicalise()
-    np.testing.assert_array_equal(
-        m.row_ub, np.linspace(1.0, 7.0, n_t).astype(np.float64)
-    )
+    np.testing.assert_array_equal(m.row_ub, np.linspace(1.0, 7.0, n_t).astype(np.float64))

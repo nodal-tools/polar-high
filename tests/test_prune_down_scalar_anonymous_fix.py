@@ -141,17 +141,11 @@ def test_rhs_prune_down_honours_negation():
 def test_lhs_prune_down_honours_negation():
     """``-Var * P1 * P2`` LHS prune-down must keep the negation."""
     _clear_guard()
-    a = Param(
-        ("x",), pl.DataFrame({"x": [1, 2], "value": [0.5, 0.5]}), name="P1"
-    )
-    b = Param(
-        ("x",), pl.DataFrame({"x": [1, 2], "value": [0.01, 0.01]}), name="P2"
-    )
+    a = Param(("x",), pl.DataFrame({"x": [1, 2], "value": [0.5, 0.5]}), name="P1")
+    b = Param(("x",), pl.DataFrame({"x": [1, 2], "value": [0.01, 0.01]}), name="P2")
 
     prob = Problem()
-    v = prob.add_var(
-        "v_state", ("x",), pl.DataFrame({"x": [1, 2]}), lower=0.0, upper=10.0
-    )
+    v = prob.add_var("v_state", ("x",), pl.DataFrame({"x": [1, 2]}), lower=0.0, upper=10.0)
     # ``-v`` is ``v.to_expr() * -1.0``; ``Expr.__mul__(float)`` is the
     # path that tracks ``coef_scalar``.
     lhs = (-v) * a * b
@@ -173,19 +167,13 @@ def test_lhs_prune_down_honours_param_value_scalar():
     side scalar 60.  Matches the flextool storage_self_discharge-style
     case where one of the Params in the LHS chain has been scaled."""
     _clear_guard()
-    a = Param(
-        ("x",), pl.DataFrame({"x": [1, 2], "value": [0.001, 0.001]}), name="a"
-    )
-    b = Param(
-        ("x",), pl.DataFrame({"x": [1, 2], "value": [1.0, 1.0]}), name="b"
-    )
+    a = Param(("x",), pl.DataFrame({"x": [1, 2], "value": [0.001, 0.001]}), name="a")
+    b = Param(("x",), pl.DataFrame({"x": [1, 2], "value": [1.0, 1.0]}), name="b")
     scaled = (a * 60.0) * b  # _value_scalar=60, _sources=[(a,+1),(b,+1)]
     assert scaled._value_scalar == pytest.approx(60.0)
 
     prob = Problem()
-    v = prob.add_var(
-        "v", ("x",), pl.DataFrame({"x": [1, 2]}), lower=0.0, upper=10.0
-    )
+    v = prob.add_var("v", ("x",), pl.DataFrame({"x": [1, 2]}), lower=0.0, upper=10.0)
     lhs = v * scaled
     # Var.__mul__(Param) now folds Param._value_scalar into _Term.coef_scalar
     assert lhs.terms[0].coef_scalar == pytest.approx(60.0)

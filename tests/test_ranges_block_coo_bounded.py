@@ -121,12 +121,8 @@ def _install_side_vectors(prob: Problem) -> None:
     side-vector multiply is non-trivial."""
     n_rows = sum(over.height for _c, _p, over in prob._cstrs)
     n_cols = int(prob._next_col)
-    rf = np.array(
-        [10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
-    cf = np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    rf = np.array([10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
+    cf = np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
     prob._layer2_row_factor = rf
     prob._layer2_col_factor = cf
 
@@ -161,20 +157,21 @@ class _BatchSpy:
     def __enter__(self) -> _BatchSpy:
         spy = self
 
-        def _walk(spine, recipe, scale, reducers, *, batch_rows=1_000_000,
-                  dense_axes=None):
+        def _walk(spine, recipe, scale, reducers, *, batch_rows=1_000_000, dense_axes=None):
             # Force the small batch size regardless of the caller's request
             # so a modest test family is genuinely sliced.
             return spy._orig_walk(
-                spine, recipe, scale, reducers,
-                batch_rows=spy.batch_rows, dense_axes=dense_axes,
+                spine,
+                recipe,
+                scale,
+                reducers,
+                batch_rows=spy.batch_rows,
+                dense_axes=dense_axes,
             )
 
         def _constraint(batch_over, axis_cols, recipe, dense_axes):
             spy.batch_sizes.append(int(batch_over.height))
-            return spy._orig_constraint(
-                batch_over, axis_cols, recipe, dense_axes
-            )
+            return spy._orig_constraint(batch_over, axis_cols, recipe, dense_axes)
 
         # The walk is bound into ``_ranges`` via a local import of the
         # ``_coef_walk`` symbol, so patching the module attribute is enough

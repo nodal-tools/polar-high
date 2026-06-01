@@ -33,14 +33,14 @@ import polars as pl
 
 import polar_high as fp
 
-
 # --------------------------------------------------------------------- #
 # Builder                                                               #
 # --------------------------------------------------------------------- #
 
 
 def _build_lhs_chain_problem(
-    *, mark_tracked: bool = False,
+    *,
+    mark_tracked: bool = False,
 ) -> tuple[fp.Problem, list]:
     """Build a Problem with a single constraint whose LHS is
     ``Var × P1 × P2 × P3`` (3-atomic Param chain).
@@ -150,9 +150,7 @@ def _snapshot_matrix(m) -> dict:
     row_idx = m.row_idx.copy()
     col_ptr = m.col_ptr.copy()
     # Rebuild (col, row, val) triples and sort canonically.
-    cols = np.repeat(
-        np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64)
-    )
+    cols = np.repeat(np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64))
     triples = np.lexsort((row_idx, cols))
     return {
         "cols": cols[triples],
@@ -212,6 +210,7 @@ def test_lhs_chain_prune_streaming_parity():
     repeat with var_source cleared.  Compare COO triples.
     """
     prob, _ = _build_lhs_chain_problem()
+
     # The streaming dispatcher is exercised via solve(); we don't need a
     # real solver here, just the matrix it would assemble.  We can pull
     # it out via the same streaming helper that canonicalise calls when
@@ -219,8 +218,6 @@ def test_lhs_chain_prune_streaming_parity():
     # solve() with a dummy backend that captures the arrays.
     # Simplest reliable approach: just call ``_solve_streaming`` with a
     # backend that raises after capture.
-    captured: dict = {}
-
     def _capture_then_stop(*args, **kwargs):
         # The internal arrays are stored on self before the solver is
         # invoked; we capture them via a sentinel exception.
@@ -349,6 +346,4 @@ def test_lhs_chain_prune_warm_tracked_parity():
         np.testing.assert_array_equal(ra["rows"][oa], rb["rows"][ob])
         np.testing.assert_array_equal(ra["cols"][oa], rb["cols"][ob])
         np.testing.assert_array_equal(ra["direction"][oa], rb["direction"][ob])
-        np.testing.assert_allclose(
-            ra["factor"][oa], rb["factor"][ob], rtol=0.0, atol=0.0
-        )
+        np.testing.assert_allclose(ra["factor"][oa], rb["factor"][ob], rtol=0.0, atol=0.0)

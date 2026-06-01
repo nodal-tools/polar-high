@@ -68,9 +68,7 @@ def _matrix_arrays(m) -> tuple[list, list, list]:
     val = np.asarray(m.val, dtype=np.float64)
     row_idx = np.asarray(m.row_idx, dtype=np.int64)
     col_ptr = np.asarray(m.col_ptr, dtype=np.int64)
-    cols = np.repeat(
-        np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64)
-    )
+    cols = np.repeat(np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64))
     order = np.lexsort((row_idx, cols))
     return (
         list(val[order]),
@@ -146,9 +144,7 @@ def _node_balance_builder() -> Problem:
         }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(
-        ("p",), pl.DataFrame({"p": p_idx, "value": [2.0, 3.0]}), name="P_unit"
-    )
+    P_unit = Param(("p",), pl.DataFrame({"p": p_idx, "value": [2.0, 3.0]}), name="P_unit")
     dt_rows = list(itertools.product(d_idx, t_idx))
     P_step = Param(
         ("d", "t"),
@@ -242,9 +238,7 @@ def _coef_combining_builder() -> Problem:
         map_rows.append((g, g * 10))
         map_rows.append((g, g * 10 + 1))
         map_rows.append((g, g * 10 + 2))
-    map_g_to_h = pl.DataFrame(
-        {"g": [r[0] for r in map_rows], "h": [r[1] for r in map_rows]}
-    )
+    map_g_to_h = pl.DataFrame({"g": [r[0] for r in map_rows], "h": [r[1] for r in map_rows]})
     lhs = Sum(Where(v * P_g, map_g_to_h) * P_step, over=("g", "h"))
     over_frame = lhs.terms[0].frame.select(list(lhs.terms[0].dims)).unique()
     prob.add_cstr(
@@ -279,9 +273,7 @@ def _non_suffix_builder() -> Problem:
         }
     )
     v = prob.add_var("v", ("d", "t", "k"), var_index, lower=0.0, upper=1e6)
-    P_k = Param(
-        ("k",), pl.DataFrame({"k": k_idx, "value": [2.0, 3.0]}), name="P_k"
-    )
+    P_k = Param(("k",), pl.DataFrame({"k": k_idx, "value": [2.0, 3.0]}), name="P_k")
     dt_rows = list(itertools.product(d_idx, t_idx))
     P_step = Param(
         ("d", "t"),
@@ -322,9 +314,7 @@ def test_node_balance_shape_bit_identical():
         "block-COO-off (reduced term.lazy) path"
     )
     prof = _sum_block_profile(_node_balance_builder)
-    assert "kind=sum" in prof, (
-        "the Sum-block-COO arm must fire for the nodeBalance shape"
-    )
+    assert "kind=sum" in prof, "the Sum-block-COO arm must fire for the nodeBalance shape"
     assert "path=relabel" in prof, (
         "nodeBalance (reduce_dims ⊆ var.dims) must take the RELABEL "
         "fast-path, not the materialize-then-reduce combining path"
@@ -338,9 +328,7 @@ def test_coef_combining_within_tolerance():
     snap_off = _snapshot(_coef_combining_builder, disable=True)
     snap_on = _snapshot(_coef_combining_builder, disable=False)
     prof = _sum_block_profile(_coef_combining_builder)
-    assert "kind=sum" in prof, (
-        "the Sum-block-COO arm must fire for the coef-combining shape"
-    )
+    assert "kind=sum" in prof, "the Sum-block-COO arm must fire for the coef-combining shape"
     assert "path=combining" in prof, (
         "coef-combining (reduce dim h ∉ var.dims) must take the "
         "materialize-then-reduce path, not the relabel fast-path"
@@ -350,9 +338,7 @@ def test_coef_combining_within_tolerance():
     assert snap_on[2] == snap_off[2]
     # Coefficient vectors: same length, equal within rtol=1e-9.
     assert len(snap_on[0]) == len(snap_off[0])
-    np.testing.assert_allclose(
-        np.asarray(snap_on[0]), np.asarray(snap_off[0]), rtol=1e-9, atol=0.0
-    )
+    np.testing.assert_allclose(np.asarray(snap_on[0]), np.asarray(snap_off[0]), rtol=1e-9, atol=0.0)
 
 
 def test_sum_block_falls_back():
@@ -465,9 +451,7 @@ def _capture_sum_block_args(builder):
 
     def _spy(row_index_lf, axis_cols, meta, on, dense_spec, keep_dims=None, **kw):
         captured["args"] = (row_index_lf, axis_cols, meta, on, dense_spec, keep_dims)
-        return orig(
-            row_index_lf, axis_cols, meta, on, dense_spec, keep_dims, **kw
-        )
+        return orig(row_index_lf, axis_cols, meta, on, dense_spec, keep_dims, **kw)
 
     _clear_guard()
     os.environ["POLAR_HIGH_BLOCK_COO_MIN_DENSE"] = "1"
@@ -509,8 +493,8 @@ def test_builder_peak_memory_bounded_per_block():
 
     import polar_high.engine as eng
 
-    row_index_lf, axis_cols, meta, on, dense_spec, keep_dims = (
-        _capture_sum_block_args(_wide_relabel_builder)
+    row_index_lf, axis_cols, meta, on, dense_spec, keep_dims = _capture_sum_block_args(
+        _wide_relabel_builder
     )
 
     # reduce_dims ⊆ var.dims here — confirm we are measuring the relabel case.
@@ -530,9 +514,7 @@ def test_builder_peak_memory_bounded_per_block():
     # (*keep, col_id)), so the produced matrix is identical.
     combining_spec = dict(dense_spec)
     combining_spec["reduce_dims"] = list(dense_spec["reduce_dims"]) + ["__phantom"]
-    assert not set(combining_spec["reduce_dims"]).issubset(
-        set(meta.var_source.dims)
-    )
+    assert not set(combining_spec["reduce_dims"]).issubset(set(meta.var_source.dims))
     tracemalloc.start()
     out_combining = eng._build_sum_block_coo_plan(
         row_index_lf, axis_cols, meta, on, combining_spec, keep_dims
@@ -546,9 +528,7 @@ def test_builder_peak_memory_bounded_per_block():
     a = out_relabel.sort(key)
     b = out_combining.sort(key)
     assert a.height == b.height
-    np.testing.assert_allclose(
-        a["coef"].to_numpy(), b["coef"].to_numpy(), rtol=0.0, atol=0.0
-    )
+    np.testing.assert_allclose(a["coef"].to_numpy(), b["coef"].to_numpy(), rtol=0.0, atol=0.0)
 
     # The memory win: relabel peak is materially below materialize-then-
     # reduce.  Use a robust 0.75x margin (the avoided full-product sort +

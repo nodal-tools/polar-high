@@ -16,6 +16,7 @@ Three properties are pinned:
     into several batches yields byte-identical count/min/max (those
     combine exactly; the reducer's batch combine is order-free).
 """
+
 from __future__ import annotations
 
 import math
@@ -41,10 +42,7 @@ def _make_case(n: int, n_uniq: int, n_buckets: int, seed: int):
         coef[2] = np.inf  # masked out (non-finite)
         coef[3] = np.nan  # masked out (non-finite)
     rid = np.full(n, -1, dtype=np.int64)
-    bmap = {
-        c: (None if c % 37 == 0 else f"B{c % n_buckets}")
-        for c in range(n_uniq)
-    }
+    bmap = {c: (None if c % 37 == 0 else f"B{c % n_buckets}") for c in range(n_uniq)}
 
     def classify(c: int):
         return bmap.get(int(c))
@@ -108,9 +106,7 @@ def test_hist_vectorized_matches_reference():
             assert g_min == r_min, (n, k, g_min, r_min)
             assert g_max == r_max, (n, k, g_max, r_max)
             # log2-sum: FP-reassociation only.
-            assert math.isclose(
-                g_slog, r_slog, rel_tol=1e-9, abs_tol=0.0
-            ), (n, k, g_slog, r_slog)
+            assert math.isclose(g_slog, r_slog, rel_tol=1e-9, abs_tol=0.0), (n, k, g_slog, r_slog)
 
 
 def test_hist_all_none_classification_drops_everything():
@@ -184,6 +180,4 @@ def test_hist_batch_split_invariant():
         assert g_cnt == r_cnt, (k, g_cnt, r_cnt)
         assert g_min == r_min, (k, g_min, r_min)
         assert g_max == r_max, (k, g_max, r_max)
-        assert math.isclose(
-            g_slog, r_slog, rel_tol=1e-9, abs_tol=0.0
-        ), (k, g_slog, r_slog)
+        assert math.isclose(g_slog, r_slog, rel_tol=1e-9, abs_tol=0.0), (k, g_slog, r_slog)

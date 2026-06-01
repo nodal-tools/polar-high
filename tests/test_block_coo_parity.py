@@ -75,9 +75,7 @@ def _matrix_arrays(m) -> tuple[list, list, list]:
     val = np.asarray(m.val, dtype=np.float64)
     row_idx = np.asarray(m.row_idx, dtype=np.int64)
     col_ptr = np.asarray(m.col_ptr, dtype=np.int64)
-    cols = np.repeat(
-        np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64)
-    )
+    cols = np.repeat(np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64))
     order = np.lexsort((row_idx, cols))
     return (
         list(val[order]),
@@ -262,9 +260,7 @@ def test_block_coo_with_where_filter():
     """Same chain wrapped in a pure-filter ``Where(chain, t-frame)`` —
     block-COO must honour where_frames; parity ON vs OFF must hold."""
     builder = _build_vpp_problem(n_p=3, n_d=5, n_t=40, with_where=True)
-    assert _block_coo_fires(builder), (
-        "block-COO should fire on the pure-filter Where shape"
-    )
+    assert _block_coo_fires(builder), "block-COO should fire on the pure-filter Where shape"
     _assert_parity(builder)
 
 
@@ -274,9 +270,7 @@ def test_block_coo_below_threshold_falls_back():
     trivially."""
     # Var height = 2*2*5 = 20 < 100 → classifier returns None.
     builder = _build_vpp_problem(n_p=2, n_d=2, n_t=5)
-    assert not _block_coo_fires(builder), (
-        "block-COO must NOT fire below the dense-card threshold"
-    )
+    assert not _block_coo_fires(builder), "block-COO must NOT fire below the dense-card threshold"
     _assert_parity(builder)
 
 
@@ -318,9 +312,7 @@ def test_block_coo_param_introduces_on_dim_falls_back():
         over = _vdt_over(ps, ds, ts)
         # Var spans (p, d) only — NOT t.  Sorted by (p, d).
         pd_cells = list(itertools.product(ps, ds))
-        v_over = pl.DataFrame(
-            {"p": [c[0] for c in pd_cells], "d": [c[1] for c in pd_cells]}
-        )
+        v_over = pl.DataFrame({"p": [c[0] for c in pd_cells], "d": [c[1] for c in pd_cells]})
         v = p.add_var("v", ("p", "d"), v_over, lower=0.0, upper=1e6)
         Pa = _dt_param(ds, ts, "Pa", 0.1, 0.9)
         p.add_cstr(
@@ -479,8 +471,7 @@ def test_block_coo_low_dim_param_now_fires():
         return p
 
     assert _block_coo_fires(builder), (
-        "block-COO must fire on the broadcast shape under the dense_axes "
-        "contract"
+        "block-COO must fire on the broadcast shape under the dense_axes contract"
     )
     _assert_parity(builder)
 
@@ -512,9 +503,7 @@ def test_block_coo_no_dense_axes_declared_does_not_fire():
         )
         return p
 
-    assert not _block_coo_fires(builder), (
-        "block-COO must NOT fire when no dense_axes are declared"
-    )
+    assert not _block_coo_fires(builder), "block-COO must NOT fire when no dense_axes are declared"
     _assert_parity(builder)
 
 
@@ -529,9 +518,7 @@ def test_block_coo_var_without_dense_suffix_falls_back():
         p = Problem(dense_axes=("d", "t"))
         ps, ds = list(range(n_p)), list(range(n_d))
         pd_cells = list(itertools.product(ps, ds))
-        over = pl.DataFrame(
-            {"p": [c[0] for c in pd_cells], "d": [c[1] for c in pd_cells]}
-        )
+        over = pl.DataFrame({"p": [c[0] for c in pd_cells], "d": [c[1] for c in pd_cells]})
         v = p.add_var("v", ("p", "d"), over, lower=0.0, upper=1e6)
         Pa = Param(
             ("p", "d"),
@@ -554,8 +541,7 @@ def test_block_coo_var_without_dense_suffix_falls_back():
         return p
 
     assert not _block_coo_fires(builder), (
-        "block-COO must fall back when the Var does not end in the "
-        "declared dense suffix"
+        "block-COO must fall back when the Var does not end in the declared dense suffix"
     )
     _assert_parity(builder)
 
@@ -574,9 +560,7 @@ def test_block_coo_verification_raises_on_misordered_input():
     perm = rng.permutation(over.height)
     over_shuffled = over[perm.tolist()]
     assert not (
-        over_shuffled.select(pl.struct(["p", "d", "t"]).alias("k"))
-        .to_series()
-        .is_sorted()
+        over_shuffled.select(pl.struct(["p", "d", "t"]).alias("k")).to_series().is_sorted()
     ), "shuffled over frame must NOT be sorted (test precondition)"
 
     def builder() -> Problem:
@@ -619,9 +603,7 @@ def test_block_coo_sparse_param_no_crash_and_parity():
         Pa = _dt_param(ds, ts, "Pa", 0.1, 0.9, keep=lambda c: (c[0] + c[1]) % 2 == 0)
         assert 0 < Pa.frame.height < len(dt_cells), "Pa must be sparse"
         # Pb: full (d,t) axis but sparse on a DIFFERENT subset.
-        Pb = _dt_param(
-            ds, ts, "Pb", 2.0, 5.0, keep=lambda c: not (c[0] == 0 and c[1] < 7)
-        )
+        Pb = _dt_param(ds, ts, "Pb", 2.0, 5.0, keep=lambda c: not (c[0] == 0 and c[1] < 7))
         assert 0 < Pb.frame.height < len(dt_cells), "Pb must be sparse"
         chain = v * Pa * Pb
         p.add_cstr(
@@ -633,9 +615,7 @@ def test_block_coo_sparse_param_no_crash_and_parity():
         )
         return p
 
-    assert _block_coo_fires(builder), (
-        "block-COO should fire on the sparse dense-axis chain"
-    )
+    assert _block_coo_fires(builder), "block-COO should fire on the sparse dense-axis chain"
     _assert_parity(builder)
 
 

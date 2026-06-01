@@ -174,16 +174,27 @@ def _sum_relabel():
     rows = list(itertools.product(ps, ss, ds, ts))
     prob = Problem()
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 3.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 3.0]}), name="P_unit")
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
+    )
     sum_expr = Sum(v * P_unit * P_step, over=("p", "s"))
     assert sum_expr.terms[0].sum_block_meta is not None
     return sum_expr, v, P_unit, P_step
@@ -203,9 +214,7 @@ def test_neg_sum_carries_meta():
     assert meta.keep == base.keep
     assert meta.var_source is v
     # Param chain unchanged by a bare negation.
-    assert [p for (p, _d) in meta.param_sources] == [
-        p for (p, _d) in base.param_sources
-    ]
+    assert [p for (p, _d) in meta.param_sources] == [p for (p, _d) in base.param_sources]
 
 
 def test_scalar_mul_sum_carries_meta():
@@ -258,9 +267,17 @@ def test_param_mul_after_sum_existing_dim_carries():
 
     dt = list(itertools.product([10, 11], [100, 101, 102]))
     # P_extra keyed on (d, t) — subset of keep, disjoint from reduce_dims.
-    P_extra = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(1.0, 2.0, len(dt))}), name="P_extra")
+    P_extra = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(1.0, 2.0, len(dt)),
+            }
+        ),
+        name="P_extra",
+    )
 
     out = (sum_expr * P_extra).terms[0]
     meta = out.sum_block_meta
@@ -278,9 +295,17 @@ def test_param_div_after_sum_existing_dim_carries_negated_dir():
     sum_expr, _v, _P_unit, _P_step = _sum_relabel()
     base = sum_expr.terms[0].sum_block_meta
     dt = list(itertools.product([10, 11], [100, 101, 102]))
-    P_extra = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(1.0, 2.0, len(dt))}), name="P_extra")
+    P_extra = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(1.0, 2.0, len(dt)),
+            }
+        ),
+        name="P_extra",
+    )
 
     out = (sum_expr / P_extra).terms[0]
     meta = out.sum_block_meta
@@ -294,8 +319,7 @@ def test_param_mul_after_sum_new_dim_declines():
     DECLINE: ``sum_block_meta is None`` AND a loud marker is emitted."""
     sum_expr, _v, _P_unit, _P_step = _sum_relabel()
     # P_new keyed on a brand-new dim 'z' (absent from keep=(d,t)).
-    P_new = Param(("z",), pl.DataFrame({"z": [0, 1], "value": [4.0, 5.0]}),
-                  name="P_new")
+    P_new = Param(("z",), pl.DataFrame({"z": [0, 1], "value": [4.0, 5.0]}), name="P_new")
 
     with pytest.warns(UserWarning, match=r"sum-block-meta DECLINE"):
         out = (sum_expr * P_new).terms[0]
@@ -307,8 +331,7 @@ def test_param_mul_after_sum_reintroduces_summed_dim_declines():
     (``∩ reduce_dims``) must DECLINE."""
     sum_expr, _v, _P_unit, _P_step = _sum_relabel()
     # 'p' is in reduce_dims=(p,s) — re-introducing it must decline.
-    P_p = Param(("p",), pl.DataFrame({"p": [0, 1], "value": [7.0, 9.0]}),
-                name="P_p")
+    P_p = Param(("p",), pl.DataFrame({"p": [0, 1], "value": [7.0, 9.0]}), name="P_p")
     with pytest.warns(UserWarning, match=r"sum-block-meta DECLINE"):
         out = (sum_expr * P_p).terms[0]
     assert out.sum_block_meta is None
@@ -361,14 +384,21 @@ def test_double_sum_collapse_all_forwards_meta():
     rows = list(itertools.product(ps, ds, ts))
     prob = Problem()
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows]}
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows], "t": [r[2] for r in rows]}
     )
     v = prob.add_var("v", ("p", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows], "value": np.linspace(0.1, 1.0, len(rows))}),
-        name="P")
+    P = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [r[0] for r in rows],
+                "d": [r[1] for r in rows],
+                "t": [r[2] for r in rows],
+                "value": np.linspace(0.1, 1.0, len(rows)),
+            }
+        ),
+        name="P",
+    )
     # Inner Sum collapses EVERY open dim -> scalar term (dims == ()).
     inner = Sum(v * P, over=("p", "d", "t"))
     assert inner.terms[0].dims == ()
@@ -385,9 +415,7 @@ def _matrix_arrays(m):
     val = np.asarray(m.val, dtype=np.float64)
     row_idx = np.asarray(m.row_idx, dtype=np.int64)
     col_ptr = np.asarray(m.col_ptr, dtype=np.int64)
-    cols = np.repeat(
-        np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64)
-    )
+    cols = np.repeat(np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64))
     order = np.lexsort((row_idx, cols))
     return (
         list(val[order]),
@@ -414,9 +442,7 @@ def _build_node_balance_problem() -> Problem:
         }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(
-        ("p",), pl.DataFrame({"p": p_idx, "value": [2.0, 3.0]}), name="P_unit"
-    )
+    P_unit = Param(("p",), pl.DataFrame({"p": p_idx, "value": [2.0, 3.0]}), name="P_unit")
     dt_rows = list(itertools.product(d_idx, t_idx))
     P_step = Param(
         ("d", "t"),
@@ -465,9 +491,7 @@ def test_recipe_is_byte_identical_inert():
             t.sum_block_meta = None
     # Confirm we actually had a recipe to strip in the "with" run.
     had_recipe = any(
-        t.sum_block_meta is not None
-        for _n, proto, _o in prob_with._cstrs
-        for t in proto.expr.terms
+        t.sum_block_meta is not None for _n, proto, _o in prob_with._cstrs for t in proto.expr.terms
     )
     assert had_recipe, "test fixture must produce a block-eligible Sum recipe"
     snap_without = _matrix_arrays(prob_without._build_canonical_matrix())

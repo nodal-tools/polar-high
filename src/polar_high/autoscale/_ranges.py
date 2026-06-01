@@ -322,19 +322,21 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     if _profile:
         try:
             import psutil as _ps
+
             _proc = _ps.Process()
             _t0 = _time.monotonic()
 
             def _emit(phase: str, **extras) -> None:
-                rss = _proc.memory_info().rss / (1024 ** 3)
+                rss = _proc.memory_info().rss / (1024**3)
                 wall = _time.monotonic() - _t0
                 extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
                 print(
                     f"[ranges-stream profile]\tphase={phase}\trss_gb={rss:.2f}"
-                    f"\twall_s={wall:.2f}"
-                    + (f"\t{extras_str}" if extras_str else ""),
-                    file=_sys.stderr, flush=True,
+                    f"\twall_s={wall:.2f}" + (f"\t{extras_str}" if extras_str else ""),
+                    file=_sys.stderr,
+                    flush=True,
                 )
+
             _emit("enter", n_cstrs=len(problem._cstrs))
         except ImportError:
             _profile = False
@@ -374,10 +376,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         Numpy min/max on the (potentially ~10⁷-row) collected column
         is O(rows), with the column itself occupying ~8 bytes/row.
         """
-        plan = (
-            lazy_frame
-            .select(_pl.col(col).abs().alias("__abs"))
-            .filter(_pl.col("__abs").is_finite() & (_pl.col("__abs") > 0))
+        plan = lazy_frame.select(_pl.col(col).abs().alias("__abs")).filter(
+            _pl.col("__abs").is_finite() & (_pl.col("__abs") > 0)
         )
         try:
             df = plan.collect(engine="streaming")
@@ -460,17 +460,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         """
         # --- Eligibility gates.  Anything outside the bit-identical
         # positional regime declines.
-        if (
-            not dense_axes
-            or rhs_param.dims == ()
-            or _block_coo_disabled()
-        ):
+        if not dense_axes or rhs_param.dims == () or _block_coo_disabled():
             return None
-        sources = (
-            rhs_param._sources
-            if isinstance(rhs_param._sources, list)
-            else None
-        )
+        sources = rhs_param._sources if isinstance(rhs_param._sources, list) else None
         if not sources:
             return None
         dense_dims = list(dense_axes)
@@ -478,7 +470,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # (the dense suffix contract); else positional slicing is invalid.
         if len(dense_dims) > len(axis_cols_l):
             return None
-        if tuple(axis_cols_l[-len(dense_dims):]) != tuple(dense_dims):
+        if tuple(axis_cols_l[-len(dense_dims) :]) != tuple(dense_dims):
             return None
         non_dense_dims = [d for d in axis_cols_l if d not in set(dense_dims)]
         # Every atomic's dims must be a subset of the over dims (so it
@@ -491,9 +483,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
         # --- Verify the dense-sort contract on the over grid (loud error
         # on violation — same guard block-COO's LHS seed runs).
-        _verify_dense_sorted(
-            over_grid, non_dense_dims, dense_dims, cname
-        )
+        _verify_dense_sorted(over_grid, non_dense_dims, dense_dims, cname)
 
         n = int(over_grid.height)
         if n == 0:
@@ -504,14 +494,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # ``n == n_lead * n_dense``.  No deferred Where can carve an RHS
         # chain (Params carry no where_frames), so the sort + this count is
         # the full sufficient test — same reasoning as the LHS builder.
-        n_dense = (
-            over_grid.select(dense_dims).n_unique() if dense_dims else 1
-        )
-        n_lead = (
-            over_grid.select(non_dense_dims).n_unique()
-            if non_dense_dims
-            else 1
-        )
+        n_dense = over_grid.select(dense_dims).n_unique() if dense_dims else 1
+        n_lead = over_grid.select(non_dense_dims).n_unique() if non_dense_dims else 1
         if n != n_lead * n_dense:
             return None
 
@@ -524,9 +508,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # order — identical to the LHS builder's ``lead_table``.
         lead_table = None
         if non_dense_dims:
-            lead_table = over_grid.select(non_dense_dims).unique(
-                maintain_order=True
-            )
+            lead_table = over_grid.select(non_dense_dims).unique(maintain_order=True)
             if lead_table.height != n_lead:
                 return None
 
@@ -553,17 +535,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             if has_lead and not has_dense:
                 # lead-only: one value per leading block; repeat over dense.
                 lt_a, at_a = _align(lead_table.lazy(), atomic.lazy, shared)
-                aligned = lt_a.join(
-                    at_a, on=shared, how="left", maintain_order="left"
-                ).collect()
-                if (
-                    aligned.height != n_lead
-                    or aligned["value"].null_count() > 0
-                ):
+                aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+                if aligned.height != n_lead or aligned["value"].null_count() > 0:
                     return None
-                block_vals = (
-                    aligned["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
                 repeated = np.repeat(block_vals, n_dense)
                 if direction >= 0:
                     coef = coef * repeated
@@ -575,11 +550,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 atomic_df = atomic.lazy.collect().sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return None
-                dense_vals = (
-                    atomic_df["value"]
-                    .to_numpy()
-                    .astype(np.float64, copy=False)
-                )
+                dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
                 tiled = np.tile(dense_vals, n_lead)
                 if direction >= 0:
                     coef = coef * tiled
@@ -590,14 +561,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # lead-subset + dense: positional maintain_order left-join
                 # on the full shared dims (no re-sort), read aligned values.
                 grid_a, at_a = _align(over_grid.lazy(), atomic.lazy, shared)
-                aligned = grid_a.join(
-                    at_a, on=shared, how="left", maintain_order="left"
-                ).collect()
+                aligned = grid_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
                 if aligned.height != n or aligned["value"].null_count() > 0:
                     return None
-                vals = (
-                    aligned["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
                 if direction >= 0:
                     coef = coef * vals
                 else:
@@ -677,7 +644,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         dense_dims = list(dense_axes)
         if len(dense_dims) > len(var_dims):
             return None
-        if tuple(var_dims[-len(dense_dims):]) != tuple(dense_dims):
+        if tuple(var_dims[-len(dense_dims) :]) != tuple(dense_dims):
             return None
         non_dense_dims = [d for d in var_dims if d not in set(dense_dims)]
         # Every Param's dims must be a subset of the Var's dims (the seed
@@ -693,7 +660,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # --- Verify the dense-sort contract on the Var grid (loud error on
         # violation — same guard block-COO's seed runs).
         _verify_dense_sorted(
-            var.frame, non_dense_dims, dense_dims,
+            var.frame,
+            non_dense_dims,
+            dense_dims,
             getattr(var, "name", None),
         )
 
@@ -707,9 +676,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # ``n == n_lead * n_dense`` on the pre-sorted seed (no where_frames
         # to carve it — guarded above).
         n_dense = seed.select(dense_dims).n_unique() if dense_dims else 1
-        n_lead = (
-            seed.select(non_dense_dims).n_unique() if non_dense_dims else 1
-        )
+        n_lead = seed.select(non_dense_dims).n_unique() if non_dense_dims else 1
         if n != n_lead * n_dense:
             return None
 
@@ -719,9 +686,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
         lead_table = None
         if non_dense_dims:
-            lead_table = seed.select(non_dense_dims).unique(
-                maintain_order=True
-            )
+            lead_table = seed.select(non_dense_dims).unique(maintain_order=True)
             if lead_table.height != n_lead:
                 return None
 
@@ -735,17 +700,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
             if has_lead and not has_dense:
                 lt_a, at_a = _align(lead_table.lazy(), atomic.lazy, shared)
-                aligned = lt_a.join(
-                    at_a, on=shared, how="left", maintain_order="left"
-                ).collect()
-                if (
-                    aligned.height != n_lead
-                    or aligned["value"].null_count() > 0
-                ):
+                aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+                if aligned.height != n_lead or aligned["value"].null_count() > 0:
                     return None
-                block_vals = (
-                    aligned["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
                 repeated = np.repeat(block_vals, n_dense)
                 if direction >= 0:
                     coef = coef * repeated
@@ -756,11 +714,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 atomic_df = atomic.lazy.collect().sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return None
-                dense_vals = (
-                    atomic_df["value"]
-                    .to_numpy()
-                    .astype(np.float64, copy=False)
-                )
+                dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
                 tiled = np.tile(dense_vals, n_lead)
                 if direction >= 0:
                     coef = coef * tiled
@@ -769,14 +723,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
             elif has_dense:
                 seed_a, at_a = _align(seed.lazy(), atomic.lazy, shared)
-                aligned = seed_a.join(
-                    at_a, on=shared, how="left", maintain_order="left"
-                ).collect()
+                aligned = seed_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
                 if aligned.height != n or aligned["value"].null_count() > 0:
                     return None
-                vals = (
-                    aligned["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
                 if direction >= 0:
                     coef = coef * vals
                 else:
@@ -894,7 +844,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         next_row += row_count
         if _profile:
             _emit(
-                "family_start", family=cname,
+                "family_start",
+                family=cname,
                 row_count=row_count,
                 term_count=len(proto.expr.terms),
             )
@@ -963,9 +914,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # ranges-pre's wide RHS families to the materialising collect /
                 # size-blind skip — the gap this un-gate closes.  No RHS shape
                 # remains un-boundable, so there is NO cap-skip here.
-                rhs_coef = _rhs_chain_bounded_coef(
-                    over, list(over.columns), rhs, cname
-                )
+                rhs_coef = _rhs_chain_bounded_coef(over, list(over.columns), rhs, cname)
                 if rhs_coef is not None:
                     if rhs_coef.size > 0:
                         if _l2_rf is not None:
@@ -981,7 +930,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                                 rhs_hi = hi
                     if _profile:
                         _emit(
-                            "rhs_bounded", family=cname,
+                            "rhs_bounded",
+                            family=cname,
                             rhs_bound="1",
                         )
                 else:
@@ -1014,7 +964,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             rhs_hi = hi
                     if _profile:
                         _emit(
-                            "rhs_walk", family=cname,
+                            "rhs_walk",
+                            family=cname,
                             rhs_walk="1",
                         )
             else:
@@ -1114,9 +1065,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 and not _block_coo_disabled()
             ):
                 blk_on = [d for d in term_dims if d in axis_cols]
-                _blk_spec = _block_coo_classify(
-                    term, axis_cols, blk_on, dense_axes
-                )
+                _blk_spec = _block_coo_classify(term, axis_cols, blk_on, dense_axes)
                 # A deferred map-effect Where introduces extras dims the
                 # block-COO seed (Var dims only) cannot carry; decline
                 # (mirrors the canonical builder's explicit guard).
@@ -1157,9 +1106,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     # branch is bit-EQUIVALENT, which would perturb the
                     # reported magnitude — so decline unless the spec
                     # routes to relabel (``reduce_dims ⊆ var.dims``).
-                    _sum_spec = _sum_block_coo_classify(
-                        term, axis_cols, blk_on, dense_axes
-                    )
+                    _sum_spec = _sum_block_coo_classify(term, axis_cols, blk_on, dense_axes)
                     if _sum_spec is not None:
                         _sm = term.sum_block_meta
                         _reduce_dims = set(_sum_spec["reduce_dims"])
@@ -1194,7 +1141,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     _update_matrix(lo, hi)
                     if _profile:
                         _emit(
-                            "term_done", family=cname, term_idx=ti,
+                            "term_done",
+                            family=cname,
+                            term_idx=ti,
                             has_dims=str(bool(term_dims)),
                             block_coo="1",
                         )
@@ -1274,7 +1223,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 _update_matrix(lo, hi)
                 if _profile:
                     _emit(
-                        "term_done", family=cname, term_idx=ti,
+                        "term_done",
+                        family=cname,
+                        term_idx=ti,
                         has_dims=str(bool(term_dims)),
                         coef_walk="1",
                     )
@@ -1305,16 +1256,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # materialising path.  Gating this on ``_l2_rf is not None`` (the
             # production-only prototype) left a collapsed-Sum term in ranges-
             # pre to fall to the size-blind cap; the un-gate removes that gap.
-            if (
-                not _routable
-                and term_dims
-                and row_index_lf_rid is not None
-            ):
+            if not _routable and term_dims and row_index_lf_rid is not None:
                 on = [d for d in term_dims if d in axis_cols]
                 rl_a, tl_a = _align(row_index_lf_rid, term_lazy, on)
-                joined = rl_a.join(tl_a, on=on, how="inner").select(
-                    "_rid", "col_id", "coef"
-                )
+                joined = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef")
                 df = _collect_streaming(joined)
                 if df.height == 0:
                     lo, hi = None, None
@@ -1330,7 +1275,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 _update_matrix(lo, hi)
                 if _profile:
                     _emit(
-                        "term_done", family=cname, term_idx=ti,
+                        "term_done",
+                        family=cname,
+                        term_idx=ti,
                         has_dims=str(bool(term_dims)),
                         non_routable_collect="1",
                     )
@@ -1355,9 +1302,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                         if _l2_rf is None or row_count == 0:
                             lo, hi = _reduce_abs(vals)
                         else:
-                            rf_slice = np.abs(
-                                _l2_rf[base_row : base_row + row_count]
-                            )
+                            rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
                             # Per-row broadcast: row_count × len(cids).
                             tiled_vals = np.outer(rf_slice, vals).ravel()
                             lo, hi = _reduce_abs(tiled_vals)
@@ -1382,9 +1327,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 if _l2_cf is None:
                     lo, hi = _agg(pruned, "coef")
                 else:
-                    df = _collect_streaming(
-                        pruned.select("col_id", "coef")
-                    )
+                    df = _collect_streaming(pruned.select("col_id", "coef"))
                     if df.height == 0:
                         lo, hi = None, None
                     else:
@@ -1395,7 +1338,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             _update_matrix(lo, hi)
             if _profile:
                 _emit(
-                    "term_done", family=cname, term_idx=ti,
+                    "term_done",
+                    family=cname,
+                    term_idx=ti,
                     has_dims=str(bool(term_dims)),
                 )
 
@@ -1419,23 +1364,26 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     import os as _os
     import sys as _sys
     import time as _time
+
     _profile = _os.environ.get("POLAR_HIGH_RANGES_PROFILE") == "1"
     if _profile:
         try:
             import psutil as _ps
+
             _proc = _ps.Process()
             _t0 = _time.monotonic()
 
             def _emit(phase: str, **extras) -> None:
-                rss = _proc.memory_info().rss / (1024 ** 3)
+                rss = _proc.memory_info().rss / (1024**3)
                 wall = _time.monotonic() - _t0
                 extras_str = "\t".join(f"{k}={v}" for k, v in extras.items())
                 print(
                     f"[ranges profile]\tphase={phase}\trss_gb={rss:.2f}"
-                    f"\twall_s={wall:.2f}"
-                    + (f"\t{extras_str}" if extras_str else ""),
-                    file=_sys.stderr, flush=True,
+                    f"\twall_s={wall:.2f}" + (f"\t{extras_str}" if extras_str else ""),
+                    file=_sys.stderr,
+                    flush=True,
                 )
+
             _emit("enter")
         except ImportError:
             _profile = False
@@ -1482,9 +1430,7 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         # through Sum(over=None) which already bakes, so this is a
         # defensive no-op in production but keeps the invariant uniform.
         _t_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
-        _t_lazy, _ = _apply_where_map_frames(
-            _t_lazy, t.dims, t.where_map_frames
-        )
+        _t_lazy, _ = _apply_where_map_frames(_t_lazy, t.dims, t.where_map_frames)
         if isinstance(_t_lazy, pl.LazyFrame):
             try:
                 f = _t_lazy.collect(engine="streaming")

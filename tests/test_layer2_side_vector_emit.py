@@ -46,9 +46,9 @@ def _parse_mps(
     path: str,
 ) -> tuple[
     dict[tuple[str, str], float],  # matrix[(row_name, col_name)] = coef
-    dict[str, float],               # rhs[row_name]                 = rhs
-    dict[str, float],               # obj[col_name]                 = coef
-    list[tuple[str, ...]],          # bound lines (verbatim tokens)
+    dict[str, float],  # rhs[row_name]                 = rhs
+    dict[str, float],  # obj[col_name]                 = coef
+    list[tuple[str, ...]],  # bound lines (verbatim tokens)
 ]:
     matrix: dict[tuple[str, str], float] = {}
     rhs: dict[str, float] = {}
@@ -65,8 +65,14 @@ def _parse_mps(
             if line[:1] not in (" ", "\t"):
                 head = stripped.split()[0]
                 if head in (
-                    "NAME", "OBJSENSE", "ROWS", "COLUMNS", "RHS",
-                    "RANGES", "BOUNDS", "ENDATA",
+                    "NAME",
+                    "OBJSENSE",
+                    "ROWS",
+                    "COLUMNS",
+                    "RHS",
+                    "RANGES",
+                    "BOUNDS",
+                    "ENDATA",
                 ):
                     section = head
                     continue
@@ -252,13 +258,9 @@ def test_write_mps_with_layer2_side_vectors(tmp_path) -> None:
     # so any non-trivial discrepancy must be a real bug.
     # ------------------------------------------------------------------
     # col_factor_math[j]: cycles through 0.5, 1.0, 2.0 (per j)
-    col_factor_math = np.array(
-        [2.0 ** ((j % 3) - 1) for j in range(n_cols)], dtype=np.float64
-    )
+    col_factor_math = np.array([2.0 ** ((j % 3) - 1) for j in range(n_cols)], dtype=np.float64)
     # row_factor[i]: cycles 0.25, 0.5, 1.0, 2.0, 4.0 (per i)
-    row_factor = np.array(
-        [2.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
+    row_factor = np.array([2.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
 
     # Convention: consumers do coef *= _layer2_col_factor[col_id], but
     # the math is coef /= col_factor_math[col_id], so the side vector
@@ -306,9 +308,7 @@ def test_write_mps_with_layer2_side_vectors(tmp_path) -> None:
         c = name_to_col[cn]
         expected = v_raw * row_factor[r] / col_factor_math[c]
         v_scl = mat_scl[(rn, cn)]
-        assert v_scl == expected or math.isclose(
-            v_scl, expected, rel_tol=1e-12, abs_tol=0.0
-        ), (
+        assert v_scl == expected or math.isclose(v_scl, expected, rel_tol=1e-12, abs_tol=0.0), (
             f"matrix entry ({rn!r}, {cn!r}): expected "
             f"{v_raw} * rf[{r}]={row_factor[r]} / cf[{c}]={col_factor_math[c]} "
             f"= {expected}, got {v_scl}"
@@ -326,9 +326,7 @@ def test_write_mps_with_layer2_side_vectors(tmp_path) -> None:
         r = name_to_row[rn]
         expected = v_raw * row_factor[r]
         v_scl = rhs_scl[rn]
-        assert v_scl == expected or math.isclose(
-            v_scl, expected, rel_tol=1e-12, abs_tol=0.0
-        ), (
+        assert v_scl == expected or math.isclose(v_scl, expected, rel_tol=1e-12, abs_tol=0.0), (
             f"rhs entry ({rn!r}): expected {v_raw} * rf[{r}]={row_factor[r]} "
             f"= {expected}, got {v_scl}"
         )
@@ -346,9 +344,7 @@ def test_write_mps_with_layer2_side_vectors(tmp_path) -> None:
         c = name_to_col[cn]
         expected = v_raw / col_factor_math[c]
         v_scl = obj_scl[cn]
-        assert v_scl == expected or math.isclose(
-            v_scl, expected, rel_tol=1e-12, abs_tol=0.0
-        ), (
+        assert v_scl == expected or math.isclose(v_scl, expected, rel_tol=1e-12, abs_tol=0.0), (
             f"obj entry ({cn!r}): expected {v_raw} / cf[{c}]={col_factor_math[c]} "
             f"= {expected}, got {v_scl}"
         )

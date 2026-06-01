@@ -148,11 +148,7 @@ def _build_warm_problem(*, eff: Param, with_where_t: bool = False) -> Problem:
         chain = Where(chain, pl.DataFrame({"t": sel_t}))
 
     rhs = _pdt_param(_PS, _DS, _TS, "rhs", 1.0, 20.0)
-    rhs_over = (
-        over.filter(pl.col("t").is_in(_TS[: max(1, _N_T // 2)]))
-        if with_where_t
-        else over
-    )
+    rhs_over = over.filter(pl.col("t").is_in(_TS[: max(1, _N_T // 2)])) if with_where_t else over
     p.add_cstr(
         "c",
         over=rhs_over,
@@ -241,8 +237,7 @@ def test_warm_block_coo_fires_positional():
     same path on this dense-complete grid (positional)."""
     out = _warm_profile(with_where_t=False)
     assert out.count("phase=block_coo_term\tphase_site=warm") == 1, (
-        "block-COO must fire EXACTLY once on the WARM path (Site 3) for the "
-        "dense-complete chain"
+        "block-COO must fire EXACTLY once on the WARM path (Site 3) for the dense-complete chain"
     )
     assert set(re.findall(r"\bpath=(\w+)", out)) == {"positional"}, (
         "dense-complete grid must take the positional path on the warm build"
@@ -269,8 +264,7 @@ def test_warm_block_coo_falls_back_when_sparse():
     builder, so the tracking re-join is unaffected)."""
     out = _warm_profile(with_where_t=True)
     assert out.count("phase=block_coo_term\tphase_site=warm") == 1, (
-        "block-COO must still fire EXACTLY once (then fall back) on the "
-        "sparse warm case (Site 3)"
+        "block-COO must still fire EXACTLY once (then fall back) on the sparse warm case (Site 3)"
     )
     assert set(re.findall(r"\bpath=(\w+)", out)) == {"joined"}, (
         "a pure-filter Where must force the joined fallback on the warm build"

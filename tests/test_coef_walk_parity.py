@@ -60,15 +60,11 @@ def _scale_vals(
     return vals
 
 
-def _ref_minmax_constraint(
-    term, over: pl.DataFrame, scale
-) -> tuple[float | None, float | None]:
+def _ref_minmax_constraint(term, over: pl.DataFrame, scale) -> tuple[float | None, float | None]:
     """Reference: collect the term's merged lazy plan whole, attach _rid by
     inner-joining over, apply scale, reduce.  This is the whole-collect
     streaming readout the bounded path must match byte-for-byte."""
-    over_rid = over.with_columns(
-        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-    )
+    over_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
     term_lazy = term.frame.lazy()
     on = [d for d in term.dims if d in over.columns]
     df = (
@@ -85,24 +81,15 @@ def _ref_minmax_constraint(
     return _reduce_abs(_scale_vals(rids, cids, coef, scale))
 
 
-def _ref_minmax_rhs_chain(
-    rhs, over: pl.DataFrame, scale
-) -> tuple[float | None, float | None]:
+def _ref_minmax_rhs_chain(rhs, over: pl.DataFrame, scale) -> tuple[float | None, float | None]:
     """Reference for a Var-LESS RHS Param chain: collect the merged
     ``over ⋈ rhs.lazy`` product whole (the materialising path the bounded
     walk replaces), attach ``_rid``, apply the row-factor scale (NO col
     factor on the RHS), reduce.  Byte-identity target for the param-only
     walk mode."""
-    over_rid = over.with_columns(
-        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-    )
+    over_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
     on = list(rhs.dims)
-    j = (
-        over_rid.lazy()
-        .join(rhs.lazy, on=on, how="left")
-        .select("_rid", "value")
-        .collect()
-    )
+    j = over_rid.lazy().join(rhs.lazy, on=on, how="left").select("_rid", "value").collect()
     if j.height == 0:
         return None, None
     rids = j["_rid"].to_numpy().astype(np.int64)
@@ -147,9 +134,7 @@ def _ref_histogram_column(term, scale, classify):
 def _ref_histogram_constraint(term, over, scale, classify):
     """Whole-collect log2 histogram (sum_log2, count, min, max) per bucket
     key, over the full chain — the reference for Log2HistogramReducer."""
-    over_rid = over.with_columns(
-        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-    )
+    over_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
     on = [d for d in term.dims if d in over.columns]
     df = (
         over_rid.lazy()
@@ -179,12 +164,8 @@ def _ref_histogram_constraint(term, over, scale, classify):
 
 
 def _side_vectors(n_rows: int, n_cols: int):
-    rf = np.array(
-        [10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
-    cf = np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    rf = np.array([10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
+    cf = np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
     return rf, cf
 
 
@@ -201,8 +182,7 @@ def test_bare_var_lhs():
     cells = list(itertools.product(ds, ts))
     over = pl.DataFrame({"d": [c[0] for c in cells], "t": [c[1] for c in cells]})
     v = prob.add_var("v", ("d", "t"), over, lower=0.0, upper=1e6)
-    prob.add_cstr("c", over=over, sense="<=", lhs_terms={"l": v * 3.5},
-                  rhs_terms={"r": 0.0})
+    prob.add_cstr("c", over=over, sense="<=", lhs_terms={"l": v * 3.5}, rhs_terms={"r": 0.0})
     term = prob._cstrs[0][1].expr.terms[0]
     rf, cf = _side_vectors(over.height, prob._next_col)
     scale = (rf, 0, cf)
@@ -210,8 +190,12 @@ def test_bare_var_lhs():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -225,19 +209,33 @@ def _build_vpp():
     ps, ds, ts = [0, 1, 2], [10, 11, 12, 13], [100, 101, 102, 103, 104]
     cells = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
     dt = list(itertools.product(ds, ts))
-    Pa = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(1e-3, 1e2, len(dt))}), name="Pa")
-    Pb = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(2.0, 5e3, len(dt))}), name="Pb")
-    prob.add_cstr("vpp", over=over, sense="<=",
-                  lhs_terms={"l": v * Pa * Pb}, rhs_terms={"r": 0.0})
+    Pa = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(1e-3, 1e2, len(dt)),
+            }
+        ),
+        name="Pa",
+    )
+    Pb = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(2.0, 5e3, len(dt)),
+            }
+        ),
+        name="Pb",
+    )
+    prob.add_cstr("vpp", over=over, sense="<=", lhs_terms={"l": v * Pa * Pb}, rhs_terms={"r": 0.0})
     return prob, over
 
 
@@ -250,8 +248,12 @@ def test_vpp_dense_lhs():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -270,8 +272,12 @@ def test_vpp_histogram_single_batch_exact():
 
     ref = _ref_histogram_constraint(term, over, scale, classify)
     (got,) = bounded_coefficient_walk(
-        over, recipe, scale, [Log2HistogramReducer(scale, classify)],
-        batch_rows=over.height, dense_axes=("d", "t"),
+        over,
+        recipe,
+        scale,
+        [Log2HistogramReducer(scale, classify)],
+        batch_rows=over.height,
+        dense_axes=("d", "t"),
     )
     assert set(got) == set(ref)
     for k in ref:
@@ -297,8 +303,12 @@ def test_vpp_histogram_batched_fp_tol():
     ref = _ref_histogram_constraint(term, over, scale, classify)
     for bs in (1, 2, 5):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [Log2HistogramReducer(scale, classify)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [Log2HistogramReducer(scale, classify)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert set(got) == set(ref)
         for k in ref:
@@ -318,22 +328,30 @@ def _build_sum_relabel():
     ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11], [100, 101, 102]
     rows = list(itertools.product(ps, ss, ds, ts))
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}), name="P_unit")
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
-    nb = Sum(v * P_unit * P_step, over=("p", "s"))
-    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(
-        ["d", "t"]
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
     )
-    prob.add_cstr("nb", over=nb_over, sense="<=",
-                  lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
+    nb = Sum(v * P_unit * P_step, over=("p", "s"))
+    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(["d", "t"])
+    prob.add_cstr("nb", over=nb_over, sense="<=", lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
     return prob, nb_over
 
 
@@ -346,8 +364,12 @@ def test_sum_relabel_lhs():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -361,27 +383,38 @@ def _build_map_where():
     ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11], [100, 101, 102]
     rows = list(itertools.product(ps, ss, ds, ts))
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}), name="P_unit")
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
+    )
     map_rows = list(itertools.product(ps, ss))
     map_to_n = pl.DataFrame(
-        {"p": [r[0] for r in map_rows], "s": [r[1] for r in map_rows],
-         "n": [f"n{(r[0] + (0 if r[1] == 's0' else 1)) % 2}" for r in map_rows]}
+        {
+            "p": [r[0] for r in map_rows],
+            "s": [r[1] for r in map_rows],
+            "n": [f"n{(r[0] + (0 if r[1] == 's0' else 1)) % 2}" for r in map_rows],
+        }
     )
     nb = Sum(Where(v * P_unit, map_to_n) * P_step, over=("p", "s"))
-    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(
-        ["n", "d", "t"]
-    )
-    prob.add_cstr("nb", over=nb_over, sense="<=",
-                  lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
+    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(["n", "d", "t"])
+    prob.add_cstr("nb", over=nb_over, sense="<=", lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
     return prob, nb_over
 
 
@@ -394,8 +427,12 @@ def test_map_where_lhs():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -418,30 +455,32 @@ def _build_sum_combining():
     ps, ds, ts = [0, 1, 2], [10, 11], [100, 101]
     cells = list(itertools.product(ps, ds, ts))
     var_index = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 5.0, 11.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 5.0, 11.0]}), name="P_unit")
     # Map p -> h (fan-out: each p maps to 2 distinct h values).
     map_ph = pl.DataFrame(
-        {"p": [p for p in ps for _ in range(2)],
-         "h": [h for _ in ps for h in ("h0", "h1")]}
+        {"p": [p for p in ps for _ in range(2)], "h": [h for _ in ps for h in ("h0", "h1")]}
     )
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
+    )
     # Multiplying by a (d,t) Param does NOT touch ``h``, so the map stays
     # deferred (where_map_frames survives) ⇒ the combining builder reduces
     # the fan-out over ``h``.
     expr = Sum(Where(v * P_unit, map_ph) * P_step, over=("h",))
-    over = expr.terms[0].frame.select(list(expr.terms[0].dims)).unique().sort(
-        ["p", "d", "t"]
-    )
-    prob.add_cstr("comb", over=over, sense="<=",
-                  lhs_terms={"l": expr}, rhs_terms={"r": 0.0})
+    over = expr.terms[0].frame.select(list(expr.terms[0].dims)).unique().sort(["p", "d", "t"])
+    prob.add_cstr("comb", over=over, sense="<=", lhs_terms={"l": expr}, rhs_terms={"r": 0.0})
     return prob, over, expr.terms[0]
 
 
@@ -465,8 +504,12 @@ def test_sum_combining_lhs(monkeypatch):
     # batch_rows (the loop coalesces it to one batch).
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -480,19 +523,25 @@ def _build_sparse():
     ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101, 102]
     cells = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
     # Pa is SPARSE on (d,t): drop a couple of cells so the dense
     # completeness guard fails ⇒ the joined / prune-down backstop fires.
     dt = list(itertools.product(ds, ts))
     dt_sparse = [c for i, c in enumerate(dt) if i not in (1, 4)]
-    Pa = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt_sparse], "t": [c[1] for c in dt_sparse],
-         "value": np.linspace(1e-2, 50.0, len(dt_sparse))}), name="Pa")
-    prob.add_cstr("sp", over=over, sense="<=",
-                  lhs_terms={"l": v * Pa}, rhs_terms={"r": 0.0})
+    Pa = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt_sparse],
+                "t": [c[1] for c in dt_sparse],
+                "value": np.linspace(1e-2, 50.0, len(dt_sparse)),
+            }
+        ),
+        name="Pa",
+    )
+    prob.add_cstr("sp", over=over, sense="<=", lhs_terms={"l": v * Pa}, rhs_terms={"r": 0.0})
     return prob, over
 
 
@@ -508,8 +557,12 @@ def test_sparse_lhs():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -525,14 +578,21 @@ def test_objective_column_mode():
     ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101]
     cells = list(itertools.product(ps, ds, ts))
     idx = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), idx, lower=0.0, upper=1e6)
     dt = list(itertools.product(ds, ts))
-    Pa = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(1e-3, 1e2, len(dt))}), name="Pa")
+    Pa = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(1e-3, 1e2, len(dt)),
+            }
+        ),
+        name="Pa",
+    )
     # Objective-style term: Var x Pa, NOT summed — column spine = Var.frame.
     term = (v * Pa).terms[0]
     # Column spine carries col_id.
@@ -544,8 +604,12 @@ def test_objective_column_mode():
     ref = _ref_minmax_column(term, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            spine, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            spine,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -565,22 +629,50 @@ def _build_rhs_chain_dense():
     ps, ss, ds, ts = [0, 1, 2], ["s0", "s1"], [10, 11], [100, 101, 102, 103]
     rows = list(itertools.product(ps, ss, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     pdt = list(itertools.product(ps, ds, ts))
-    Pprofile = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [c[0] for c in pdt], "d": [c[1] for c in pdt],
-         "t": [c[2] for c in pdt], "value": np.linspace(1e-3, 5e2, len(pdt))}),
-        name="Pprofile")
+    Pprofile = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in pdt],
+                "d": [c[1] for c in pdt],
+                "t": [c[2] for c in pdt],
+                "value": np.linspace(1e-3, 5e2, len(pdt)),
+            }
+        ),
+        name="Pprofile",
+    )
     psl = list(itertools.product(ps, ss))
-    Pcount = Param(("p", "s"), pl.DataFrame(
-        {"p": [c[0] for c in psl], "s": [c[1] for c in psl],
-         "value": np.linspace(2.0, 4e3, len(psl))}), name="Pcount")
+    Pcount = Param(
+        ("p", "s"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in psl],
+                "s": [c[1] for c in psl],
+                "value": np.linspace(2.0, 4e3, len(psl)),
+            }
+        ),
+        name="Pcount",
+    )
     dt = list(itertools.product(ds, ts))
-    Pavail = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(0.4, 0.95, len(dt))}), name="Pavail")
+    Pavail = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(0.4, 0.95, len(dt)),
+            }
+        ),
+        name="Pavail",
+    )
     rhs = Pprofile * Pcount * Pavail
     return over, rhs
 
@@ -600,8 +692,12 @@ def test_rhs_chain_dense_param_only():
     ref = _ref_minmax_rhs_chain(rhs, over, scale)
     for bs in _batch_sizes(n):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -618,8 +714,12 @@ def test_rhs_chain_dense_param_only_base_row_offset():
     ref = _ref_minmax_rhs_chain(rhs, over, scale)
     for bs in _batch_sizes(n):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -631,18 +731,24 @@ def _build_rhs_chain_sparse():
     ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101, 102]
     rows = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows]}
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows], "t": [r[2] for r in rows]}
     )
     # Pa SPARSE on (d,t): drop a couple of cells ⇒ left-join nulls ⇒ the
     # positional completeness / null guard declines ⇒ prune-down backstop.
     dt = list(itertools.product(ds, ts))
     dt_sparse = [c for i, c in enumerate(dt) if i not in (1, 4)]
-    Pa = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt_sparse], "t": [c[1] for c in dt_sparse],
-         "value": np.linspace(1e-2, 50.0, len(dt_sparse))}), name="Pa")
-    Pb = Param(("p",), pl.DataFrame({"p": ps, "value": [3.0, 40.0, 700.0]}),
-               name="Pb")
+    Pa = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt_sparse],
+                "t": [c[1] for c in dt_sparse],
+                "value": np.linspace(1e-2, 50.0, len(dt_sparse)),
+            }
+        ),
+        name="Pa",
+    )
+    Pb = Param(("p",), pl.DataFrame({"p": ps, "value": [3.0, 40.0, 700.0]}), name="Pb")
     rhs = Pa * Pb
     return over, rhs
 
@@ -656,8 +762,12 @@ def test_rhs_chain_sparse_param_only():
     ref = _ref_minmax_rhs_chain(rhs, over, scale)
     for bs in _batch_sizes(n):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -673,8 +783,12 @@ def test_rhs_chain_param_only_no_scale():
         ref = _ref_minmax_rhs_chain(rhs, over, scale)
         for bs in _batch_sizes(n):
             (got,) = bounded_coefficient_walk(
-                over, recipe, scale, [MinMaxAbsReducer(scale)],
-                batch_rows=bs, dense_axes=("d", "t"),
+                over,
+                recipe,
+                scale,
+                [MinMaxAbsReducer(scale)],
+                batch_rows=bs,
+                dense_axes=("d", "t"),
             )
             assert got == ref, f"{builder.__name__} batch_rows={bs}"
 
@@ -695,13 +809,20 @@ def _build_rhs_frame_param():
     ps, ds, ts = [0, 1, 2], [10, 11], [100, 101, 102, 103]
     rows = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows]}
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows], "t": [r[2] for r in rows]}
     )
-    rhs = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows],
-         "value": np.linspace(1e-3, 5e2, len(rows))}), name="maxToSink")
+    rhs = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [r[0] for r in rows],
+                "d": [r[1] for r in rows],
+                "t": [r[2] for r in rows],
+                "value": np.linspace(1e-3, 5e2, len(rows)),
+            }
+        ),
+        name="maxToSink",
+    )
     return over, rhs
 
 
@@ -713,16 +834,23 @@ def _build_rhs_frame_param_sparse():
     ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101, 102]
     rows = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows]}
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows], "t": [r[2] for r in rows]}
     )
     # Drop a few (p, d, t) cells from the RHS frame so the left-join surfaces
     # nulls (filled to 0.0) and the dense-completeness guard fails.
     keep = [c for i, c in enumerate(rows) if i % 7 != 0]
-    rhs = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [r[0] for r in keep], "d": [r[1] for r in keep],
-         "t": [r[2] for r in keep],
-         "value": np.linspace(1e-2, 9e2, len(keep))}), name="maxToSink_sparse")
+    rhs = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [r[0] for r in keep],
+                "d": [r[1] for r in keep],
+                "t": [r[2] for r in keep],
+                "value": np.linspace(1e-2, 9e2, len(keep)),
+            }
+        ),
+        name="maxToSink_sparse",
+    )
     return over, rhs
 
 
@@ -772,8 +900,12 @@ def test_rhs_frame_param_dense_param_only():
     assert ref != (None, None)
     for bs in _batch_sizes(n):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -792,8 +924,12 @@ def test_rhs_frame_param_sparse_param_only():
     assert ref != (None, None)
     for bs in _batch_sizes(n):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -810,8 +946,12 @@ def test_rhs_frame_param_no_scale():
         assert ref != (None, None), builder.__name__
         for bs in _batch_sizes(n):
             (got,) = bounded_coefficient_walk(
-                over, recipe, scale, [MinMaxAbsReducer(scale)],
-                batch_rows=bs, dense_axes=("d", "t"),
+                over,
+                recipe,
+                scale,
+                [MinMaxAbsReducer(scale)],
+                batch_rows=bs,
+                dense_axes=("d", "t"),
             )
             assert got == ref, f"{builder.__name__} batch_rows={bs}"
 
@@ -828,8 +968,12 @@ def test_no_scale_minmax():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in (1, 4, 1_000_000):
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref
 
@@ -846,19 +990,33 @@ def _build_wide():
     ts = list(range(60))
     cells = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
     dt = list(itertools.product(ds, ts))
-    Pa = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(1e-3, 1e2, len(dt))}), name="Pa")
-    Pb = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(2.0, 5e3, len(dt))}), name="Pb")
-    prob.add_cstr("vpp", over=over, sense="<=",
-                  lhs_terms={"l": v * Pa * Pb}, rhs_terms={"r": 0.0})
+    Pa = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(1e-3, 1e2, len(dt)),
+            }
+        ),
+        name="Pa",
+    )
+    Pb = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(2.0, 5e3, len(dt)),
+            }
+        ),
+        name="Pb",
+    )
+    prob.add_cstr("vpp", over=over, sense="<=", lhs_terms={"l": v * Pa * Pb}, rhs_terms={"r": 0.0})
     return prob, over
 
 
@@ -866,8 +1024,12 @@ def _peak_for_batch(over, recipe, scale, batch_rows) -> int:
     tracemalloc.start()
     tracemalloc.reset_peak()
     bounded_coefficient_walk(
-        over, recipe, scale, [MinMaxAbsReducer(scale)],
-        batch_rows=batch_rows, dense_axes=("d", "t"),
+        over,
+        recipe,
+        scale,
+        [MinMaxAbsReducer(scale)],
+        batch_rows=batch_rows,
+        dense_axes=("d", "t"),
     )
     _cur, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
@@ -885,8 +1047,12 @@ def test_memory_bounded_by_batch():
     # Correctness first: small batch == whole batch.
     ref = _ref_minmax_constraint(term, over, scale)
     (got_small,) = bounded_coefficient_walk(
-        over, recipe, scale, [MinMaxAbsReducer(scale)],
-        batch_rows=256, dense_axes=("d", "t"),
+        over,
+        recipe,
+        scale,
+        [MinMaxAbsReducer(scale)],
+        batch_rows=256,
+        dense_axes=("d", "t"),
     )
     assert got_small == ref
 
@@ -897,8 +1063,7 @@ def test_memory_bounded_by_batch():
     # peak — proving the small batch never holds the full product.  Use a
     # generous margin to stay robust across polars allocator noise.
     assert peak_small * 3 < peak_whole, (
-        f"small-batch peak {peak_small} not bounded below whole-batch "
-        f"peak {peak_whole} (n={n})"
+        f"small-batch peak {peak_small} not bounded below whole-batch peak {peak_whole} (n={n})"
     )
 
 
@@ -915,22 +1080,30 @@ def _build_neg_sum_relabel():
     ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11], [100, 101, 102]
     rows = list(itertools.product(ps, ss, ds, ts))
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}), name="P_unit")
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
-    nb = -Sum(v * P_unit * P_step, over=("p", "s"))
-    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(
-        ["d", "t"]
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
     )
-    prob.add_cstr("nb", over=nb_over, sense="<=",
-                  lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
+    nb = -Sum(v * P_unit * P_step, over=("p", "s"))
+    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(["d", "t"])
+    prob.add_cstr("nb", over=nb_over, sense="<=", lhs_terms={"l": nb}, rhs_terms={"r": 0.0})
     return prob, nb_over
 
 
@@ -946,8 +1119,12 @@ def test_neg_sum_relabel_parity():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -961,14 +1138,21 @@ def test_double_sum_objective_parity():
     ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101]
     cells = list(itertools.product(ps, ds, ts))
     idx = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), idx, lower=0.0, upper=1e6)
-    Pcost = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells],
-         "value": np.linspace(1e-3, 1e2, len(cells))}), name="Pcost")
+    Pcost = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in cells],
+                "d": [c[1] for c in cells],
+                "t": [c[2] for c in cells],
+                "value": np.linspace(1e-3, 1e2, len(cells)),
+            }
+        ),
+        name="Pcost",
+    )
     # Inner Sum collapses every Var dim -> a scalar (dims == ()) objective
     # term; the outer Sum(over=None) is the no-op collapse-all relabel.
     inner = Sum(v * Pcost, over=("p", "d", "t"))
@@ -996,8 +1180,12 @@ def test_double_sum_objective_parity():
     # count / min / max are EXACT and the log2 sum matches within FP
     # reassociation tolerance (mirrors test_vpp_histogram_batched_fp_tol).
     (got,) = bounded_coefficient_walk(
-        spine, recipe, scale, [Log2HistogramReducer(scale, classify)],
-        batch_rows=spine.height, dense_axes=("d", "t"),
+        spine,
+        recipe,
+        scale,
+        [Log2HistogramReducer(scale, classify)],
+        batch_rows=spine.height,
+        dense_axes=("d", "t"),
     )
     assert set(got) == set(ref)
     for k in ref:
@@ -1018,16 +1206,27 @@ def test_where_after_sum_parity():
     ps, ss, ds, ts = [0, 1], ["s0", "s1"], [10, 11, 12], [100, 101, 102]
     rows = list(itertools.product(ps, ss, ds, ts))
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0]}), name="P_unit")
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
+    )
     nb = Sum(v * P_unit * P_step, over=("p", "s"))
     # Pure-filter Where AFTER the Sum: keep only d in {10, 11} (shared dim,
     # no map extras) — recorded into the recipe's ``where_frames``.
@@ -1049,8 +1248,12 @@ def test_where_after_sum_parity():
     ref = _ref_minmax_constraint(term, over, scale)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
 
@@ -1075,16 +1278,27 @@ def _build_map_where_after_sum():
     ps, ss, ds, ts = [0, 1, 2], ["s0", "s1"], [10, 11], [100, 101, 102]
     rows = list(itertools.product(ps, ss, ds, ts))
     var_index = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
-    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0, 7.0]}),
-                   name="P_unit")
+    P_unit = Param(("p",), pl.DataFrame({"p": ps, "value": [2.0, 30.0, 7.0]}), name="P_unit")
     dt = list(itertools.product(ds, ts))
-    P_step = Param(("d", "t"), pl.DataFrame(
-        {"d": [r[0] for r in dt], "t": [r[1] for r in dt],
-         "value": np.linspace(0.5, 1.5, len(dt))}), name="P_step")
+    P_step = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [r[0] for r in dt],
+                "t": [r[1] for r in dt],
+                "value": np.linspace(0.5, 1.5, len(dt)),
+            }
+        ),
+        name="P_step",
+    )
     # Sum over ``s`` only → keep (p, d, t).
     nb = Sum(v * P_unit * P_step, over=("s",))
     # Map the kept dim ``p`` to a new node dim ``n`` (fan-in: p0,p2 -> nA).
@@ -1094,7 +1308,10 @@ def _build_map_where_after_sum():
     # The constraint grid is the post-map (n, d, t) cells.
     over = (
         term.lazy.join(p_to_n.lazy(), on="p", how="inner")
-        .select("n", "d", "t").unique().sort(["n", "d", "t"]).collect()
+        .select("n", "d", "t")
+        .unique()
+        .sort(["n", "d", "t"])
+        .collect()
     )
     return prob, term, over, p_to_n
 
@@ -1104,9 +1321,7 @@ def _ref_minmax_map_after_sum(term, over, p_to_n, scale):
     (inner-join the reduced ``term.lazy`` to ``p_to_n`` to introduce ``n``),
     attach ``_rid`` via the (n, d, t) grid, apply scale, reduce — the
     whole-collect the bounded walk's reduced-lazy fallback must match."""
-    over_rid = over.with_columns(
-        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-    )
+    over_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
     materialised = term.lazy.join(p_to_n.lazy(), on="p", how="inner")
     on = [d for d in term.dims if d in over.columns]
     df = (
@@ -1152,8 +1367,12 @@ def test_map_where_after_sum_parity(recwarn):
     assert ref != (None, None)
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [MinMaxAbsReducer(scale)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [MinMaxAbsReducer(scale)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert got == ref, f"batch_rows={bs}: {got!r} != {ref!r}"
     # No warning surfaced by the fallback bake.
@@ -1175,9 +1394,7 @@ def test_map_where_after_sum_histogram_parity():
         return cid % 3
 
     # Reference histogram over the materialised-n whole-collect.
-    over_rid = over.with_columns(
-        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-    )
+    over_rid = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
     materialised = term.lazy.join(p_to_n.lazy(), on="p", how="inner")
     on = [d for d in term.dims if d in over.columns]
     df = (
@@ -1196,15 +1413,17 @@ def test_map_where_after_sum_histogram_parity():
             continue
         bkey = classify(int(c))
         ps_, pn_, pmin_, pmax_ = ref.get(bkey, (0.0, 0, math.inf, 0.0))
-        ref[bkey] = (
-            ps_ + math.log2(vval), pn_ + 1, min(pmin_, vval), max(pmax_, vval)
-        )
+        ref[bkey] = (ps_ + math.log2(vval), pn_ + 1, min(pmin_, vval), max(pmax_, vval))
     assert ref  # non-empty reference
 
     for bs in BATCH_SIZES:
         (got,) = bounded_coefficient_walk(
-            over, recipe, scale, [Log2HistogramReducer(scale, classify)],
-            batch_rows=bs, dense_axes=("d", "t"),
+            over,
+            recipe,
+            scale,
+            [Log2HistogramReducer(scale, classify)],
+            batch_rows=bs,
+            dense_axes=("d", "t"),
         )
         assert set(got) == set(ref), f"batch_rows={bs}"
         for k in ref:
@@ -1212,6 +1431,4 @@ def test_map_where_after_sum_histogram_parity():
             gs, gn, gmin, gmax = got[k]
             assert gn == rn, f"batch_rows={bs} bucket={k}"
             assert gmin == rmin and gmax == rmax, f"batch_rows={bs} bucket={k}"
-            assert gs == pytest.approx(rs, rel=1e-12, abs=1e-9), (
-                f"batch_rows={bs} bucket={k}"
-            )
+            assert gs == pytest.approx(rs, rel=1e-12, abs=1e-9), f"batch_rows={bs} bucket={k}"

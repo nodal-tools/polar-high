@@ -120,15 +120,8 @@ def _ref_report(prob: Problem, cfg: ScalingConfig):
         elif isinstance(rhs, Param):
             if over is not None and rhs.dims:
                 on = list(rhs.dims)
-                j = (
-                    over.lazy()
-                    .join(rhs.lazy, on=on, how="left")
-                    .select("value")
-                    .collect()
-                )
-                rhs_arrs.append(
-                    j["value"].fill_null(0.0).to_numpy().astype(np.float64)
-                )
+                j = over.lazy().join(rhs.lazy, on=on, how="left").select("value").collect()
+                rhs_arrs.append(j["value"].fill_null(0.0).to_numpy().astype(np.float64))
             else:
                 f = rhs.frame
                 if "value" in f.columns and f.height > 0:
@@ -142,12 +135,7 @@ def _ref_report(prob: Problem, cfg: ScalingConfig):
             term_dims = term.dims
             if term_dims and over is not None:
                 joon = [d for d in term_dims if d in axis_cols]
-                df = (
-                    over.lazy()
-                    .join(term_lazy, on=joon, how="inner")
-                    .select("coef")
-                    .collect()
-                )
+                df = over.lazy().join(term_lazy, on=joon, how="inner").select("coef").collect()
             else:
                 df = term_lazy.select("coef").collect()
             matrix_arrs.append(df["coef"].to_numpy().astype(np.float64))
@@ -180,19 +168,33 @@ def _vpp_lhs_problem() -> Problem:
     ps, ds, ts = [0, 1, 2], [10, 11, 12, 13], [100, 101, 102, 103, 104]
     cells = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-         "t": [c[2] for c in cells]}
+        {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
     )
     v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
     dt = list(itertools.product(ds, ts))
-    Pa = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(1e-3, 1e2, len(dt))}), name="Pa")
-    Pb = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(2.0, 5e3, len(dt))}), name="Pb")
-    prob.add_cstr("vpp", over=over, sense="<=",
-                  lhs_terms={"l": v * Pa * Pb}, rhs_terms={"r": 0.0})
+    Pa = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(1e-3, 1e2, len(dt)),
+            }
+        ),
+        name="Pa",
+    )
+    Pb = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(2.0, 5e3, len(dt)),
+            }
+        ),
+        name="Pb",
+    )
+    prob.add_cstr("vpp", over=over, sense="<=", lhs_terms={"l": v * Pa * Pb}, rhs_terms={"r": 0.0})
     prob.set_objective(Sum(v), sense="min")
     return prob
 
@@ -204,25 +206,58 @@ def _rhs_chain_problem() -> Problem:
     ps, ss, ds, ts = [0, 1, 2], ["s0", "s1"], [10, 11], [100, 101, 102, 103]
     rows = list(itertools.product(ps, ss, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "s": [r[1] for r in rows],
-         "d": [r[2] for r in rows], "t": [r[3] for r in rows]}
+        {
+            "p": [r[0] for r in rows],
+            "s": [r[1] for r in rows],
+            "d": [r[2] for r in rows],
+            "t": [r[3] for r in rows],
+        }
     )
     v = prob.add_var("v", ("p", "s", "d", "t"), over, lower=0.0, upper=1e6)
     pdt = list(itertools.product(ps, ds, ts))
-    Pprofile = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [c[0] for c in pdt], "d": [c[1] for c in pdt],
-         "t": [c[2] for c in pdt], "value": np.linspace(1e-3, 5e2, len(pdt))}),
-        name="Pprofile")
+    Pprofile = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in pdt],
+                "d": [c[1] for c in pdt],
+                "t": [c[2] for c in pdt],
+                "value": np.linspace(1e-3, 5e2, len(pdt)),
+            }
+        ),
+        name="Pprofile",
+    )
     psl = list(itertools.product(ps, ss))
-    Pcount = Param(("p", "s"), pl.DataFrame(
-        {"p": [c[0] for c in psl], "s": [c[1] for c in psl],
-         "value": np.linspace(2.0, 4e3, len(psl))}), name="Pcount")
+    Pcount = Param(
+        ("p", "s"),
+        pl.DataFrame(
+            {
+                "p": [c[0] for c in psl],
+                "s": [c[1] for c in psl],
+                "value": np.linspace(2.0, 4e3, len(psl)),
+            }
+        ),
+        name="Pcount",
+    )
     dt = list(itertools.product(ds, ts))
-    Pavail = Param(("d", "t"), pl.DataFrame(
-        {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-         "value": np.linspace(0.4, 0.95, len(dt))}), name="Pavail")
-    prob.add_cstr("pful", over=over, sense="<=",
-                  lhs_terms={"l": v}, rhs_terms={"r": Pprofile * Pcount * Pavail})
+    Pavail = Param(
+        ("d", "t"),
+        pl.DataFrame(
+            {
+                "d": [c[0] for c in dt],
+                "t": [c[1] for c in dt],
+                "value": np.linspace(0.4, 0.95, len(dt)),
+            }
+        ),
+        name="Pavail",
+    )
+    prob.add_cstr(
+        "pful",
+        over=over,
+        sense="<=",
+        lhs_terms={"l": v},
+        rhs_terms={"r": Pprofile * Pcount * Pavail},
+    )
     prob.set_objective(Sum(v), sense="min")
     return prob
 
@@ -234,17 +269,23 @@ def _rhs_frame_param_problem() -> Problem:
     ps, ds, ts = [0, 1, 2], [10, 11], [100, 101, 102, 103]
     rows = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows]}
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows], "t": [r[2] for r in rows]}
     )
     v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
-    rhs = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows],
-         "value": np.linspace(1e-3, 5e2, len(rows))}), name="maxToSink")
+    rhs = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [r[0] for r in rows],
+                "d": [r[1] for r in rows],
+                "t": [r[2] for r in rows],
+                "value": np.linspace(1e-3, 5e2, len(rows)),
+            }
+        ),
+        name="maxToSink",
+    )
     assert rhs._sources is None
-    prob.add_cstr("mts", over=over, sense="<=",
-                  lhs_terms={"l": v * 7.5}, rhs_terms={"r": rhs})
+    prob.add_cstr("mts", over=over, sense="<=", lhs_terms={"l": v * 7.5}, rhs_terms={"r": rhs})
     prob.set_objective(Sum(v), sense="min")
     return prob
 
@@ -257,17 +298,23 @@ def _rhs_frame_param_sparse_problem() -> Problem:
     ps, ds, ts = [0, 1, 2], [10, 11, 12], [100, 101, 102]
     rows = list(itertools.product(ps, ds, ts))
     over = pl.DataFrame(
-        {"p": [r[0] for r in rows], "d": [r[1] for r in rows],
-         "t": [r[2] for r in rows]}
+        {"p": [r[0] for r in rows], "d": [r[1] for r in rows], "t": [r[2] for r in rows]}
     )
     v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
     keep = [c for i, c in enumerate(rows) if i % 7 != 0]
-    rhs = Param(("p", "d", "t"), pl.DataFrame(
-        {"p": [r[0] for r in keep], "d": [r[1] for r in keep],
-         "t": [r[2] for r in keep],
-         "value": np.linspace(1e-2, 9e2, len(keep))}), name="maxToSink_sparse")
-    prob.add_cstr("mts", over=over, sense="<=",
-                  lhs_terms={"l": v}, rhs_terms={"r": rhs})
+    rhs = Param(
+        ("p", "d", "t"),
+        pl.DataFrame(
+            {
+                "p": [r[0] for r in keep],
+                "d": [r[1] for r in keep],
+                "t": [r[2] for r in keep],
+                "value": np.linspace(1e-2, 9e2, len(keep)),
+            }
+        ),
+        name="maxToSink_sparse",
+    )
+    prob.add_cstr("mts", over=over, sense="<=", lhs_terms={"l": v}, rhs_terms={"r": rhs})
     prob.set_objective(Sum(v), sense="min")
     return prob
 
@@ -337,9 +384,7 @@ def test_no_family_row_cap_skip_path_remains() -> None:
     assert "POLAR_HIGH_RANGES_MAX_FAMILY_ROWS" not in src, (
         "the family-row cap env override must be fully removed"
     )
-    assert "ranges-stream SKIP" not in src, (
-        "no family-row-cap SKIP log line may remain"
-    )
+    assert "ranges-stream SKIP" not in src, "no family-row-cap SKIP log line may remain"
     assert "_max_family_rows" not in src
 
 
@@ -359,16 +404,22 @@ def test_large_row_family_range_is_folded_not_dropped() -> None:
         ds, ts = list(range(6)), list(range(12))  # 20*6*12 = 1440 rows
         cells = list(itertools.product(ps, ds, ts))
         over = pl.DataFrame(
-            {"p": [c[0] for c in cells], "d": [c[1] for c in cells],
-             "t": [c[2] for c in cells]}
+            {"p": [c[0] for c in cells], "d": [c[1] for c in cells], "t": [c[2] for c in cells]}
         )
         v = prob.add_var("v", ("p", "d", "t"), over, lower=0.0, upper=1e6)
         dt = list(itertools.product(ds, ts))
-        Pa = Param(("d", "t"), pl.DataFrame(
-            {"d": [c[0] for c in dt], "t": [c[1] for c in dt],
-             "value": np.linspace(1e-3, 1e2, len(dt))}), name="Pa")
-        prob.add_cstr("big", over=over, sense="<=",
-                      lhs_terms={"l": v * Pa}, rhs_terms={"r": 0.0})
+        Pa = Param(
+            ("d", "t"),
+            pl.DataFrame(
+                {
+                    "d": [c[0] for c in dt],
+                    "t": [c[1] for c in dt],
+                    "value": np.linspace(1e-3, 1e2, len(dt)),
+                }
+            ),
+            name="Pa",
+        )
+        prob.add_cstr("big", over=over, sense="<=", lhs_terms={"l": v * Pa}, rhs_terms={"r": 0.0})
         prob.set_objective(Sum(v), sense="min")
 
         rep_default = _ranges_via_streaming(prob, cfg)
@@ -398,8 +449,10 @@ def test_ranges_pre_matches_with_block_coo_disabled() -> None:
     differs."""
     cfg = _config()
     for builder in (
-        _vpp_lhs_problem, _rhs_chain_problem,
-        _rhs_frame_param_problem, _rhs_frame_param_sparse_problem,
+        _vpp_lhs_problem,
+        _rhs_chain_problem,
+        _rhs_frame_param_problem,
+        _rhs_frame_param_sparse_problem,
     ):
         _clear_guard()
         try:

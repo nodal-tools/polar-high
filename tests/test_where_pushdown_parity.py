@@ -55,9 +55,7 @@ def _matrix_arrays(m) -> tuple[list, list, list]:
     val = np.asarray(m.val, dtype=np.float64)
     row_idx = np.asarray(m.row_idx, dtype=np.int64)
     col_ptr = np.asarray(m.col_ptr, dtype=np.int64)
-    cols = np.repeat(
-        np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64)
-    )
+    cols = np.repeat(np.arange(m.n_cols, dtype=np.int64), np.diff(col_ptr).astype(np.int64))
     order = np.lexsort((row_idx, cols))
     return (
         list(val[order]),
@@ -118,18 +116,14 @@ def _build_v_p_problem(
 
         P1 = Param(
             ("x",),
-            pl.DataFrame(
-                {"x": x_idx, "value": np.linspace(0.1, 0.9, rows)}
-            ),
+            pl.DataFrame({"x": x_idx, "value": np.linspace(0.1, 0.9, rows)}),
             name="P1",
         )
         chain = v * P1
         if chain_len >= 2:
             P2 = Param(
                 ("x",),
-                pl.DataFrame(
-                    {"x": x_idx, "value": np.linspace(2.0, 5.0, rows)}
-                ),
+                pl.DataFrame({"x": x_idx, "value": np.linspace(2.0, 5.0, rows)}),
                 name="P2",
             )
             chain = chain * P2
@@ -174,9 +168,7 @@ def test_where_with_extras_map_effect():
     """``Where(v*p, frame_with_extra_dim)`` — pushdown DEFERS the
     map-effect via ``where_map_frames`` (preserving var_source); the
     disabled path eagerly joins + clears.  Byte-identity must hold."""
-    _assert_parity(
-        _build_v_p_problem(rows=50, sel_rows=8, chain_len=1, with_extra_dim=True)
-    )
+    _assert_parity(_build_v_p_problem(rows=50, sel_rows=8, chain_len=1, with_extra_dim=True))
 
 
 def test_map_where_inside_sum_node_balance_shape():
@@ -338,8 +330,11 @@ def test_nested_where():
         f2 = pl.DataFrame({"x": x_idx[10:25]})  # narrower
         lhs = Where(Where(v * P1 * P2, f1), f2)
         p.add_cstr(
-            "c", over=over, sense="<=",
-            lhs_terms={"lhs": lhs}, rhs_terms={"rhs": 0.0},
+            "c",
+            over=over,
+            sense="<=",
+            lhs_terms={"lhs": lhs},
+            rhs_terms={"rhs": 0.0},
         )
         return p
 
@@ -385,8 +380,11 @@ def test_where_after_sum():
         lhs = Where(agg, f)
         over_x = pl.DataFrame({"x": list(range(n_x))})
         p.add_cstr(
-            "c", over=over_x, sense="<=",
-            lhs_terms={"lhs": lhs}, rhs_terms={"rhs": 0.0},
+            "c",
+            over=over_x,
+            sense="<=",
+            lhs_terms={"lhs": lhs},
+            rhs_terms={"rhs": 0.0},
         )
         return p
 
@@ -419,8 +417,11 @@ def test_sum_after_where():
         agg = Sum(Where(v * P, f), over=("t",))
         over_x = pl.DataFrame({"x": list(range(n_x))})
         p.add_cstr(
-            "c", over=over_x, sense="<=",
-            lhs_terms={"lhs": agg}, rhs_terms={"rhs": 0.0},
+            "c",
+            over=over_x,
+            sense="<=",
+            lhs_terms={"lhs": agg},
+            rhs_terms={"rhs": 0.0},
         )
         return p
 
@@ -450,8 +451,11 @@ def test_where_anonymous_param_chain():
         f = pl.DataFrame({"x": x_idx[::3]})
         lhs = Where(chain, f)
         p.add_cstr(
-            "c", over=over, sense="<=",
-            lhs_terms={"lhs": lhs}, rhs_terms={"rhs": 0.0},
+            "c",
+            over=over,
+            sense="<=",
+            lhs_terms={"lhs": lhs},
+            rhs_terms={"rhs": 0.0},
         )
         return p
 
@@ -480,8 +484,11 @@ def test_where_scalar_fold():
         scaled = (a * 60.0) * b  # _value_scalar=60
         lhs = Where(v * scaled, pl.DataFrame({"x": x_idx[:20]}))
         p.add_cstr(
-            "c", over=over, sense="<=",
-            lhs_terms={"lhs": lhs}, rhs_terms={"rhs": 0.0},
+            "c",
+            over=over,
+            sense="<=",
+            lhs_terms={"lhs": lhs},
+            rhs_terms={"rhs": 0.0},
         )
         return p
 
@@ -516,8 +523,11 @@ def test_where_then_mul_param():
             # Where between P1 and P2 multiplies.
             lhs = Where(v * P1, f) * P2
         p.add_cstr(
-            "c", over=over, sense="<=",
-            lhs_terms={"lhs": lhs}, rhs_terms={"rhs": 0.0},
+            "c",
+            over=over,
+            sense="<=",
+            lhs_terms={"lhs": lhs},
+            rhs_terms={"rhs": 0.0},
         )
         return p
 
@@ -571,9 +581,7 @@ def test_rhs_where_filter_preserved_through_negation():
         v = p.add_var("v", ("x",), over, lower=-1e6, upper=1e6)
         P = Param(
             ("x",),
-            pl.DataFrame(
-                {"x": x_idx, "value": np.linspace(0.5, 2.5, rows)}
-            ),
+            pl.DataFrame({"x": x_idx, "value": np.linspace(0.5, 2.5, rows)}),
             name="P",
         )
         # Selective frame: keep 5 of 20 rows.
@@ -615,9 +623,7 @@ def test_where_shared_empty_extras_nonempty():
     schema_cols = t.lazy.collect_schema().names()
     assert "y" not in schema_cols
     # Baking the deferred map frame reproduces the eager cross-join.
-    baked_lf, baked_dims = _apply_where_map_frames(
-        t.lazy, t.dims, t.where_map_frames
-    )
+    baked_lf, baked_dims = _apply_where_map_frames(t.lazy, t.dims, t.where_map_frames)
     assert "y" in baked_lf.collect_schema().names()
     assert set(baked_dims) == {"x", "y"}
     assert baked_lf.collect().height == 6

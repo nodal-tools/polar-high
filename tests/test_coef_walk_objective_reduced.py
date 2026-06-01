@@ -129,9 +129,7 @@ def _build_relabel_objective(sparse: bool):
 
 
 def _side_vectors(n_cols: int) -> np.ndarray:
-    return np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    return np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
 
 
 def _sorted_pair(cid: np.ndarray, coef: np.ndarray):
@@ -276,9 +274,7 @@ def test_fastpath_byte_identical_to_reduced_and_old_build(sparse):
     _prob, v, _term, recipe = _build_relabel_objective(sparse)
     seed = _seed_of(v)
 
-    cid_new, coef_new = _sorted_pair(
-        *_column_whole_product(seed, recipe, None, None)
-    )
+    cid_new, coef_new = _sorted_pair(*_column_whole_product(seed, recipe, None, None))
     cid_red, coef_red = _reduced_reference(recipe)
     cid_old, coef_old = _old_whole_product(seed, recipe)
 
@@ -540,9 +536,7 @@ def test_fanout_fastpath_matches_reduced_reference_not_per_cell():
     _prob, v, _term, recipe = _build_fanout_objective()
     seed = _seed_of(v)
 
-    cid_new, coef_new = _sorted_pair(
-        *_column_whole_product(seed, recipe, None, None)
-    )
+    cid_new, coef_new = _sorted_pair(*_column_whole_product(seed, recipe, None, None))
     cid_red, coef_red = _reduced_reference(recipe)
     cid_old, coef_old = _old_whole_product(seed, recipe)
 
@@ -566,12 +560,8 @@ def test_fanout_fastpath_matches_reduced_reference_not_per_cell():
         .agg(pl.col("coef").sum())
         .sort("col_id")
     )
-    assert np.array_equal(
-        grouped["col_id"].to_numpy().astype(np.int64), cid_new
-    )
-    assert np.allclose(
-        grouped["coef"].to_numpy(), coef_new, rtol=1e-12, atol=0.0
-    )
+    assert np.array_equal(grouped["col_id"].to_numpy().astype(np.int64), cid_new)
+    assert np.allclose(grouped["coef"].to_numpy(), coef_new, rtol=1e-12, atol=0.0)
 
 
 def test_fanout_fastpath_histogram_matches_reduced_reference():
@@ -652,9 +642,7 @@ def test_prefilter_where_term_admitted_and_matches_reduced():
     cw._collect_streaming = wrap_stream
     cw._lhs_prune_down_collect = wrap_prune
     try:
-        cid_new, coef_new = _sorted_pair(
-            *_column_whole_product(seed, recipe, None, None)
-        )
+        cid_new, coef_new = _sorted_pair(*_column_whole_product(seed, recipe, None, None))
     finally:
         cw._collect_streaming = o_stream
         cw._lhs_prune_down_collect = o_prune

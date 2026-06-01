@@ -78,12 +78,8 @@ def _assert_solution_bit_identical(sol_on, sol_off) -> None:
 def _assert_solution_close(sol_on, sol_off, *, rtol: float) -> None:
     assert sol_on.optimal and sol_off.optimal
     np.testing.assert_allclose(sol_on.obj, sol_off.obj, rtol=rtol, atol=0.0)
-    np.testing.assert_allclose(
-        sol_on.col_value, sol_off.col_value, rtol=rtol, atol=0.0
-    )
-    np.testing.assert_allclose(
-        sol_on.row_dual, sol_off.row_dual, rtol=rtol, atol=0.0
-    )
+    np.testing.assert_allclose(sol_on.col_value, sol_off.col_value, rtol=rtol, atol=0.0)
+    np.testing.assert_allclose(sol_on.row_dual, sol_off.row_dual, rtol=rtol, atol=0.0)
     assert sol_on.row_names == sol_off.row_names
     assert sol_on.col_names == sol_off.col_names
 
@@ -125,9 +121,7 @@ def _streaming_node_balance_builder(*, with_where: bool = False):
                 "t": [r[3] for r in rows],
             }
         )
-        v = prob.add_var(
-            "v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6
-        )
+        v = prob.add_var("v", ("p", "s", "d", "t"), var_index, lower=0.0, upper=1e6)
         P_unit = Param(
             ("p",),
             pl.DataFrame({"p": _PS, "value": np.linspace(1.5, 3.5, _N_P)}),
@@ -150,10 +144,7 @@ def _streaming_node_balance_builder(*, with_where: bool = False):
             {
                 "p": [r[0] for r in map_rows],
                 "s": [r[1] for r in map_rows],
-                "n": [
-                    f"n{(r[0] + (0 if r[1] == 's0' else 1)) % 2}"
-                    for r in map_rows
-                ],
+                "n": [f"n{(r[0] + (0 if r[1] == 's0' else 1)) % 2}" for r in map_rows],
             }
         )
         inner = Where(v * P_unit, map_to_n) * P_step
@@ -165,9 +156,7 @@ def _streaming_node_balance_builder(*, with_where: bool = False):
         # hash-ordered, so a position-based RHS would otherwise vary
         # build-to-build and make the ON/OFF comparison meaningless.
         over_dims = list(lhs.terms[0].dims)
-        over_frame = (
-            lhs.terms[0].frame.select(over_dims).unique().sort(over_dims)
-        )
+        over_frame = lhs.terms[0].frame.select(over_dims).unique().sort(over_dims)
         # Positive demand (deterministic function of the dim VALUES, not row
         # position) so v must rise off its 0 lower bound.
         rhs = Param(
@@ -247,9 +236,7 @@ def test_streaming_sum_block_fires_and_bit_identical():
     assert "kind=sum\tphase_site=streaming" in out, (
         "the Sum-block-COO arm must fire on the STREAMING site (Site 2)"
     )
-    assert "path=relabel" in out, (
-        "nodeBalance (reduce_dims ⊆ var.dims) must take the relabel path"
-    )
+    assert "path=relabel" in out, "nodeBalance (reduce_dims ⊆ var.dims) must take the relabel path"
     sol_on = _solve_streaming(builder, disabled=False)
     sol_off = _solve_streaming(builder, disabled=True)
     _assert_solution_bit_identical(sol_on, sol_off)
@@ -332,9 +319,7 @@ def _build_warm_sum_problem(*, p_step: Param, combining: bool = False) -> Proble
             map_rows.append((p, p * 10))
             map_rows.append((p, p * 10 + 1))
             map_rows.append((p, p * 10 + 2))
-        map_p_to_h = pl.DataFrame(
-            {"p": [r[0] for r in map_rows], "h": [r[1] for r in map_rows]}
-        )
+        map_p_to_h = pl.DataFrame({"p": [r[0] for r in map_rows], "h": [r[1] for r in map_rows]})
         inner = Where(v * P_unit, map_p_to_h) * p_step
         lhs = Sum(inner, over=("p", "h"))
     else:

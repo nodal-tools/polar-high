@@ -142,9 +142,9 @@ def _solvable_problem(dense_axes=("d", "t")):
     # Constraint over the surviving (d, t) grid: Sum(...) >= 1.0 .  The Sum
     # term carries the recipe; the survivor-filtered term keeps only P_step.
     dt_rows = list(itertools.product([10, 11], [100, 101, 102]))
-    over_dt = pl.DataFrame(
-        {"d": [r[0] for r in dt_rows], "t": [r[1] for r in dt_rows]}
-    ).sort("d", "t")
+    over_dt = pl.DataFrame({"d": [r[0] for r in dt_rows], "t": [r[1] for r in dt_rows]}).sort(
+        "d", "t"
+    )
     prob.add_cstr(
         "relabel_cstr",
         over=over_dt,
@@ -199,9 +199,9 @@ def test_cold_save_memory_release_nulls_objective_recipe():
     prob.set_objective(obj_chain, sense="min")
     # Bound the LP with a trivial constraint so it solves.
     dt_rows = list(itertools.product([10, 11], [100, 101, 102]))
-    over_dt = pl.DataFrame(
-        {"d": [r[0] for r in dt_rows], "t": [r[1] for r in dt_rows]}
-    ).sort("d", "t")
+    over_dt = pl.DataFrame({"d": [r[0] for r in dt_rows], "t": [r[1] for r in dt_rows]}).sort(
+        "d", "t"
+    )
     prob.add_cstr(
         "floor_cstr",
         over=over_dt,
@@ -218,8 +218,7 @@ def test_cold_save_memory_release_nulls_objective_recipe():
 
     # _release_python_lp_inputs nulled the objective term's recipe slot.
     assert obj_term.sum_block_meta is None, (
-        "objective term's SumBlockMeta recipe survived the cold "
-        "save_memory release"
+        "objective term's SumBlockMeta recipe survived the cold save_memory release"
     )
 
 

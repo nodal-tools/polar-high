@@ -194,8 +194,7 @@ class CoefWalkRecipe:
         param_sources: Sequence[tuple[Param, int]],
         coef_scalar: float = 1.0,
         where_frames: tuple[pl.LazyFrame, ...] | None = None,
-        where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...]
-        | None = None,
+        where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None = None,
         sum_block_meta: SumBlockMeta | None = None,
         reduced_lazy: pl.LazyFrame | None = None,
         reduced_dims: tuple[str, ...] | None = None,
@@ -214,8 +213,7 @@ class CoefWalkRecipe:
                 )
         elif not isinstance(var_source, Var):
             raise TypeError(
-                "CoefWalkRecipe.var_source must be a Var; got "
-                f"{type(var_source).__name__}"
+                f"CoefWalkRecipe.var_source must be a Var; got {type(var_source).__name__}"
             )
         self.var_source = var_source
         self.param_sources = list(param_sources)
@@ -392,9 +390,7 @@ class CoefBatch:
 
     __slots__ = ("rid", "col_id", "coef")
 
-    def __init__(
-        self, rid: np.ndarray, col_id: np.ndarray, coef: np.ndarray
-    ) -> None:
+    def __init__(self, rid: np.ndarray, col_id: np.ndarray, coef: np.ndarray) -> None:
         self.rid = rid
         self.col_id = col_id
         self.coef = coef
@@ -471,9 +467,7 @@ class MinMaxAbsReducer(Reducer):
     reduction).
     """
 
-    def __init__(
-        self, scale: tuple[np.ndarray | None, int, np.ndarray | None]
-    ) -> None:
+    def __init__(self, scale: tuple[np.ndarray | None, int, np.ndarray | None]) -> None:
         self._scale = scale
         self._lo = math.inf
         self._hi = 0.0
@@ -482,9 +476,7 @@ class MinMaxAbsReducer(Reducer):
         self._lo = math.inf
         self._hi = 0.0
 
-    def update(
-        self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray
-    ) -> None:
+    def update(self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray) -> None:
         if coef_arr.size == 0:
             return
         a = _scaled_abs(rid_arr, col_id_arr, coef_arr, self._scale)
@@ -547,9 +539,7 @@ class Log2HistogramReducer(Reducer):
     def init(self) -> None:
         self._acc = {}
 
-    def update(
-        self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray
-    ) -> None:
+    def update(self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray) -> None:
         if coef_arr.size == 0:
             return
         a = _scaled_abs(rid_arr, col_id_arr, coef_arr, self._scale)
@@ -617,9 +607,7 @@ class Log2HistogramReducer(Reducer):
                 float(bmax[j]),
             )
 
-    def _fold(
-        self, bkey: Hashable, slog: float, cnt: int, amin: float, amax: float
-    ) -> None:
+    def _fold(self, bkey: Hashable, slog: float, cnt: int, amin: float, amax: float) -> None:
         prev = self._acc.get(bkey)
         if prev is None:
             self._acc[bkey] = (slog, cnt, amin, amax)
@@ -659,9 +647,7 @@ def _resolve_spine_rids(
     if "col_id" in cols and "_rid" not in cols:
         return spine, "column"
     if "_rid" not in cols:
-        spine = spine.with_columns(
-            _rid=pl.int_range(0, spine.height, dtype=pl.Int64)
-        )
+        spine = spine.with_columns(_rid=pl.int_range(0, spine.height, dtype=pl.Int64))
     return spine, "constraint"
 
 
@@ -762,9 +748,7 @@ def _dense_param_vectors(
         if id(atomic) in out:
             continue
         atomic_df = atomic.lazy.collect().sort(dense_list)
-        out[id(atomic)] = (
-            atomic_df["value"].to_numpy().astype(np.float64, copy=False)
-        )
+        out[id(atomic)] = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
     return out
 
 
@@ -1012,9 +996,7 @@ def _reduced_lazy_collect(
     reduced = _apply_where_frames(reduced, rdims, recipe.where_frames)
     # Bake ONLY the genuinely-deferred map-effect frames so the introduced
     # dim(s) (e.g. ``n``) the ``_rid`` ``on``-key needs are materialised.
-    deferred_map = _deferred_where_map_frames(
-        reduced, rdims, recipe.where_map_frames
-    )
+    deferred_map = _deferred_where_map_frames(reduced, rdims, recipe.where_map_frames)
     if deferred_map is not None:
         reduced, _red_dims = _apply_where_map_frames(reduced, rdims, deferred_map)
     on = [d for d in rdims if d in axis_cols]
@@ -1227,9 +1209,7 @@ def _build_param_only_batch_triple(
         zi = np.empty(0, dtype=np.int64)
         return zi, zi, z
 
-    coef = _param_only_positional(
-        batch_over, axis_cols, recipe, dense_axes, dense_param_vectors
-    )
+    coef = _param_only_positional(batch_over, axis_cols, recipe, dense_axes, dense_param_vectors)
     if coef is not None:
         # Positional build keeps the batch's row order, so ``_rid`` pairs
         # index-for-index with ``coef``.
@@ -1269,7 +1249,7 @@ def _param_only_positional(
     dense_dims = list(dense_axes)
     if len(dense_dims) > len(axis_cols):
         return None
-    if tuple(axis_cols[-len(dense_dims):]) != tuple(dense_dims):
+    if tuple(axis_cols[-len(dense_dims) :]) != tuple(dense_dims):
         return None
     non_dense_dims = [d for d in axis_cols if d not in set(dense_dims)]
     for atomic, _direction in sources:
@@ -1283,9 +1263,7 @@ def _param_only_positional(
 
     n = int(batch_over.height)
     n_dense = batch_over.select(dense_dims).n_unique() if dense_dims else 1
-    n_lead = (
-        batch_over.select(non_dense_dims).n_unique() if non_dense_dims else 1
-    )
+    n_lead = batch_over.select(non_dense_dims).n_unique() if non_dense_dims else 1
     if n != n_lead * n_dense:
         return None
 
@@ -1295,9 +1273,7 @@ def _param_only_positional(
 
     lead_table = None
     if non_dense_dims:
-        lead_table = batch_over.select(non_dense_dims).unique(
-            maintain_order=True
-        )
+        lead_table = batch_over.select(non_dense_dims).unique(maintain_order=True)
         if lead_table.height != n_lead:
             return None
 
@@ -1319,17 +1295,11 @@ def _param_only_positional(
         has_dense = bool(shared_set & dense_set)
 
         if has_lead and not has_dense:
-            lt_a, at_a = _align_enum_join_keys(
-                lead_table.lazy(), atomic.lazy, shared
-            )
-            aligned = lt_a.join(
-                at_a, on=shared, how="left", maintain_order="left"
-            ).collect()
+            lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic.lazy, shared)
+            aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
             if aligned.height != n_lead or aligned["value"].null_count() > 0:
                 return None
-            block_vals = (
-                aligned["value"].to_numpy().astype(np.float64, copy=False)
-            )
+            block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
             repeated = np.repeat(block_vals, n_dense)
             if direction >= 0:
                 coef = coef * repeated
@@ -1340,17 +1310,13 @@ def _param_only_positional(
             # Dense-only: the sorted dense vector is batch-invariant — use the
             # hoisted buffer when present, else collect+sort inline.
             dense_vals = (
-                dense_param_vectors.get(id(atomic))
-                if dense_param_vectors is not None
-                else None
+                dense_param_vectors.get(id(atomic)) if dense_param_vectors is not None else None
             )
             if dense_vals is None:
                 atomic_df = atomic.lazy.collect().sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return None
-                dense_vals = (
-                    atomic_df["value"].to_numpy().astype(np.float64, copy=False)
-                )
+                dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
             elif dense_vals.size != n_dense:
                 return None
             tiled = np.tile(dense_vals, n_lead)
@@ -1360,12 +1326,8 @@ def _param_only_positional(
                 coef = coef / tiled
 
         elif has_dense:
-            grid_a, at_a = _align_enum_join_keys(
-                batch_over.lazy(), atomic.lazy, shared
-            )
-            aligned = grid_a.join(
-                at_a, on=shared, how="left", maintain_order="left"
-            ).collect()
+            grid_a, at_a = _align_enum_join_keys(batch_over.lazy(), atomic.lazy, shared)
+            aligned = grid_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
             if aligned.height != n or aligned["value"].null_count() > 0:
                 return None
             vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1406,23 +1368,15 @@ def _param_only_prune_down(
     collected frame, so the ``_rid`` order matches the ``coef`` order
     regardless of how polars laid the join out).
     """
-    acc = batch_over.lazy().with_columns(
-        value=pl.lit(float(recipe.coef_scalar), dtype=pl.Float64)
-    )
+    acc = batch_over.lazy().with_columns(value=pl.lit(float(recipe.coef_scalar), dtype=pl.Float64))
     for atomic, direction in recipe.param_sources:
         atomic_on = [d for d in atomic.dims if d in axis_cols]
         if atomic_on:
-            acc_for_keys, atomic_lazy = _align_enum_join_keys(
-                acc, atomic.lazy, atomic_on
-            )
+            acc_for_keys, atomic_lazy = _align_enum_join_keys(acc, atomic.lazy, atomic_on)
             keys_lazy = acc_for_keys.select(atomic_on).unique()
-            keys_a, atomic_a = _align_enum_join_keys(
-                keys_lazy, atomic_lazy, atomic_on
-            )
+            keys_a, atomic_a = _align_enum_join_keys(keys_lazy, atomic_lazy, atomic_on)
             atomic_pruned = atomic_a.join(keys_a, on=atomic_on, how="semi")
-            acc_a, atomic_pruned_a = _align_enum_join_keys(
-                acc_for_keys, atomic_pruned, atomic_on
-            )
+            acc_a, atomic_pruned_a = _align_enum_join_keys(acc_for_keys, atomic_pruned, atomic_on)
             joined = acc_a.join(
                 atomic_pruned_a,
                 on=atomic_on,
@@ -1430,13 +1384,13 @@ def _param_only_prune_down(
                 suffix="__rhs_chain",
             )
             if direction >= 0:
-                acc = joined.with_columns(
-                    value=pl.col("value") * pl.col("value__rhs_chain")
-                ).drop("value__rhs_chain")
+                acc = joined.with_columns(value=pl.col("value") * pl.col("value__rhs_chain")).drop(
+                    "value__rhs_chain"
+                )
             else:
-                acc = joined.with_columns(
-                    value=pl.col("value") / pl.col("value__rhs_chain")
-                ).drop("value__rhs_chain")
+                acc = joined.with_columns(value=pl.col("value") / pl.col("value__rhs_chain")).drop(
+                    "value__rhs_chain"
+                )
         else:
             scalar_val = float(atomic.frame["value"][0])
             if direction >= 0:
@@ -1526,21 +1480,15 @@ def _precompute_hoist(
     # --- Classify the block-COO spec ONCE (batch-invariant).
     if recipe.sum_block_meta is None:
         var = recipe.var_source
-        blk_on = list(var.dims) if mode == "column" else [
-            d for d in var.dims if d in axis_cols
-        ]
-        spec = _block_coo_classify(
-            _NonSumTermProxy(recipe), axis_cols, blk_on, dense_axes
-        )
+        blk_on = list(var.dims) if mode == "column" else [d for d in var.dims if d in axis_cols]
+        spec = _block_coo_classify(_NonSumTermProxy(recipe), axis_cols, blk_on, dense_axes)
         verify_frame = var.frame
         verify_name = getattr(var, "name", None)
         fires = spec is not None and recipe.where_map_frames is None
     else:
         meta = recipe.sum_block_meta
         keep_on = [d for d in meta.keep if d in axis_cols]
-        spec = _sum_block_coo_classify(
-            _SumTermProxy(recipe), axis_cols, keep_on, dense_axes
-        )
+        spec = _sum_block_coo_classify(_SumTermProxy(recipe), axis_cols, keep_on, dense_axes)
         verify_frame = meta.var_source.frame
         verify_name = getattr(meta.var_source, "name", None)
         fires = spec is not None
@@ -1566,9 +1514,7 @@ def _precompute_hoist(
     # fires (the verify above has run) and the prune-down fallback otherwise.
     if mode == "column":
         seed = annotated  # the objective spine IS the whole Var seed
-        col_cids, col_coef = _column_whole_product(
-            seed, recipe, spec, hoist.dense_param_vectors
-        )
+        col_cids, col_coef = _column_whole_product(seed, recipe, spec, hoist.dense_param_vectors)
         hoist.col_coef_cids = col_cids
         hoist.col_coef = col_coef
         hoist.col_coef_order = np.argsort(col_cids, kind="stable")
@@ -1697,9 +1643,7 @@ def bounded_coefficient_walk(
                 batch, axis_cols, recipe, dense_axes, hoist.dense_param_vectors
             )
         else:
-            rid, cid, coef = _build_constraint_batch_triple(
-                batch, axis_cols, recipe, hoist
-            )
+            rid, cid, coef = _build_constraint_batch_triple(batch, axis_cols, recipe, hoist)
         for r in reducer_list:
             r.update(rid, cid, coef)
         # Free the batch product before the next slice — peak stays O(batch).

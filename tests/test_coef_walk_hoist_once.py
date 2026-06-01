@@ -43,12 +43,8 @@ from polar_high.engine import Param, Problem
 
 
 def _side_vectors(n_rows: int, n_cols: int):
-    rf = np.array(
-        [10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
-    cf = np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    rf = np.array([10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
+    cf = np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
     return rf, cf
 
 
@@ -164,15 +160,11 @@ def test_verify_dense_sorted_hoisted_once_constraint(monkeypatch):
     n = over.height
     assert n > 10  # genuinely multi-batch at batch_rows=3
 
-    whole = _run_counted(
-        monkeypatch, over, recipe, scale, batch_rows=n, dense_axes=("d", "t")
-    )
+    whole = _run_counted(monkeypatch, over, recipe, scale, batch_rows=n, dense_axes=("d", "t"))
     assert whole["verify_n"] == 1, whole
     assert whole["build_n"] == 1  # one whole batch
 
-    small = _run_counted(
-        monkeypatch, over, recipe, scale, batch_rows=3, dense_axes=("d", "t")
-    )
+    small = _run_counted(monkeypatch, over, recipe, scale, batch_rows=3, dense_axes=("d", "t"))
     # The crux: many batches, but the full-frame verify still ran ONCE.
     assert small["build_n"] > 1, "test did not exercise multiple batches"
     assert small["verify_n"] == 1, (
@@ -199,15 +191,11 @@ def test_verify_dense_sorted_hoisted_once_column(monkeypatch):
     _rf, cf = _side_vectors(1, prob._next_col)
     scale = (None, 0, cf)
 
-    whole = _run_counted(
-        monkeypatch, spine, recipe, scale, batch_rows=n, dense_axes=("d", "t")
-    )
+    whole = _run_counted(monkeypatch, spine, recipe, scale, batch_rows=n, dense_axes=("d", "t"))
     assert whole["verify_n"] == 1
     assert whole["colprod_n"] == 1
 
-    small = _run_counted(
-        monkeypatch, spine, recipe, scale, batch_rows=4, dense_axes=("d", "t")
-    )
+    small = _run_counted(monkeypatch, spine, recipe, scale, batch_rows=4, dense_axes=("d", "t"))
     assert small["build_n"] > 1, "test did not exercise multiple batches"
     assert small["verify_n"] == 1, (
         f"verify ran per batch: {small['verify_n']} for {small['build_n']}"

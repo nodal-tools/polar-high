@@ -12,6 +12,7 @@ Run modes (controlled by argv[1]):
 
 Each subprocess prints a JSON line with peak_rss_bytes and per-phase deltas.
 """
+
 from __future__ import annotations
 
 import gc
@@ -44,7 +45,7 @@ def cur_rss_gb() -> float:
     try:
         with open("/proc/self/statm") as f:
             rss_pages = int(f.read().split()[1])
-        return rss_pages * (resource.getpagesize() / (1024 ** 3))
+        return rss_pages * (resource.getpagesize() / (1024**3))
     except Exception:
         return rss_gb()
 
@@ -53,11 +54,14 @@ def now() -> float:
     return time.monotonic()
 
 
-def build_problem_multi(n_vars: int, n_cstrs_dim: int, nnz_per_cstr: int, n_families: int) -> Problem:
+def build_problem_multi(
+    n_vars: int, n_cstrs_dim: int, nnz_per_cstr: int, n_families: int
+) -> Problem:
     """Multi-family variant: split constraints into N families. Mimics realistic
     LPs where many small constraint families each contribute triples."""
     from polar_high.engine import Param
     from polar_high.engine import Sum as Sum2
+
     pb = Problem()
     idx_i = pl.DataFrame({"i": pl.int_range(0, n_vars, dtype=pl.Int64, eager=True)})
     x = pb.add_var("x", dims=("i",), index=idx_i, lower=0.0, upper=10.0)
@@ -72,20 +76,22 @@ def build_problem_multi(n_vars: int, n_cstrs_dim: int, nnz_per_cstr: int, n_fami
         coef_df = pl.DataFrame({"r": r_arr, "i": i_arr, "value": v_arr})
         p = Param(("r", "i"), coef_df)
         expr = Sum2(p * x, over=("i",))
-        pb.add_cstr(f"c{fi}", over=idx_r, sense="<=", lhs_terms={"lhs": expr}, rhs_terms={"rhs": 100.0})
+        pb.add_cstr(
+            f"c{fi}", over=idx_r, sense="<=", lhs_terms={"lhs": expr}, rhs_terms={"rhs": 100.0}
+        )
     pb.set_objective(Sum2(x, over=("i",)), sense="min")
     return pb
 
 
 def build_problem(n_vars: int, n_cstrs_dim: int, nnz_per_cstr: int) -> Problem:
     """Synthetic LP:
-       - One Var family "x" with n_vars columns indexed by i in [0, n_vars).
-       - One constraint family "c" of n_cstrs_dim rows indexed by r.
-         Each row touches `nnz_per_cstr` distinct columns. We build the
-         coefficient frame as a (r, i, coef) Param-like polars frame fed
-         via a Sum expr.
+    - One Var family "x" with n_vars columns indexed by i in [0, n_vars).
+    - One constraint family "c" of n_cstrs_dim rows indexed by r.
+      Each row touches `nnz_per_cstr` distinct columns. We build the
+      coefficient frame as a (r, i, coef) Param-like polars frame fed
+      via a Sum expr.
 
-       Total rows = n_cstrs_dim; total cols = n_vars; total nnz = n_cstrs_dim*nnz_per_cstr.
+    Total rows = n_cstrs_dim; total cols = n_vars; total nnz = n_cstrs_dim*nnz_per_cstr.
     """
     pb = Problem()
     idx_i = pl.DataFrame({"i": pl.int_range(0, n_vars, dtype=pl.Int64, eager=True)})
@@ -114,6 +120,7 @@ def build_problem(n_vars: int, n_cstrs_dim: int, nnz_per_cstr: int) -> Problem:
 
     # Objective: minimize sum of x.
     from polar_high.engine import Sum as Sum2
+
     pb.set_objective(Sum2(x, over=("i",)), sense="min")
     return pb
 
@@ -148,9 +155,7 @@ def instrumented_write_mps(pb: Problem, path: str) -> dict:
         else:
             row_count = int(over.height)
             axis_cols = list(over.columns)
-            row_index = over.with_columns(
-                _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-            )
+            row_index = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64))
         base_row = next_row
         next_row += row_count
         rhs_vec = np.zeros(row_count, dtype=np.float64)
@@ -258,16 +263,10 @@ def instrumented_write_mps(pb: Problem, path: str) -> dict:
     if sort_mode == "global":
         try:
             sorted_triples = (
-                all_triples.lazy()
-                .sort(["col_id", "row_id"])
-                .collect(engine="streaming")
+                all_triples.lazy().sort(["col_id", "row_id"]).collect(engine="streaming")
             )
         except TypeError:
-            sorted_triples = (
-                all_triples.lazy()
-                .sort(["col_id", "row_id"])
-                .collect(streaming=True)
-            )
+            sorted_triples = all_triples.lazy().sort(["col_id", "row_id"]).collect(streaming=True)
         del all_triples
         phases["after_sort_gb"] = rss_gb()
         # walk sorted to mimic emit (so the buffer stays alive through emit)
@@ -279,9 +278,7 @@ def instrumented_write_mps(pb: Problem, path: str) -> dict:
         n_cols_local = int(pb._next_col)
         n_chunks = (n_cols_local + chunk_size - 1) // chunk_size
         # Add partition key, then for each partition filter+sort.
-        all_triples = all_triples.with_columns(
-            (pl.col("col_id") // chunk_size).alias("__part")
-        )
+        all_triples = all_triples.with_columns((pl.col("col_id") // chunk_size).alias("__part"))
         max_h = 0
         for p_idx in range(n_chunks):
             part = all_triples.filter(pl.col("__part") == p_idx).drop("__part")

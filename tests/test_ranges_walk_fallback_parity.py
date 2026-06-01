@@ -160,13 +160,12 @@ def _build_problem() -> Problem:
         }
     )
     nb = Sum(Where(v * P_unit, map_to_n) * P_step, over=("p", "s"))
-    nb_over = (
-        nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(
-            ["n", "d", "t"]
-        )
-    )
+    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(["n", "d", "t"])
     prob.add_cstr(
-        "map", over=nb_over, sense="<=", lhs_terms={"lhs": nb},
+        "map",
+        over=nb_over,
+        sense="<=",
+        lhs_terms={"lhs": nb},
         rhs_terms={"rhs": 0.0},
     )
 
@@ -192,13 +191,12 @@ def _build_problem() -> Problem:
         name="P_unit_c",
     )
     comb = Sum(Where(vc * P_unit_c, map_ph) * P_step, over=("h",))
-    comb_over = (
-        comb.terms[0].frame.select(list(comb.terms[0].dims)).unique().sort(
-            ["p", "d", "t"]
-        )
-    )
+    comb_over = comb.terms[0].frame.select(list(comb.terms[0].dims)).unique().sort(["p", "d", "t"])
     prob.add_cstr(
-        "comb", over=comb_over, sense="<=", lhs_terms={"lhs": comb},
+        "comb",
+        over=comb_over,
+        sense="<=",
+        lhs_terms={"lhs": comb},
         rhs_terms={"rhs": 0.0},
     )
 
@@ -211,18 +209,15 @@ def _install_side_vectors(prob: Problem) -> None:
     range readout's side-vector multiply is genuinely exercised."""
     n_rows = sum(over.height for _c, _p, over in prob._cstrs)
     n_cols = int(prob._next_col)
-    rf = np.array(
-        [10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
-    cf = np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    rf = np.array([10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
+    cf = np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
     prob._layer2_row_factor = rf
     prob._layer2_col_factor = cf
 
 
 def _report_tuple(rep) -> tuple:
     """Flatten a RangeReport into a comparable tuple, NaN-safe via repr."""
+
     def _pair(x):
         return (repr(x[0]), repr(x[1]))
 
@@ -497,8 +492,7 @@ def test_rhs_walk_fallback_no_skip_and_fires() -> None:
 
     out = buf.getvalue()
     assert "ranges-stream SKIP" not in out, (
-        "the declined RHS chain must be bounded by the walk, never skipped.\n"
-        f"stderr:\n{out}"
+        f"the declined RHS chain must be bounded by the walk, never skipped.\nstderr:\n{out}"
     )
     assert out.count("rhs_walk=1") == 1, (
         "expected the Var-less RHS walk to fire once on the declined "

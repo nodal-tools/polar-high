@@ -92,14 +92,15 @@ def test_roundtrip_mixed_senses_and_bounds(tmp_path) -> None:
     c = pb.add_var("c", dims=("i",), index=idx)
 
     # a + b + c == 4    (E)
-    pb.add_cstr("eq", over=idx, sense="==",
-                lhs_terms={"a": a, "b": b, "c": c}, rhs_terms={"r": 4.0})
+    pb.add_cstr(
+        "eq", over=idx, sense="==", lhs_terms={"a": a, "b": b, "c": c}, rhs_terms={"r": 4.0}
+    )
     # a - b >= -3       (G)  -> shifts b into negative-of-RHS
-    pb.add_cstr("ge", over=idx, sense=">=",
-                lhs_terms={"a": a, "negb": -1.0 * b}, rhs_terms={"r": -3.0})
+    pb.add_cstr(
+        "ge", over=idx, sense=">=", lhs_terms={"a": a, "negb": -1.0 * b}, rhs_terms={"r": -3.0}
+    )
     # a + c <= 12       (L)
-    pb.add_cstr("le", over=idx, sense="<=",
-                lhs_terms={"a": a, "c": c}, rhs_terms={"r": 12.0})
+    pb.add_cstr("le", over=idx, sense="<=", lhs_terms={"a": a, "c": c}, rhs_terms={"r": 12.0})
 
     pb.set_objective(a + b + c, sense="min")
 
@@ -110,12 +111,13 @@ def test_roundtrip_mixed_senses_and_bounds(tmp_path) -> None:
     a = pb2.add_var("a", dims=("i",), index=idx, lower=-5.0, upper=10.0)
     b = pb2.add_var("b", dims=("i",), index=idx, lower=-math.inf, upper=math.inf)
     c = pb2.add_var("c", dims=("i",), index=idx)
-    pb2.add_cstr("eq", over=idx, sense="==",
-                 lhs_terms={"a": a, "b": b, "c": c}, rhs_terms={"r": 4.0})
-    pb2.add_cstr("ge", over=idx, sense=">=",
-                 lhs_terms={"a": a, "negb": -1.0 * b}, rhs_terms={"r": -3.0})
-    pb2.add_cstr("le", over=idx, sense="<=",
-                 lhs_terms={"a": a, "c": c}, rhs_terms={"r": 12.0})
+    pb2.add_cstr(
+        "eq", over=idx, sense="==", lhs_terms={"a": a, "b": b, "c": c}, rhs_terms={"r": 4.0}
+    )
+    pb2.add_cstr(
+        "ge", over=idx, sense=">=", lhs_terms={"a": a, "negb": -1.0 * b}, rhs_terms={"r": -3.0}
+    )
+    pb2.add_cstr("le", over=idx, sense="<=", lhs_terms={"a": a, "c": c}, rhs_terms={"r": 12.0})
     pb2.set_objective(a + b + c, sense="min")
 
     mps_path = tmp_path / "mixed.mps"
@@ -145,18 +147,16 @@ def test_roundtrip_integer_var(tmp_path) -> None:
     Additionally, assert the MPS contains the INTORG/INTEND markers
     and the readback LP has the right integrality flags.
     """
+
     def _build() -> Problem:
         pb = Problem()
         idx = pl.DataFrame({"i": [0]})
         x = pb.add_var("x", dims=("i",), index=idx, lower=0.0, upper=10.0)
-        z = pb.add_var(
-            "z", dims=("i",), index=idx, lower=0.0, upper=10.0, integer=True
-        )
+        z = pb.add_var("z", dims=("i",), index=idx, lower=0.0, upper=10.0, integer=True)
         # Choose a problem where the LP relaxation IS integer-feasible
         # so the solve happens entirely in presolve and the answer is
         # deterministic across HiGHS versions.
-        pb.add_cstr("g", over=idx, sense=">=",
-                    lhs_terms={"x": x, "z": z}, rhs_terms={"r": 4.5})
+        pb.add_cstr("g", over=idx, sense=">=", lhs_terms={"x": x, "z": z}, rhs_terms={"r": 4.5})
         pb.set_objective(2.0 * x + 3.0 * z, sense="min")
         return pb
 
@@ -295,9 +295,7 @@ def test_profile_env_var_emits_checkpoints(tmp_path, monkeypatch, capsys) -> Non
     if "psutil not installed" in on_err:
         pytest.skip("psutil not installed — profiling gracefully disabled")
 
-    lines = [
-        ln for ln in on_err.splitlines() if ln.startswith("[write_mps profile]")
-    ]
+    lines = [ln for ln in on_err.splitlines() if ln.startswith("[write_mps profile]")]
     assert lines, f"expected profile lines on stderr; got:\n{on_err!r}"
     phases = [
         next(

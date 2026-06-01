@@ -148,12 +148,8 @@ def _install_side_vectors(prob: Problem) -> None:
     RHS readout's row-factor multiply is non-trivial."""
     n_rows = sum(over.height for _c, _p, over in prob._cstrs)
     n_cols = int(prob._next_col)
-    rf = np.array(
-        [10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64
-    )
-    cf = np.array(
-        [10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64
-    )
+    rf = np.array([10.0 ** ((i % 5) - 2) for i in range(n_rows)], dtype=np.float64)
+    cf = np.array([10.0 ** ((i % 7) - 3) for i in range(n_cols)], dtype=np.float64)
     prob._layer2_row_factor = rf
     prob._layer2_col_factor = cf
 
@@ -161,6 +157,7 @@ def _install_side_vectors(prob: Problem) -> None:
 def _report_tuple(rep) -> tuple:
     """Flatten a RangeReport into a comparable tuple of raw floats / bools,
     NaN-safe (NaN compared by ``repr``)."""
+
     def _pair(x):
         return (repr(x[0]), repr(x[1]))
 
@@ -234,8 +231,7 @@ def test_ranges_rhs_bound_branch_fired() -> None:
         f"chain family; profile:\n{out}"
     )
     assert "path=rhs_positional" in out, (
-        "expected the rhs_positional block-COO path signal; "
-        f"profile:\n{out}"
+        f"expected the rhs_positional block-COO path signal; profile:\n{out}"
     )
 
 
@@ -330,9 +326,7 @@ def test_ranges_rhs_bound_peak_is_bounded() -> None:
 
     def _patched(self, *a, **k):
         df = orig_collect(self, *a, **k)
-        if set(df.columns) == {"_rid", "value"} and df.height > peak[
-            "rhs_product_rows"
-        ]:
+        if set(df.columns) == {"_rid", "value"} and df.height > peak["rhs_product_rows"]:
             peak["rhs_product_rows"] = df.height
         return df
 

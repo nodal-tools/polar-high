@@ -37,6 +37,7 @@ state (the crash precondition), then the readout is asserted to (a) NOT raise
 and (b) report a matrix range byte-identical to an independent reference
 reduction of the term's ``.lazy`` with the SAME side-vector scale.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -87,12 +88,7 @@ def _build_problem() -> Problem:
         }
     )
     nb = Sum(Where(v * P, mp), over=("p", "s"))
-    nb_over = (
-        nb.terms[0]
-        .frame.select(list(nb.terms[0].dims))
-        .unique()
-        .sort(["n", "d", "t"])
-    )
+    nb_over = nb.terms[0].frame.select(list(nb.terms[0].dims)).unique().sort(["n", "d", "t"])
     prob.add_cstr(
         "nodeBalance_eq",
         over=nb_over,
@@ -118,10 +114,7 @@ def _force_recipe_less(prob: Problem) -> None:
 
 
 def _rows(prob: Problem) -> int:
-    return sum(
-        1 if over is None else int(over.height)
-        for _c, _p, over in prob._cstrs
-    )
+    return sum(1 if over is None else int(over.height) for _c, _p, over in prob._cstrs)
 
 
 def _install_layer2(prob: Problem, *, col_factor: float) -> None:
@@ -129,9 +122,7 @@ def _install_layer2(prob: Problem, *, col_factor: float) -> None:
     ``col_factor`` so the col-factor multiply is exercised and stays exact in
     IEEE; distinct power-of-two per-row factors so the row-factor scale is
     non-trivial."""
-    prob._layer2_col_factor = np.full(
-        prob._next_col, col_factor, dtype=np.float64
-    )
+    prob._layer2_col_factor = np.full(prob._next_col, col_factor, dtype=np.float64)
     prob._layer2_row_factor = 2.0 ** np.arange(_rows(prob), dtype=np.float64)
 
 
@@ -143,18 +134,12 @@ def _reference_matrix_range(prob: Problem) -> tuple[float, float]:
     non-zero entries.  ``base_row`` is 0 (single constraint family)."""
     cf = prob._layer2_col_factor
     rf = prob._layer2_row_factor
-    (_cname, proto, over), = prob._cstrs
+    ((_cname, proto, over),) = prob._cstrs
     term = proto.expr.terms[0]
     on = [d for d in term.dims if d in over.columns]
-    ri = over.with_columns(
-        _rid=pl.int_range(0, over.height, dtype=pl.Int64)
-    ).lazy()
+    ri = over.with_columns(_rid=pl.int_range(0, over.height, dtype=pl.Int64)).lazy()
     rl_a, tl_a = _align(ri, term.lazy, on)
-    j = (
-        rl_a.join(tl_a, on=on, how="inner")
-        .select("_rid", "col_id", "coef")
-        .collect()
-    )
+    j = rl_a.join(tl_a, on=on, how="inner").select("_rid", "col_id", "coef").collect()
     rids = j["_rid"].to_numpy().astype(np.int64)
     cids = j["col_id"].to_numpy().astype(np.int64)
     vals = j["coef"].to_numpy().astype(np.float64)
@@ -268,16 +253,13 @@ class _DuckTerm:
         self.dims = ("d",)
         # ``term.lazy`` carries ``(*dims, col_id, coef)`` so the meta-branch
         # ``from_term`` (which captures it as ``reduced_lazy``) builds cleanly.
-        self.lazy = pl.DataFrame(
-            {"d": ["a", "b"], "col_id": [0, 1], "coef": [1.0, 2.0]}
-        ).lazy()
+        self.lazy = pl.DataFrame({"d": ["a", "b"], "col_id": [0, 1], "coef": [1.0, 2.0]}).lazy()
 
 
 def _make_real_var():
     """A genuine (frozen) ``Var`` so the non-collapsed combinations build."""
     p = Problem()
-    return p.add_var("v", ("d",), pl.DataFrame({"d": ["a", "b"]}),
-                     lower=0.0, upper=1.0)
+    return p.add_var("v", ("d",), pl.DataFrame({"d": ["a", "b"]}), lower=0.0, upper=1.0)
 
 
 def _from_term_succeeds(term) -> bool:
@@ -290,9 +272,7 @@ def _from_term_succeeds(term) -> bool:
         return False
 
 
-@pytest.mark.parametrize(
-    "meta_kind", ["none", "meta_var_none", "meta_var_real"]
-)
+@pytest.mark.parametrize("meta_kind", ["none", "meta_var_none", "meta_var_real"])
 @pytest.mark.parametrize("term_has_var", [False, True])
 def test_is_buildable_matches_from_term_exactly(meta_kind, term_has_var):
     """For EVERY (sum_block_meta in {None, meta var None, meta var real}) x
@@ -329,9 +309,7 @@ def _force_meta_present_var_none(prob: Problem) -> None:
     assert term.sum_block_meta is not None, "fixture term must be Sum-wrapped"
     assert tuple(term.dims), "fixture term must keep non-empty dims"
     term.var_source = None
-    term.sum_block_meta = dataclasses.replace(
-        term.sum_block_meta, var_source=None
-    )
+    term.sum_block_meta = dataclasses.replace(term.sum_block_meta, var_source=None)
 
 
 def test_meta_present_var_none_is_not_buildable():
