@@ -35,22 +35,58 @@ REPO_ROOT = HERE.parent
 
 TOOL_COLORS = {
     "polar": "#1f77b4",
+    "polar_sm": "#1f77b4",
+    "polar_da": "#16a085",
     "linopy": "#d97706",
     "pyomo": "#a91b0d",
     "polar_net": "#1f77b4",
+    "polar_sm_net": "#1f77b4",
+    "polar_da_net": "#16a085",
     "linopy_net": "#d97706",
     "pyomo_net": "#a91b0d",
 }
+# Same colour family for the polar variants where one is "the same tool
+# with a knob flipped" (regular vs save_memory). polar_da uses a separate
+# colour because it's a different code path (block-COO dense-axis arm),
+# not the same path with a knob.
+TOOL_LINESTYLES = {
+    "polar": "-",
+    "polar_sm": "--",
+    "polar_da": "-",
+    "linopy": "-",
+    "pyomo": "-",
+    "polar_net": "-",
+    "polar_sm_net": "--",
+    "polar_da_net": "-",
+    "linopy_net": "-",
+    "pyomo_net": "-",
+}
+TOOL_MARKERS = {
+    "polar": "o",
+    "polar_sm": "s",
+    "polar_da": "D",
+    "linopy": "o",
+    "pyomo": "o",
+    "polar_net": "o",
+    "polar_sm_net": "s",
+    "polar_da_net": "D",
+    "linopy_net": "o",
+    "pyomo_net": "o",
+}
 TOOL_LABELS = {
-    "polar": "polar-high",
+    "polar": "polar-high (regular)",
+    "polar_sm": "polar-high (save_memory)",
+    "polar_da": "polar-high (dense_axes)",
     "linopy": "linopy",
     "pyomo": "Pyomo",
-    "polar_net": "polar-high",
+    "polar_net": "polar-high (regular)",
+    "polar_sm_net": "polar-high (save_memory)",
+    "polar_da_net": "polar-high (dense_axes)",
     "linopy_net": "linopy",
     "pyomo_net": "Pyomo",
 }
-TOOL_ORDER_DENSE = ["polar", "linopy", "pyomo"]
-TOOL_ORDER_NET = ["polar_net", "linopy_net", "pyomo_net"]
+TOOL_ORDER_DENSE = ["polar", "polar_sm", "polar_da", "linopy", "pyomo"]
+TOOL_ORDER_NET = ["polar_net", "polar_sm_net", "polar_da_net", "linopy_net", "pyomo_net"]
 
 
 def _load_all(in_csv_glob: list[str]) -> pd.DataFrame:
@@ -81,12 +117,20 @@ def _load_all(in_csv_glob: list[str]) -> pd.DataFrame:
 def _aggregate(df: pd.DataFrame, group: list[str]) -> pd.DataFrame:
     # ``total_s`` is build_s + solve_s per *rep* (the apples-to-apples
     # cross-tool measurement: full time from no-model to solution).
+    # ``peak_mb`` is cgroup-level memory.peak when available (kernel
+    # cgroup v2 accounting, what OOM would actually use), and falls back
+    # to ru_maxrss for legacy CSVs that pre-date the cgroup column.
     df = df.assign(total_s=df["build_s"] + df["solve_s"])
+    if "cgroup_peak_mb" in df.columns:
+        peak = df["cgroup_peak_mb"].where(df["cgroup_peak_mb"] > 0, df["peak_rss_mb"])
+        df = df.assign(peak_mb=peak)
+    else:
+        df = df.assign(peak_mb=df["peak_rss_mb"])
     return df.groupby(group, as_index=False).agg(
         build_s=("build_s", "median"),
         solve_s=("solve_s", "median"),
         total_s=("total_s", "median"),
-        peak_rss_mb=("peak_rss_mb", "median"),
+        peak_rss_mb=("peak_mb", "median"),
     )
 
 
@@ -147,7 +191,8 @@ def _draw_three_panels(
         if sub.empty:
             continue
         kw = dict(
-            marker="o",
+            marker=TOOL_MARKERS.get(tool, "o"),
+            linestyle=TOOL_LINESTYLES.get(tool, "-"),
             linewidth=1.6,
             markersize=5,
             color=TOOL_COLORS[tool],
@@ -203,9 +248,14 @@ def _draw_threading_benefit(
     at 32 threads, linopy at 1 thread. Shows where polars parallelism
     starts paying as N grows."""
     df = df_net.assign(total_s=df_net["build_s"] + df_net["solve_s"])
+    if "cgroup_peak_mb" in df.columns:
+        peak = df["cgroup_peak_mb"].where(df["cgroup_peak_mb"] > 0, df["peak_rss_mb"])
+        df = df.assign(peak_mb=peak)
+    else:
+        df = df.assign(peak_mb=df["peak_rss_mb"])
     agg = df.groupby(["tool", "threads", "N"], as_index=False).agg(
         total_s=("total_s", "median"),
-        peak_rss_mb=("peak_rss_mb", "median"),
+        peak_rss_mb=("peak_mb", "median"),
     )
 
     series = [
@@ -282,7 +332,8 @@ def _draw_two_panels(
         if sub.empty:
             continue
         kw = dict(
-            marker="o",
+            marker=TOOL_MARKERS.get(tool, "o"),
+            linestyle=TOOL_LINESTYLES.get(tool, "-"),
             linewidth=1.6,
             markersize=5,
             color=TOOL_COLORS[tool],
@@ -329,17 +380,28 @@ def main() -> None:
         dest="in_csvs",
         nargs="+",
         default=[
+            str(HERE / "results" / "cgroup" / "dense_fullsolve.csv"),
             str(HERE / "results" / "results.csv"),
             str(HERE / "results" / "results_v1_1.csv"),
         ],
     )
     ap.add_argument(
         "--in-buildonly",
-        default=str(HERE / "results" / "results_buildonly.csv"),
+        nargs="+",
+        default=[
+            str(HERE / "results" / "cgroup" / "dense_buildonly.csv"),
+            str(HERE / "results" / "cgroup" / "threads_dense.csv"),
+            str(HERE / "results" / "results_buildonly.csv"),
+        ],
     )
     ap.add_argument(
         "--in-network",
-        default=str(HERE / "results" / "results_network.csv"),
+        nargs="+",
+        default=[
+            str(HERE / "results" / "cgroup" / "network.csv"),
+            str(HERE / "results" / "cgroup" / "network_threads.csv"),
+            str(HERE / "results" / "results_network.csv"),
+        ],
     )
     ap.add_argument(
         "--out-main",
@@ -395,7 +457,7 @@ def main() -> None:
     # modelling layer, not HiGHS — HiGHS is single-threaded the same
     # way everywhere. N=300 is small enough that pyomo can run at
     # every thread count cheaply, but big enough to amortize startup.
-    df_thr_src = _load_all([args.in_buildonly])
+    df_thr_src = _load_all(list(args.in_buildonly))
     N_thr_target = 300
     if not df_thr_src.empty and (df_thr_src["N"] == N_thr_target).any():
         df_thr = df_thr_src[df_thr_src["N"] == N_thr_target]
@@ -411,7 +473,7 @@ def main() -> None:
     # headline figure cleanly reflects threads=1 (single-thread) data
     # for polar and linopy, threads=32 (= threads=1 effectively) for
     # Pyomo. Without this the median would mix threads=1 and 32 reps.
-    df_b_full = _load_all([args.in_buildonly])
+    df_b_full = _load_all(list(args.in_buildonly))
     if not df_b_full.empty:
         df_b = df_b_full.copy()
         df_b["_min_t"] = df_b.groupby(["tool", "N"])["threads"].transform("min")
@@ -468,7 +530,7 @@ def main() -> None:
         )
 
     # --- Network LP family (build-only too) ------------------------------
-    df_net = _load_all([args.in_network])
+    df_net = _load_all(list(args.in_network))
     if not df_net.empty:
         # Standard network plot uses lowest-threads-per-cell rule
         # (gives polar threads=1 if available, threads=32 if not).
