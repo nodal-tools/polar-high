@@ -105,6 +105,28 @@ __all__ = [
 ]
 
 
+def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
+    """Collect ``plan`` with the polars STREAMING engine when available.
+
+    Mirror of :func:`polar_high.autoscale._ranges._collect_streaming`: the
+    streaming engine pushes the ``group_by`` into the deep ``Var × Param …``
+    product so the product is reduced in-stream rather than materialised in
+    full before the reduce (the residual peak the bounded walk exists to
+    avoid).  Falls back across the polars version skew (``engine=``-kwarg →
+    ``streaming=``-kwarg → plain ``collect``) so the readout works on every
+    pinned polars; a plain ``collect`` is correct, just not bounded.
+    """
+    try:
+        return plan.collect(engine="streaming")
+    except TypeError:
+        try:
+            return plan.collect(streaming=True)
+        except TypeError:
+            return plan.collect()
+    except Exception:
+        return plan.collect()
+
+
 # ---------------------------------------------------------------------------
 # Recipe + batch containers
 
@@ -983,25 +1005,41 @@ def _column_whole_product(
 
     # Pure-relabel Sum objective: the term's OWN reduced lazy plan already
     # carries exactly one ``(col_id, coef)`` per LP column.  For a relabel
-    # Sum (``reduce_dims ⊆ var.dims``, no map-effect Where frames) ``col_id``
-    # is 1:1 with Var cells, so the reduced plan's ``group_by(col_id).sum()``
-    # is over single-element groups — the reduced ``coef`` EQUALS the per-cell
-    # product coef the joined whole-product build would emit.  Read it
-    # directly: no identity self-join, no rebuild of the ~unreduced
-    # ``Var × Param`` whole product through ``_build_block_coo_plan``'s joined
-    # branch (the 40 s/term hot spot).  Same ``(col_id, coef)`` the
-    # ``_ref_histogram_column`` reference / the ranges reduced-plan collect
-    # read.  Strictly less memory: ~one row per LP column vs the whole
-    # product.  Non-relabel column terms (bare Var with a Param chain, or any
-    # recipe failing this gate) fall through to the identity-row_index build
-    # below, unchanged.
+    # Sum (``meta.reduce_dims ⊆ var.dims``, no Where frames) ``col_id`` is 1:1
+    # with Var cells, so the reduced plan's ``group_by(col_id).sum()`` is over
+    # single-element groups — the reduced ``coef`` EQUALS the per-cell product
+    # coef the joined whole-product build would emit.  Read it directly: no
+    # identity self-join, no rebuild of the ~unreduced ``Var × Param`` whole
+    # product through ``_build_block_coo_plan``'s joined branch (the 40 s/term
+    # hot spot).  Same ``(col_id, coef)`` the ``_ref_histogram_column``
+    # reference / the ranges reduced-plan collect read.  Strictly less memory:
+    # ~one row per LP column vs the whole product, AND collected with the
+    # STREAMING engine (mirroring ``_ranges``' proven objective collect) so
+    # the deep ``Var × Param`` product is reduced in-stream rather than
+    # materialised before the group-by.
+    #
+    # The gate mirrors ``_ranges._obj_chain_bounded`` / FlexTool's
+    # ``_obj_term_recipe`` EXACTLY so the primitive is correct independent of
+    # its caller: the equivalence holds iff every ``col_id`` group is
+    # single-element, which requires (a) the dims actually summed
+    # (``meta.reduce_dims``) are all Var dims — a fan-out Param whose dim is
+    # summed out would collapse many cells into one ``col_id`` and make the
+    # reduced ``coef`` a genuine SUM ≠ per-cell coef — and (b) no Where
+    # (pure-filter ``where_frames`` or map-effect ``where_map_frames``) carves
+    # or extends the grid.  We check ``meta.reduce_dims`` (the SUMMED dims),
+    # NOT ``recipe.reduced_dims`` (the post-Sum ``keep``, which is ``()`` for
+    # an objective and would make the test vacuously true).  Anything outside
+    # this regime falls through to the identity-row_index build below.
+    meta = recipe.sum_block_meta
     if (
         recipe.reduced_lazy is not None
-        and recipe.sum_block_meta is not None
+        and meta is not None
+        and meta.where_frames is None
+        and meta.where_map_frames is None
         and recipe.where_map_frames is None
-        and set(recipe.reduced_dims or ()).issubset(set(var_dims))
+        and set(meta.reduce_dims).issubset(set(var_dims))
     ):
-        df = recipe.reduced_lazy.select("col_id", "coef").collect()
+        df = _collect_streaming(recipe.reduced_lazy.select("col_id", "coef"))
         return (
             df["col_id"].to_numpy().astype(np.int64),
             df["coef"].to_numpy().astype(np.float64),
