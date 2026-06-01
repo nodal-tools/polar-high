@@ -76,6 +76,37 @@ def _peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
+def _cgroup_peak_mb() -> float:
+    """Peak memory the process's cgroup ever held, in MB (cgroup v2).
+
+    Returns NaN if no cgroup v2 memory.peak file is reachable, or if
+    the parent runner signalled that we are not in a fresh per-cell
+    scope (``BENCH_SKIP_CGROUP_PEAK=1``) — without the wrapping scope
+    the cgroup we see is the parent shell's and ``memory.peak`` would
+    just carry sibling cells' allocations.  Intended to be invoked
+    from inside the fresh per-cell scope ``run.py`` sets up.
+
+    Unlike ``ru_maxrss``, this is the kernel's cgroup-level accounting
+    of resident pages — the same number the OOM killer uses to decide
+    whether a cgroup is over its limit.  Less noisy than ``ru_maxrss``
+    across runs because it isn't sensitive to per-thread arena slack
+    the way process-level RSS is, and it's what you'd compare against a
+    provisioned memory budget."""
+    if os.environ.get("BENCH_SKIP_CGROUP_PEAK") == "1":
+        return float("nan")
+    try:
+        with open("/proc/self/cgroup") as f:
+            line = f.readline().strip()
+        rel = line.split(":", 2)[2]
+        if not rel.startswith("/"):
+            rel = "/" + rel
+        path = f"/sys/fs/cgroup{rel}/memory.peak"
+        with open(path) as f:
+            return int(f.read().strip()) / (1024.0 * 1024.0)
+    except (OSError, IndexError, ValueError):
+        return float("nan")
+
+
 class _RssSampler:
     """Background thread that polls VmRSS at a fixed cadence.  Used to
     capture the time-series of RSS during ``solve()`` so we can report
@@ -155,6 +186,7 @@ def main() -> None:
     rss_after_solve_trim = _rss_mb()
 
     peak_rss = _peak_rss_mb()
+    cgroup_peak = _cgroup_peak_mb()
     s = sampler.samples
     rss_solve_min = min(s) if s else 0.0
     rss_solve_p50 = _pct(s, 0.50)
@@ -169,7 +201,8 @@ def main() -> None:
         f"{rss_solve_min:.2f},{rss_solve_p50:.2f},"
         f"{rss_solve_p95:.2f},{rss_solve_max:.2f},"
         f"{len(s)},"
-        f"{obj:.6e},{int(optimal)}"
+        f"{obj:.6e},{int(optimal)},"
+        f"{cgroup_peak:.2f}"
     )
 
 

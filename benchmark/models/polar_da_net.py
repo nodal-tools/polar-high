@@ -1,14 +1,20 @@
-"""polar-high model for the sparse network-flow benchmark.
+"""polar-high network LP with declared ``dense_axes=("t",)``.
 
-LP:
-    min  Σ_{e,t} cost[e] · flow[e, t]
-    s.t. flow[e, t] <= cap[e, t]                                        ∀ (e, t)
-         Σ_{e: dst[e]=n} flow[e,t] − Σ_{e: src[e]=n} flow[e,t] = demand[n, t]   ∀ (n, t)
-         flow >= 0
+Same build as :mod:`models.polar_net`; only the ``Problem`` construction
+differs. The network LP has Vars indexed by ``("e", "t")``; declaring
+``dense_axes=("t",)`` promises every frame using ``t`` is row-sorted by
+``(other_dims..., t)``.
 
-Shows off polars-style join semantics: the node-balance constraint maps the
-``e`` dim onto ``n`` via ``Where(flow, edges_dst_n)`` (and ``edges_src_n``),
-then sums the ``e`` axis out.
+The build below produces all such frames in that order:
+
+* ``et`` via ``edges.select("e").join(timesteps, how="cross")`` — polars
+  cross-join keeps left-then-right ordering, so rows come out (e=0,t=0),
+  (e=0,t=1), ..., (e=1,t=0), ... = sorted by ``(e, t)``.
+* ``cap_long`` / ``demand_long`` are built with ``np.repeat`` for the
+  leading axis and ``np.tile`` for ``t`` — same sorted shape.
+* ``nt`` is ``nodes.join(timesteps, how="cross")`` — sorted by ``(n, t)``.
+
+So the dense-axes contract is satisfied without any extra sort.
 """
 
 from __future__ import annotations
@@ -29,22 +35,18 @@ def build(N: int) -> Problem:
     T: int = data["T"]
     E: int = data["E"]
 
-    p = Problem()
+    p = Problem(dense_axes=("t",))
 
-    # ---- index frames ----------------------------------------------------
     timesteps = pl.DataFrame({"t": np.arange(T, dtype=np.int64)})
     nodes = pl.DataFrame({"n": np.arange(N, dtype=np.int64)})
     et = edges.select("e").join(timesteps, how="cross")
     nt = nodes.join(timesteps, how="cross")
 
-    # mapping frames for the node-balance constraint
     edges_dst_n = edges.select("e", n=pl.col("dst"))
     edges_src_n = edges.select("e", n=pl.col("src"))
 
-    # ---- decision variable -----------------------------------------------
     flow = p.add_var("flow", dims=("e", "t"), index=et, lower=0.0)
 
-    # ---- parameters ------------------------------------------------------
     cost = Param(("e",), edges.select("e", value=pl.col("cost")))
 
     cap_long = pl.DataFrame(
@@ -65,10 +67,8 @@ def build(N: int) -> Problem:
     )
     demand = Param(("n", "t"), demand_long)
 
-    # ---- objective -------------------------------------------------------
     p.set_objective(Sum(flow * cost), sense="min")
 
-    # ---- capacity constraint --------------------------------------------
     p.add_cstr(
         "capacity",
         over=et,
@@ -77,9 +77,6 @@ def build(N: int) -> Problem:
         rhs_terms={"cap": cap},
     )
 
-    # ---- node-balance ---------------------------------------------------
-    # inflow:  for every (e, t) row of flow, remap e -> n via dst.
-    # outflow: same via src.  Then Sum over e collapses to (n, t).
     inflow = Sum(Where(flow, edges_dst_n), over=("e",))
     outflow = Sum(Where(flow, edges_src_n), over=("e",))
     p.add_cstr(
@@ -94,8 +91,6 @@ def build(N: int) -> Problem:
 
 
 def solve(model: Problem, time_limit: float | None = None) -> tuple[bool, float]:
-    # Default mode (save_memory=False). See the matching note in
-    # ``benchmark/models/polar.py``.
     options = {"time_limit": float(time_limit)} if time_limit is not None else None
     sol = model.solve(options=options)
     return bool(sol.optimal), float(sol.obj)

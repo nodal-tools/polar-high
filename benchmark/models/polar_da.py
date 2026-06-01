@@ -1,11 +1,14 @@
-"""polar-high model for the benchmark LP.
+"""polar-high dense LP with declared ``dense_axes=("j",)``.
 
-Indexed LP (mirrors the linopy benchmark, linearised):
+Same build as :mod:`models.polar`; only the ``Problem`` construction
+differs. Run alongside ``polar`` to show the block-COO / dense-axis
+arm's effect on the same hardware in the same harness.
 
-    min  Σ_{i,j} (2·x[i,j] + y[i,j])
-    s.t. x[i,j] - y[i,j] >= i        for i,j ∈ {1,…,N}
-         x[i,j] + y[i,j] >= 0        for i,j ∈ {1,…,N}
-         x, y >= 0
+The dense LP has Vars indexed by ``("i", "j")``; declaring
+``dense_axes=("j",)`` promises every frame using ``j`` is row-sorted by
+``(other_dims..., j)``. The build below already produces frames in that
+order (``np.repeat`` for ``i`` × ``np.tile`` for ``j``), so the contract
+is satisfied without any extra sort.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from polar_high import Param, Problem, Sum
 
 
 def build(N: int) -> Problem:
-    p = Problem()
+    p = Problem(dense_axes=("j",))
 
     i_arr = np.repeat(np.arange(1, N + 1, dtype=np.int64), N)
     j_arr = np.tile(np.arange(1, N + 1, dtype=np.int64), N)
@@ -56,12 +59,6 @@ def build(N: int) -> Problem:
 
 
 def solve(model: Problem, time_limit: float | None = None) -> tuple[bool, float]:
-    # Default mode (save_memory=False): keeps polar's Python LP source
-    # and the live HiGHS instance past solve(), so a follow-up
-    # Problem.solve() or WarmProblem update can re-use the basis
-    # without rebuilding the matrix. linopy and Pyomo also retain
-    # their model objects past solve; this is the apples-to-apples
-    # comparison.
     options = {"time_limit": float(time_limit)} if time_limit is not None else None
     sol = model.solve(options=options)
     return bool(sol.optimal), float(sol.obj)

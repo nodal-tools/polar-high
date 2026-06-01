@@ -18,13 +18,38 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+
+def _systemd_run_user_works() -> bool:
+    """Detect whether ``systemd-run --user --scope`` is usable here.
+
+    Returns False on non-Linux, when systemd-run is missing from PATH,
+    or when invoking it as the current user fails (e.g. no user manager
+    available).  In any of those cases the harness silently falls back
+    to plain subprocesses and the ``cgroup_peak_mb`` column ends up
+    NaN — the ``peak_rss_mb`` column still works.
+    """
+    if shutil.which("systemd-run") is None:
+        return False
+    try:
+        r = subprocess.run(
+            ["systemd-run", "--user", "--scope", "--quiet", "--", "true"],
+            capture_output=True,
+            timeout=10,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
 
 HERE = Path(__file__).parent
 
-DEFAULT_TOOLS = ["polar", "linopy", "pyomo"]
+DEFAULT_TOOLS = ["polar", "polar_sm", "polar_da", "linopy", "pyomo"]
 DEFAULT_SIZES = [10, 30, 100, 300, 1000]
 DEFAULT_REPEATS = 3
 DEFAULT_TIMEOUT_S = 600
@@ -43,9 +68,36 @@ def run_cell(
     threads: int,
     timeout: int,
     time_limit: float | None = None,
+    use_cgroup_scope: bool = True,
 ) -> dict | None:
-    cmd = [sys.executable, str(HERE / "run_one.py"), tool, str(N)]
+    py_cmd = [sys.executable, str(HERE / "run_one.py"), tool, str(N)]
+    # Wrap each cell in a fresh systemd-run --user --scope so the worker
+    # gets its own cgroup.  The worker reads /proc/self/cgroup +
+    # /sys/fs/cgroup/<path>/memory.peak just before exiting and reports
+    # ``cgroup_peak_mb`` — the kernel's cgroup-level peak, what the OOM
+    # killer would use against a memory budget.  Less noisy than the
+    # process-level ``ru_maxrss`` we also report.  --collect tears the
+    # scope down promptly after the child exits.
+    if use_cgroup_scope:
+        unit = f"bench-{tool}-N{N}-t{threads}-{os.getpid()}-{int(time.time() * 1000) % 10**9}"
+        cmd = [
+            "systemd-run",
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            f"--unit={unit}",
+            "--",
+            *py_cmd,
+        ]
+    else:
+        cmd = py_cmd
     env = {**os.environ, **{var: str(threads) for var in THREAD_ENV_VARS}}
+    if not use_cgroup_scope:
+        # Without a fresh scope the worker would read the parent cgroup's
+        # memory.peak — meaningless cross-cell carry-over. Signal the
+        # worker to skip the read.
+        env["BENCH_SKIP_CGROUP_PEAK"] = "1"
     if time_limit is not None:
         env["BENCH_TIME_LIMIT"] = str(time_limit)
     try:
@@ -68,9 +120,10 @@ def run_cell(
 
     line = r.stdout.strip().splitlines()[-1]
     parts = line.split(",")
-    # New 17-field schema (with sidecar sampler + malloc_trim columns).
-    # Older 10-field rows are still readable by plot.py because the new
-    # columns are appended at the end.
+    # Current 18-field schema (added ``cgroup_peak_mb`` at the end).
+    # Pre-cgroup CSVs have 17 fields; plot.py drops rows missing the
+    # cgroup column when that column is the one being plotted.
+    cgroup_peak = float(parts[17]) if len(parts) > 17 else float("nan")
     return {
         "tool": parts[0],
         "N": int(parts[1]),
@@ -89,6 +142,7 @@ def run_cell(
         "n_samples": int(parts[14]),
         "obj": float(parts[15]),
         "optimal": bool(int(parts[16])),
+        "cgroup_peak_mb": cgroup_peak,
     }
 
 
@@ -118,7 +172,24 @@ def main() -> None:
     ap.add_argument(
         "--append", action="store_true", help="Append to existing CSV instead of overwriting."
     )
+    ap.add_argument(
+        "--no-cgroup-scope",
+        action="store_true",
+        help=(
+            "Disable the systemd-run --user --scope wrapper. The cgroup_peak_mb "
+            "column will be NaN; peak_rss_mb still works. Auto-disabled if "
+            "systemd-run --user is unavailable on this host."
+        ),
+    )
     args = ap.parse_args()
+
+    use_scope = not args.no_cgroup_scope and _systemd_run_user_works()
+    if not args.no_cgroup_scope and not use_scope:
+        print(
+            "warning: systemd-run --user --scope unavailable; "
+            "running without cgroup wrapping (cgroup_peak_mb will be NaN)",
+            file=sys.stderr,
+        )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -143,6 +214,7 @@ def main() -> None:
         "n_samples",
         "obj",
         "optimal",
+        "cgroup_peak_mb",
     ]
 
     write_header = not (args.append and out.exists())
@@ -167,6 +239,7 @@ def main() -> None:
                             threads,
                             args.timeout,
                             time_limit=args.time_limit,
+                            use_cgroup_scope=use_scope,
                         )
                         row: dict = {
                             "tool": tool,
@@ -191,6 +264,7 @@ def main() -> None:
                                 n_samples=0,
                                 obj=float("nan"),
                                 optimal=False,
+                                cgroup_peak_mb=float("nan"),
                             )
                         else:
                             row.update(
@@ -209,6 +283,7 @@ def main() -> None:
                                 n_samples=res["n_samples"],
                                 obj=res["obj"],
                                 optimal=res["optimal"],
+                                cgroup_peak_mb=res["cgroup_peak_mb"],
                             )
                         w.writerow(row)
                         f.flush()
