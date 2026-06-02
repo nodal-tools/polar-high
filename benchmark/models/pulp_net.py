@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 
 from pulp import HiGHS_CMD, LpMinimize, LpProblem, LpStatusOptimal, lpSum_vars_coefs, value, lpSum_vars
+from ._network_data import generate
 
 
 def build(N: int) -> LpProblem:
@@ -41,7 +42,8 @@ def build(N: int) -> LpProblem:
 
     for n in range(N):
         for t in range(T):
-            m += lpSum_vars([flow[e, t] for e in incoming[n]]) - lpSum_vars([flow[e, t] for e in outgoing[n]]) == demand_arr[n, t]
+            m += lpSum_vars([flow[e, t] for e in incoming[n]]) - \
+                lpSum_vars([flow[e, t] for e in outgoing[n]]) == demand_arr[n, t]
 
     return m
 
