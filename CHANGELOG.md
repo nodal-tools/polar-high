@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.4.5] — 2026-06-02
+
+Docs-polish release. **No runtime or public-API changes** — the LP
+build, autoscale, and solve paths are byte-identical to 2.4.4.
+
+### Changed
+
+- **Loading-data Memory section** rewritten to lead with what keeps the
+  footprint down — the integer-keyed coefficient matrix (`col_id` /
+  row id / `float64`, no string labels) and the section-by-section
+  streaming build that releases each constraint family's input frames
+  before the next — before the long-format constant factor. Notes that
+  HiGHS column names embed the dim labels and carry their own cost
+  (~1.1 GB at the 3000² grid), shed via `save_memory=True` or
+  `write_mps(emit_names=False)`. Conclusion updated to match the current
+  benchmarks: polar-high matches or beats linopy/xarray peak memory on
+  the irregular network LP and on the dense `N × N` LP with
+  `save_memory`.
+- **Scaling guide**: the "falsely infeasible" risk is now scoped to
+  badly-scaled models (eight or nine decades) rather than implied for
+  any wide spread; the "who this is for" bullet list is replaced with an
+  inline sentence; and a new section explains the three scaling layers
+  (detection, semantic rewrites, HiGHS-native global scaling) and how
+  they compose with HiGHS' own `simplex_scale_strategy`.
+- **Performance guide**: the Threading section is rewritten — raising
+  the thread count does speed up the build, with the trade-offs being
+  per-thread scratch memory and fewer concurrent runs; the default of 1
+  is tuned for the "many independent solves" deployment. Scaling is
+  added to the solver-options list.
+
+### Fixed
+
+- **env-vars guide**: dropped the retired
+  `POLAR_HIGH_RANGES_MAX_FAMILY_ROWS` "Workload tuning" knob — it was
+  retired when autoscale range detection moved to the per-term walk that
+  bounds peak memory regardless of family size; the env var is no longer
+  read and setting it is a no-op. Replaced the dead FlexTool
+  `dev/env_vars` documentation link (404) with the repository.
+- Benchmark harness: sorted the `pulp_net` import block (ruff `I001`).
+
 ## [2.4.4] — 2026-06-02
 
 Docs-polish release. **No runtime or public-API changes** — the LP

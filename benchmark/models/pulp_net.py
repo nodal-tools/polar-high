@@ -8,7 +8,16 @@ from __future__ import annotations
 
 import shutil
 
-from pulp import HiGHS_CMD, LpMinimize, LpProblem, LpStatusOptimal, lpSum_vars_coefs, value, lpSum_vars
+from pulp import (
+    HiGHS_CMD,
+    LpMinimize,
+    LpProblem,
+    LpStatusOptimal,
+    lpSum_vars,
+    lpSum_vars_coefs,
+    value,
+)
+
 from ._network_data import generate
 
 
