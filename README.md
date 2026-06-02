@@ -39,9 +39,9 @@ p = Problem()
 # Index sets — declared once, reused below
 unit_index = pl.DataFrame({"unit": ["wind", "coal"]})
 time_index = pl.DataFrame({"hour": [1, 2, 3]})
+composite_index = unit_index.join(time_index, how="cross")
 
 # Decision variable v_production[unit, hour] >= 0
-composite_index = unit_index.join(time_index, how="cross")
 v_production = p.add_var(
     "v_production",
     dims=("unit", "hour"),
@@ -58,7 +58,7 @@ cost = Param(
 # Available capacity per unit per hour — built per-unit, then concatenated
 cap_wind = time_index.with_columns(
     pl.lit("wind").alias("unit"),
-    pl.Series("value", [3.0, 1.0, 4.0]),  # wind drops in hour 2
+    pl.Series("value", [3.0, 1.0, 4.0]),
 )
 cap_coal = time_index.with_columns(
     pl.lit("coal").alias("unit"),
@@ -102,33 +102,6 @@ print(sol.value("v_production"))
 ```
 
 The same code lives at [`tests/fixtures/quickstart_example.py`](tests/fixtures/quickstart_example.py) and is executed in the test suite, so README and docs stay in sync.
-
-## Enum dtype handling
-
-polars 1.40 treats `pl.Enum` as a nominal type and refuses to join
-two columns when the Enums carry different categorical vocabularies
-— even if one's categories are a strict subset of the other's. That
-strict semantics gets in the way of typical LP-DSL workflows, where
-one `Param` may live on a subset of an axis (e.g. only the units
-with a finite capacity) while another lives on the full axis.
-
-polar-high auto-aligns Enum-typed join keys at every internal
-`.join()` site:
-
-- **same Enum on both sides** — no change.
-- **one side's categories ⊆ the other's** — the narrower side is
-  up-cast to the wider Enum dtype (with `strict=False`; any values
-  outside the wider vocab become null, which inner / left joins
-  drop or surface naturally).
-- **Enum vs `pl.Utf8` / `pl.String`** — the string side is cast to
-  the Enum dtype.
-- **neither vocab is a subset of the other** — `ValueError` with
-  actionable guidance (cast to `pl.Utf8` or build a union Enum).
-
-No try/except shims, no Utf8 fallbacks for the disjoint case. The
-behaviour is implemented by a generic helper that knows nothing
-about specific axis names or vocab contents. See
-`tests/test_enum_dtype_align.py` for the contract.
 
 ## Documentation
 

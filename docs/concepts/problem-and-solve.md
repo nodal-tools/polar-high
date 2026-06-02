@@ -16,6 +16,14 @@ sol = p.solve()                         # build LP, hand to HiGHS, return Soluti
 Constraints are stored as protos and only materialize
 into LP rows when `solve()` (or `WarmProblem`) is invoked.
 
+`Problem` takes an optional **`dense_axes`** argument — a tuple of
+axis names that are guaranteed to be the trailing sort keys on every
+frame using them. Declaring it opts in to the block-COO evaluation
+arm, which slices the dense suffix of each `Var` as a contiguous
+numpy view and multiplies in ufuncs instead of polars joins. The
+performance guide explains the
+[contract and when it pays](../guide/performance.md#dense_axes-block-coo-arm).
+
 ## Adding a constraint
 
 ```python
