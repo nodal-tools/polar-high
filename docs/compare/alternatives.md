@@ -42,6 +42,32 @@ Python in the hot path is the loop that iterates *constraint families*
 (not coefficients). On the energy-system models that motivated this
 project, build time dropped roughly an order of magnitude.
 
+## PuLP
+
+**Foundational decision.** A lightweight pure-Python LP/MIP modeller
+from COIN-OR. Variables (`LpVariable`), expressions
+(`LpAffineExpression`), and constraints are Python objects assembled
+with operator overloading. Models are typically serialized to LP/MPS
+and handed to a solver as a subprocess; CBC ships with the wheel and
+is the default, but CPLEX, Gurobi, GLPK, HiGHS, and others are
+supported through the same path.
+
+**Where polar-high diverges.** Two axes:
+
+- **Coefficient mediation.** PuLP shares Pyomo's per-coefficient cost
+  — every term flows through a Python object before it reaches the
+  solver. polar-high keeps the build in polars frames, so indexed
+  coefficient generation is a join/group-by rather than a Python loop
+  over `LpVariable` instances.
+- **Solver hand-off.** PuLP's canonical path is *write LP file →
+  spawn solver subprocess → parse result file*. That is robust and
+  solver-agnostic, but it precludes incremental modification and adds
+  an IO round-trip per solve. polar-high targets an **in-process**
+  HiGHS instance (via `highspy`) and exposes a
+  [`WarmProblem`](../guide/warm-starting.md) for RHS / bound /
+  coefficient edits without rebuild. Users who want the LP-file
+  workflow still get it via `Solution.highs.writeModel("model.mps")`.
+
 ## JuMP (Julia)
 
 **Foundational decision.** A first-class algebraic-modelling layer
@@ -161,6 +187,7 @@ alternative stands today:
 - **pyoptinterface** exposes the underlying solver's incremental API
   directly.
 - **linopy** rebuilds the model per solve.
+- **PuLP** has no incremental API — each solve writes a fresh LP file.
 - **GNU MathProg** has no incremental API.
 
 polar-high's [`WarmProblem`](../guide/warm-starting.md) provides
@@ -179,6 +206,7 @@ depend on it without needing the user to bookkeep that mapping.
 |---|---|---|
 | GNU MathProg | Declarative indexed language | Same spirit, modern data path |
 | Pyomo | Pure-Python flexibility | Polars columnar build path |
+| PuLP | Pure-Python objects + LP-file hand-off | Polars columnar build + in-process HiGHS |
 | JuMP | Julia compiler & macros | Plain Python ergonomics |
 | linopy | xarray broadcasting | Polars joins + lazy plan |
 | pyoptinterface | Solver-agnostic thin layer | Opinionated modelling layer + MPS export |
