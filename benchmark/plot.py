@@ -45,6 +45,7 @@ TOOL_COLORS = {
     "polar_da_net": "#16a085",
     "linopy_net": "#d97706",
     "pyomo_net": "#a91b0d",
+    "pulp_net": "#6b21a8",
 }
 # Same colour family for the polar variants where one is "the same tool
 # with a knob flipped" (regular vs save_memory). polar_da uses a separate
@@ -62,6 +63,7 @@ TOOL_LINESTYLES = {
     "polar_da_net": "-",
     "linopy_net": "-",
     "pyomo_net": "-",
+    "pulp_net": "-",
 }
 TOOL_MARKERS = {
     "polar": "o",
@@ -75,6 +77,7 @@ TOOL_MARKERS = {
     "polar_da_net": "D",
     "linopy_net": "o",
     "pyomo_net": "o",
+    "pulp_net": "^",
 }
 TOOL_LABELS = {
     "polar": "polar-high (regular)",
@@ -88,6 +91,7 @@ TOOL_LABELS = {
     "polar_da_net": "polar-high (dense_axes)",
     "linopy_net": "linopy",
     "pyomo_net": "Pyomo",
+    "pulp_net": "PuLP (HiGHS_CMD)",
 }
 # ``polar_da`` is omitted from the dense plots: on the dense LP the
 # block-COO dense-axis arm overlays polar regular almost exactly, so
