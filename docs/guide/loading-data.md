@@ -209,6 +209,60 @@ polar-high doesn't care that `node` is categorical — joins and
 group-bys behave identically. For numeric dim columns there's no
 equivalent shortcut; you pay 8 bytes per row.
 
+### Enum dtype alignment
+
+`pl.Enum` is the stricter cousin of `pl.Categorical`: the categorical
+vocabulary is fixed at construction. That's great for catching typos
+but it interacts awkwardly with the typical LP-DSL workflow where
+**different `Param` frames live on different subsets of an axis**.
+
+For example, imagine a `capacity` Param defined only on the units
+that *have* a finite capacity, and a `cost` Param defined on every
+unit:
+
+```text
+capacity_df                       cost_df
+  unit     value                    unit     value
+  ─────    ─────                    ─────    ─────
+  wind      120.0                   wind       5.0
+  solar      60.0                   solar      3.0
+                                    hydro      1.0
+                                    coal      10.0
+
+Enum vocab: {wind, solar}     Enum vocab: {wind, solar, hydro, coal}
+```
+
+```python
+capacity = Param(("unit",), capacity_df)
+cost     = Param(("unit",), cost_df)
+```
+
+Both columns are named `unit` and both hold strings, but their
+`pl.Enum` vocabularies differ. polars 1.40 refuses to join two
+`Enum` columns whose vocab strings differ — *even when one is a
+strict subset of the other*. By default the first time
+`capacity * cost` or any other expression brings these two frames
+into a join you'd get a `SchemaError`.
+
+polar-high aligns Enum-typed join keys at every internal `.join()`
+site, transparently:
+
+| left | right | what happens |
+|---|---|---|
+| same Enum | same Enum | nothing to do |
+| Enum A | Enum B, where `cats(B) ⊆ cats(A)` | B is up-cast to A (the wider vocab; `strict=False`, values outside A become null and are dropped by the inner/left join) |
+| Enum A | Enum B, where `cats(A) ⊆ cats(B)` | symmetric — A is up-cast to B |
+| Enum | `Utf8` / `String` | the string side is cast to the Enum dtype |
+| Enum A | Enum B, **disjoint vocabs** | `ValueError` with actionable guidance (cast to `Utf8` or build a union Enum) |
+
+No try/except shims and no Utf8 fallbacks for the disjoint case — if
+the two vocabs genuinely don't overlap, the model is asking for
+something the LP can't represent and the error names the issue.
+
+You don't have to do anything to opt in; it's the default behaviour
+on every internal join. The contract is exercised by
+`tests/test_enum_dtype_align.py`.
+
 ## Densification: when missing cells matter
 
 `Param * Var`, `Param + Param`, and the joins inside `add_cstr` are

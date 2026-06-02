@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.4.4] — 2026-06-02
+
+Docs-polish release. **No runtime or public-API changes** — the LP
+build, autoscale, and solve paths are byte-identical to 2.4.3.
+
+### Changed
+
+- **`Problem(dense_axes=...)`** now has substantive documentation: a
+  new section in the Performance guide covers what the block-COO arm
+  does (slice the dense suffix of each `Var`'s frame as a zero-copy
+  numpy view, multiply with ufuncs), the row-sort contract the caller
+  signs up to, suffix-matching against each `Var`'s dims, and
+  `POLAR_HIGH_DISABLE_BLOCK_COO=1` for A/B rollback. The Concepts
+  page picks up a short mention pointing readers in. API reference
+  was already covered via the `Problem.__init__` docstring.
+- **Enum dtype alignment**: the depth that lived in the README is
+  rebuilt under `docs/guide/loading-data.md` with a concrete
+  side-by-side example (`capacity_df` on a subset Enum vocab,
+  `cost_df` on the full vocab) before the alignment-table contract.
+  The README section is trimmed; the documentation index already
+  links to the Guide.
+- Benchmark page picks up the v2.4 numbers and a clarification that
+  the `save_memory` trade-off axis is "how much work HiGHS does",
+  not model size.
+- `mkdocs.yml` drops a legacy CDN script from `extra_javascript`
+  (MathJax 3 renders on every current browser without it).
+
+### Fixed
+
+- Benchmark plot harness: `polar_da` rows fold into the `polar` line
+  on the dense plots so the published figure tracks the forthcoming
+  block-COO-by-default behaviour without a redundant overlapping
+  series. The network plot keeps `polar_da_net` as a distinct line
+  where the irregular topology surfaces a small visible delta.
+
 ## [2.4.3] — 2026-06-01
 
 Benchmark-methodology + docs release. **No runtime or public-API

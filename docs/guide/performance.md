@@ -65,7 +65,58 @@ The hot loops are:
 3. **`passModel`** (a single C call into HiGHS).
 
 For models in the 10⁴–10⁵ row range, the constraint loop dominates;
-beyond that, HiGHS run time dominates and build cost is noise.
+beyond that, HiGHS run time is more likely to dominate, but it
+depends on model and data.
+
+## `dense_axes`: block-COO arm
+
+For a model whose Vars share a common pre-sorted trailing axis (think
+`t` for time, or `(d, t)` for invest_period × hour), the kernel ships
+an opt-in evaluation path that **slices the dense suffix of each
+Var's frame as a contiguous numpy view and multiplies in ufuncs**,
+skipping the polars join entirely on the LHS of `Param * Var` (and
+`Sum`-wrapped chains). Coefficient bytes never have to leave their
+Arrow block. On a dense Sum-heavy family this typically halves the
+build-side wall time and trims a few GB of peak.
+
+You opt in once, on the `Problem` constructor:
+
+```python
+p = Problem(dense_axes=("d", "t"))
+```
+
+This is **a binding promise about every frame you pass that contains
+those columns**: it must be lexicographically sorted by
+`(other_dims_in_declared_order…, *dense_axes)`. In other words, the
+declared dense axes are the trailing sort keys and the leading dims
+form a sorted prefix. polar-high verifies this cheaply (a single-pass
+monotonic scan, no re-sort) on every Var the block-COO arm fires on,
+and raises a clear `ValueError` naming the Var on violation. Frames
+that don't carry the dense axes (e.g. an investment Var indexed by
+`("p", "d")` when `dense_axes=("d", "t")`) simply do not fire the
+arm — there's no penalty for mixing.
+
+In practice the sort usually comes for free: index frames built from
+`pl.DataFrame({"d": np.repeat(...), "t": np.tile(...)})` patterns,
+or a `cross`-join of `entity × timesteps`, are already in the
+required order. If you build a frame in some other order, sort it
+once at construction (`.sort(["entity", "d", "t"])`) before passing
+it in.
+
+Two practical knobs:
+
+* **What you declare**: the `dense_axes` tuple is **strictly
+  suffix-matched** against each Var's dims. A Var with dims
+  `("e", "t")` matches `dense_axes=("t",)`; a Var with dims
+  `("p", "d", "t")` matches both `("t",)` and `("d", "t")`. Pick the
+  longest dense suffix your problem shares — more dense axes ⇒ more
+  ufunc-friendly blocks ⇒ bigger win.
+* **A/B rollback**: `POLAR_HIGH_DISABLE_BLOCK_COO=1` falls every term
+  back to the polars path with no other change — useful when
+  bisecting a numerical regression to confirm the arm isn't involved.
+
+The benchmark page covers the dense and network LP cells under both
+the block-COO and the legacy polars-join paths.
 
 ## polars patterns that help
 
@@ -79,6 +130,11 @@ beyond that, HiGHS run time dominates and build cost is noise.
   joins drop missing cells (see [warning](../concepts/vars-and-params.md#param-param)),
   so if you need zero-fill, do the `left_join`/`fill_null(0)` once
   before constructing the Param.
+- **Use `pl.Categorical` or `pl.Enum` on string-valued dim columns**.
+  Same join semantics, fewer bytes per row, faster hashing — the
+  Loading-data guide covers the dtype choice and how polar-high
+  reconciles mismatched [`Enum` vocabularies](loading-data.md#enum-dtype-alignment)
+  across `Param` frames automatically.
 
 ## Writing MPS without HiGHS
 
