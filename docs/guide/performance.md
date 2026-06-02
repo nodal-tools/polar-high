@@ -65,12 +65,13 @@ The hot loops are:
 3. **`passModel`** (a single C call into HiGHS).
 
 For models in the 10⁴–10⁵ row range, the constraint loop dominates;
-beyond that, HiGHS run time dominates and build cost is noise.
+beyond that, HiGHS run time is more likely to dominate, but it
+depends on model and data.
 
 ## `dense_axes`: block-COO arm
 
 For a model whose Vars share a common pre-sorted trailing axis (think
-`t` for time, or `(d, t)` for day-of-year × hour), the kernel ships
+`t` for time, or `(d, t)` for invest_period × hour), the kernel ships
 an opt-in evaluation path that **slices the dense suffix of each
 Var's frame as a contiguous numpy view and multiplies in ufuncs**,
 skipping the polars join entirely on the LHS of `Param * Var` (and
@@ -129,6 +130,11 @@ the block-COO and the legacy polars-join paths.
   joins drop missing cells (see [warning](../concepts/vars-and-params.md#param-param)),
   so if you need zero-fill, do the `left_join`/`fill_null(0)` once
   before constructing the Param.
+- **Use `pl.Categorical` or `pl.Enum` on string-valued dim columns**.
+  Same join semantics, fewer bytes per row, faster hashing — the
+  Loading-data guide covers the dtype choice and how polar-high
+  reconciles mismatched [`Enum` vocabularies](loading-data.md#enum-dtype-alignment)
+  across `Param` frames automatically.
 
 ## Writing MPS without HiGHS
 

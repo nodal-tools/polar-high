@@ -215,12 +215,34 @@ equivalent shortcut; you pay 8 bytes per row.
 vocabulary is fixed at construction. That's great for catching typos
 but it interacts awkwardly with the typical LP-DSL workflow where
 **different `Param` frames live on different subsets of an axis**.
-Imagine a `capacity` Param defined only on units that *have* a
-capacity, and a `cost` Param defined on every unit — same axis name
-`unit`, different Enum vocabularies. polars 1.40 refuses to join two
+
+For example, imagine a `capacity` Param defined only on the units
+that *have* a finite capacity, and a `cost` Param defined on every
+unit:
+
+```text
+capacity_df                       cost_df
+  unit     value                    unit     value
+  ─────    ─────                    ─────    ─────
+  wind      120.0                   wind       5.0
+  solar      60.0                   solar      3.0
+                                    hydro      1.0
+                                    coal      10.0
+
+Enum vocab: {wind, solar}     Enum vocab: {wind, solar, hydro, coal}
+```
+
+```python
+capacity = Param(("unit",), capacity_df)
+cost     = Param(("unit",), cost_df)
+```
+
+Both columns are named `unit` and both hold strings, but their
+`pl.Enum` vocabularies differ. polars 1.40 refuses to join two
 `Enum` columns whose vocab strings differ — *even when one is a
-strict subset of the other*. By default you'd get a `SchemaError`
-the first time those frames meet inside a constraint.
+strict subset of the other*. By default the first time
+`capacity * cost` or any other expression brings these two frames
+into a join you'd get a `SchemaError`.
 
 polar-high aligns Enum-typed join keys at every internal `.join()`
 site, transparently:
