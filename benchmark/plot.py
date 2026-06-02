@@ -85,7 +85,12 @@ TOOL_LABELS = {
     "linopy_net": "linopy",
     "pyomo_net": "Pyomo",
 }
-TOOL_ORDER_DENSE = ["polar", "polar_sm", "polar_da", "linopy", "pyomo"]
+# ``polar_da`` is omitted from the dense plots: on the dense LP the
+# block-COO dense-axis arm overlays polar regular almost exactly, so
+# adding the line just clutters the figure. On the network LP the
+# irregular topology surfaces a real (small) difference, so
+# ``polar_da_net`` stays in TOOL_ORDER_NET.
+TOOL_ORDER_DENSE = ["polar", "polar_sm", "linopy", "pyomo"]
 TOOL_ORDER_NET = ["polar_net", "polar_sm_net", "polar_da_net", "linopy_net", "pyomo_net"]
 
 
@@ -105,8 +110,19 @@ def _load_all(in_csv_glob: list[str]) -> pd.DataFrame:
     # Legacy data may still carry the now-removed ``polar_lean`` /
     # ``polar_lean_net`` tool ids — fold them into the canonical
     # ``polar`` / ``polar_net`` since the lean settings are now the
-    # engine defaults.
-    df["tool"] = df["tool"].replace({"polar_lean": "polar", "polar_lean_net": "polar_net"})
+    # engine defaults.  The block-COO dense-axis arm (``polar_da``) is
+    # on track to become the dense default in a future release, so on
+    # the dense plots we fold its rows into ``polar`` and let the later
+    # ``drop_duplicates(keep="last")`` prefer them over the legacy
+    # ``polar`` rows that landed earlier in the CSV.  ``polar_da_net``
+    # is left alone — the network plot keeps it as a distinct series.
+    df["tool"] = df["tool"].replace(
+        {
+            "polar_lean": "polar",
+            "polar_lean_net": "polar_net",
+            "polar_da": "polar",
+        }
+    )
     df = df.drop_duplicates(
         subset=["tool", "N", "threads", "rep"],
         keep="last",
