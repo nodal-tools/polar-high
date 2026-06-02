@@ -33,7 +33,7 @@ def build(N: int) -> LpProblem:
     m = LpProblem("bench_net", LpMinimize)
     all_pairs = [(e, t) for e in range(E) for t in range(T)]
 
-    flow = m.add_variable_dicts("flow", indices=all_pairs, name="flow", lowBound=0)
+    flow = m.add_variable_dicts("flow", indices=all_pairs, lowBound=0)
 
     m += lpSum_vars_coefs([(flow[e, t], cost_list[e]) for e, t in all_pairs])
 
