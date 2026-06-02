@@ -60,8 +60,10 @@ uv run --with matplotlib python benchmark/plot.py         # writes docs/assets/b
 
 Single cell: `uv run --with-requirements benchmark/requirements.txt python benchmark/run_one.py pulp 10`
 
-Works on Linux and Windows (`run_one.py` uses `/proc` + cgroup metrics on Linux,
-`psutil` on Windows).
+Linux only — `run_one.py` reads `/proc/self/status` and cgroup v2
+`memory.peak`, both Linux-specific. Cross-platform support would
+need a `psutil` fallback for the memory reads and `NaN` for the
+cgroup column; not currently wired up.
 
 CSV output goes to `benchmark/results/results.csv` (gitignored).
 

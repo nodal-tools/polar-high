@@ -44,26 +44,29 @@ project, build time dropped roughly an order of magnitude.
 
 ## PuLP
 
-**Foundational decision.** A lightweight pure-Python LP/MIP modeller
-from COIN-OR. Variables (`LpVariable`), expressions
-(`LpAffineExpression`), and constraints are Python objects assembled
-with operator overloading. Models are typically serialized to LP/MPS
-and handed to a solver as a subprocess; CBC ships with the wheel and
-is the default, but CPLEX, Gurobi, GLPK, HiGHS, and others are
-supported through the same path.
+**Foundational decision.** A lightweight LP/MIP modeller from COIN-OR.
+The user-facing API is Python (`LpVariable`, `LpAffineExpression`,
+`LpProblem`, operator overloading), but as of 4.0 the storage layer
+is a Rust core (`pulp._rustcore`) so coefficient assembly is no
+longer Python-object-per-term. Models are serialized to LP/MPS and
+handed to a solver as a subprocess; CBC ships with the wheel and is
+the default, but CPLEX, Gurobi, GLPK, HiGHS, and others are supported
+through the same path.
 
 **Where polar-high diverges.** Two axes:
 
-- **Coefficient mediation.** PuLP shares Pyomo's per-coefficient cost
-  — every term flows through a Python object before it reaches the
-  solver. polar-high keeps the build in polars frames, so indexed
-  coefficient generation is a join/group-by rather than a Python loop
-  over `LpVariable` instances.
+- **Per-cell vs columnar build.** Even with the Rust core, PuLP's
+  build still iterates a model in the per-cell `LpVariable` /
+  `LpAffineExpression` shape — fast in Rust, but conceptually
+  per-coefficient. polar-high keeps the build in polars frames, so
+  indexed coefficient generation is a join/group-by over whole
+  columns at once. The gap shows up at large `N`: on the benchmark
+  LP at `N=1000`, polar-high builds in ~0.02 s vs PuLP's ~11 s.
 - **Solver hand-off.** PuLP's canonical path is *write LP file →
   spawn solver subprocess → parse result file*. That is robust and
-  solver-agnostic, but it precludes incremental modification and adds
-  an IO round-trip per solve. polar-high targets an **in-process**
-  HiGHS instance (via `highspy`) and exposes a
+  solver-agnostic, but it precludes incremental modification and
+  pins the LP file roundtrip into every solve. polar-high targets
+  an **in-process** HiGHS instance (via `highspy`) and exposes a
   [`WarmProblem`](../guide/warm-starting.md) for RHS / bound /
   coefficient edits without rebuild. Users who want the LP-file
   workflow still get it via `Solution.highs.writeModel("model.mps")`.
@@ -206,7 +209,7 @@ depend on it without needing the user to bookkeep that mapping.
 |---|---|---|
 | GNU MathProg | Declarative indexed language | Same spirit, modern data path |
 | Pyomo | Pure-Python flexibility | Polars columnar build path |
-| PuLP | Pure-Python objects + LP-file hand-off | Polars columnar build + in-process HiGHS |
+| PuLP | Rust core + LP-file hand-off | Polars columnar build + in-process HiGHS |
 | JuMP | Julia compiler & macros | Plain Python ergonomics |
 | linopy | xarray broadcasting | Polars joins + lazy plan |
 | pyoptinterface | Solver-agnostic thin layer | Opinionated modelling layer + MPS export |

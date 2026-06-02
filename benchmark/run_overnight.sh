@@ -35,6 +35,12 @@ run $PY benchmark/run.py --tools pyomo \
     --sizes 10 30 100 300 1000 \
     --threads 1 --repeats 3 --timeout 900 \
     --append --out "$OUT_DIR/dense_fullsolve.csv"
+# pulp (HiGHS_CMD subprocess path) capped at N=1000 — file roundtrip
+# overhead makes larger sizes uninformative on the same axis.
+run $PY benchmark/run.py --tools pulp \
+    --sizes 10 30 100 300 1000 \
+    --threads 1 --repeats 3 --timeout 900 \
+    --append --out "$OUT_DIR/dense_fullsolve_pulp.csv"
 
 echo "[$(ts)] === B. dense build-only (HiGHS short-circuit) ===" | tee -a "$LOG"
 run $PY benchmark/run.py --tools polar polar_sm linopy \
@@ -45,6 +51,10 @@ run $PY benchmark/run.py --tools pyomo \
     --sizes 10 30 100 300 1000 \
     --threads 1 --repeats 3 --timeout 900 --time-limit 1e-6 \
     --append --out "$OUT_DIR/dense_buildonly.csv"
+run $PY benchmark/run.py --tools pulp \
+    --sizes 10 30 100 300 1000 \
+    --threads 1 --repeats 3 --timeout 900 --time-limit 1e-6 \
+    --out "$OUT_DIR/dense_buildonly_pulp.csv"
 
 echo "[$(ts)] === C. network LP (build-only) ===" | tee -a "$LOG"
 run $PY benchmark/run.py --tools polar_net polar_sm_net linopy_net \
@@ -55,6 +65,13 @@ run $PY benchmark/run.py --tools pyomo_net \
     --sizes 100 300 1000 \
     --threads 1 --repeats 3 --timeout 900 --time-limit 1e-6 \
     --append --out "$OUT_DIR/network.csv"
+# pulp_net via HiGHS_CMD — N capped at 3000; at N=10000 the LP-file
+# write + subprocess HiGHS already dominate and the cell stops being
+# informative on the same time axis.
+run $PY benchmark/run.py --tools pulp_net \
+    --sizes 100 300 1000 3000 \
+    --threads 1 --repeats 3 --timeout 1200 --time-limit 1e-6 \
+    --out "$OUT_DIR/network_buildonly_pulp.csv"
 
 echo "[$(ts)] === D. threads sweep on dense LP at N=300 ===" | tee -a "$LOG"
 run $PY benchmark/run.py --tools polar polar_sm linopy pyomo \

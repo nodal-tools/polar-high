@@ -405,6 +405,7 @@ def main() -> None:
         nargs="+",
         default=[
             str(HERE / "results" / "cgroup" / "dense_fullsolve.csv"),
+            str(HERE / "results" / "cgroup" / "dense_fullsolve_pulp.csv"),
             str(HERE / "results" / "results.csv"),
             str(HERE / "results" / "results_v1_1.csv"),
         ],
@@ -414,6 +415,7 @@ def main() -> None:
         nargs="+",
         default=[
             str(HERE / "results" / "cgroup" / "dense_buildonly.csv"),
+            str(HERE / "results" / "cgroup" / "dense_buildonly_pulp.csv"),
             str(HERE / "results" / "cgroup" / "threads_dense.csv"),
             str(HERE / "results" / "results_buildonly.csv"),
         ],
@@ -423,6 +425,7 @@ def main() -> None:
         nargs="+",
         default=[
             str(HERE / "results" / "cgroup" / "network.csv"),
+            str(HERE / "results" / "cgroup" / "network_buildonly_pulp.csv"),
             str(HERE / "results" / "cgroup" / "network_threads.csv"),
             str(HERE / "results" / "results_network.csv"),
         ],
