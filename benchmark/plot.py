@@ -39,6 +39,7 @@ TOOL_COLORS = {
     "polar_da": "#16a085",
     "linopy": "#d97706",
     "pyomo": "#a91b0d",
+    "pulp": "#6b21a8",
     "polar_net": "#1f77b4",
     "polar_sm_net": "#1f77b4",
     "polar_da_net": "#16a085",
@@ -55,6 +56,7 @@ TOOL_LINESTYLES = {
     "polar_da": "-",
     "linopy": "-",
     "pyomo": "-",
+    "pulp": "-",
     "polar_net": "-",
     "polar_sm_net": "--",
     "polar_da_net": "-",
@@ -67,6 +69,7 @@ TOOL_MARKERS = {
     "polar_da": "D",
     "linopy": "o",
     "pyomo": "o",
+    "pulp": "^",
     "polar_net": "o",
     "polar_sm_net": "s",
     "polar_da_net": "D",
@@ -79,13 +82,14 @@ TOOL_LABELS = {
     "polar_da": "polar-high (dense_axes)",
     "linopy": "linopy",
     "pyomo": "Pyomo",
+    "pulp": "PuLP (HiGHS_CMD)",
     "polar_net": "polar-high (regular)",
     "polar_sm_net": "polar-high (save_memory)",
     "polar_da_net": "polar-high (dense_axes)",
     "linopy_net": "linopy",
     "pyomo_net": "Pyomo",
 }
-TOOL_ORDER_DENSE = ["polar", "polar_sm", "polar_da", "linopy", "pyomo"]
+TOOL_ORDER_DENSE = ["polar", "polar_sm", "polar_da", "linopy", "pyomo", "pulp"]
 TOOL_ORDER_NET = ["polar_net", "polar_sm_net", "polar_da_net", "linopy_net", "pyomo_net"]
 
 
