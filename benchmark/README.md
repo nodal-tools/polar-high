@@ -51,14 +51,20 @@ for how to read each column.
 ## Running it
 
 ```bash
-# From the repo root (installs benchmark deps for this invocation):
-uv run --with-requirements benchmark/requirements.txt python benchmark/run.py
-uv run --with-requirements benchmark/requirements.txt \
-  python benchmark/run.py --sizes 10 30 100 --repeats 1   # smoke run
-uv run --with matplotlib python benchmark/plot.py         # writes docs/assets/benchmark.png
+# Standard pip workflow (install once into the active environment):
+pip install -r benchmark/requirements.txt
+python benchmark/run.py                                  # full sweep (~minutes)
+python benchmark/run.py --sizes 10 30 100 --repeats 1    # smoke run
+python benchmark/plot.py                                 # writes docs/assets/benchmark.png
 ```
 
-Single cell: `uv run --with-requirements benchmark/requirements.txt python benchmark/run_one.py pulp 10`
+```bash
+# Or ephemerally with uv (no venv setup; uv must already be installed):
+uv run --with-requirements benchmark/requirements.txt python benchmark/run.py
+uv run --with-requirements benchmark/requirements.txt python benchmark/plot.py
+```
+
+Single cell: `python benchmark/run_one.py pulp 10` (or the uv equivalent).
 
 Linux only — `run_one.py` reads `/proc/self/status` and cgroup v2
 `memory.peak`, both Linux-specific. Cross-platform support would
