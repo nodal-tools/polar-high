@@ -39,11 +39,13 @@ TOOL_COLORS = {
     "polar_da": "#16a085",
     "linopy": "#d97706",
     "pyomo": "#a91b0d",
+    "pulp": "#6b21a8",
     "polar_net": "#1f77b4",
     "polar_sm_net": "#1f77b4",
     "polar_da_net": "#16a085",
     "linopy_net": "#d97706",
     "pyomo_net": "#a91b0d",
+    "pulp_net": "#6b21a8",
 }
 # Same colour family for the polar variants where one is "the same tool
 # with a knob flipped" (regular vs save_memory). polar_da uses a separate
@@ -55,11 +57,13 @@ TOOL_LINESTYLES = {
     "polar_da": "-",
     "linopy": "-",
     "pyomo": "-",
+    "pulp": "-",
     "polar_net": "-",
     "polar_sm_net": "--",
     "polar_da_net": "-",
     "linopy_net": "-",
     "pyomo_net": "-",
+    "pulp_net": "-",
 }
 TOOL_MARKERS = {
     "polar": "o",
@@ -67,11 +71,13 @@ TOOL_MARKERS = {
     "polar_da": "D",
     "linopy": "o",
     "pyomo": "o",
+    "pulp": "^",
     "polar_net": "o",
     "polar_sm_net": "s",
     "polar_da_net": "D",
     "linopy_net": "o",
     "pyomo_net": "o",
+    "pulp_net": "^",
 }
 TOOL_LABELS = {
     "polar": "polar-high (regular)",
@@ -79,19 +85,21 @@ TOOL_LABELS = {
     "polar_da": "polar-high (dense_axes)",
     "linopy": "linopy",
     "pyomo": "Pyomo",
+    "pulp": "PuLP (HiGHS_CMD)",
     "polar_net": "polar-high (regular)",
     "polar_sm_net": "polar-high (save_memory)",
     "polar_da_net": "polar-high (dense_axes)",
     "linopy_net": "linopy",
     "pyomo_net": "Pyomo",
+    "pulp_net": "PuLP (HiGHS_CMD)",
 }
 # ``polar_da`` is omitted from the dense plots: on the dense LP the
 # block-COO dense-axis arm overlays polar regular almost exactly, so
 # adding the line just clutters the figure. On the network LP the
 # irregular topology surfaces a real (small) difference, so
 # ``polar_da_net`` stays in TOOL_ORDER_NET.
-TOOL_ORDER_DENSE = ["polar", "polar_sm", "linopy", "pyomo"]
-TOOL_ORDER_NET = ["polar_net", "polar_sm_net", "polar_da_net", "linopy_net", "pyomo_net"]
+TOOL_ORDER_DENSE = ["polar", "polar_sm", "linopy", "pyomo", "pulp"]
+TOOL_ORDER_NET = ["polar_net", "polar_sm_net", "polar_da_net", "linopy_net", "pyomo_net", "pulp_net"]
 
 
 def _load_all(in_csv_glob: list[str]) -> pd.DataFrame:
@@ -397,6 +405,7 @@ def main() -> None:
         nargs="+",
         default=[
             str(HERE / "results" / "cgroup" / "dense_fullsolve.csv"),
+            str(HERE / "results" / "cgroup" / "dense_fullsolve_pulp.csv"),
             str(HERE / "results" / "results.csv"),
             str(HERE / "results" / "results_v1_1.csv"),
         ],
@@ -406,6 +415,7 @@ def main() -> None:
         nargs="+",
         default=[
             str(HERE / "results" / "cgroup" / "dense_buildonly.csv"),
+            str(HERE / "results" / "cgroup" / "dense_buildonly_pulp.csv"),
             str(HERE / "results" / "cgroup" / "threads_dense.csv"),
             str(HERE / "results" / "results_buildonly.csv"),
         ],
@@ -415,6 +425,7 @@ def main() -> None:
         nargs="+",
         default=[
             str(HERE / "results" / "cgroup" / "network.csv"),
+            str(HERE / "results" / "cgroup" / "network_buildonly_pulp.csv"),
             str(HERE / "results" / "cgroup" / "network_threads.csv"),
             str(HERE / "results" / "results_network.csv"),
         ],

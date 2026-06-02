@@ -49,7 +49,7 @@ def _systemd_run_user_works() -> bool:
 
 HERE = Path(__file__).parent
 
-DEFAULT_TOOLS = ["polar", "polar_sm", "polar_da", "linopy", "pyomo"]
+DEFAULT_TOOLS = ["polar", "polar_sm", "polar_da", "linopy", "pyomo", "pulp"]
 DEFAULT_SIZES = [10, 30, 100, 300, 1000]
 DEFAULT_REPEATS = 3
 DEFAULT_TIMEOUT_S = 600

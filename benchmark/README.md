@@ -1,7 +1,7 @@
 # Benchmark
 
 A reproducible build / solve / memory comparison between
-**polar-high**, **linopy**, and **Pyomo** on the same indexed
+**polar-high**, **linopy**, **Pyomo**, and **PuLP** on the same indexed
 linear program, all solving with **HiGHS**. The model and structure
 follow [linopy's benchmark](https://linopy.readthedocs.io/en/latest/benchmark.html),
 restricted to the linear case so polar-high can run it directly.
@@ -16,7 +16,7 @@ s.t. x[i,j] - y[i,j] >= i          for i,j ∈ {1,…,N}
 ```
 
 Closed-form optimum: `obj = N · Σ_{i=1..N} 2i = N · N · (N+1)`. Used
-as a sanity check that all three tools agree on the answer.
+as a sanity check that all four tools agree on the answer.
 
 ## What is measured
 
@@ -51,11 +51,25 @@ for how to read each column.
 ## Running it
 
 ```bash
+# Standard pip workflow (install once into the active environment):
 pip install -r benchmark/requirements.txt
-python benchmark/run.py                 # full sweep (~minutes)
-python benchmark/run.py --sizes 10 30 100 --repeats 1   # smoke run
-python benchmark/plot.py                # writes docs/assets/benchmark.png
+python benchmark/run.py                                  # full sweep (~minutes)
+python benchmark/run.py --sizes 10 30 100 --repeats 1    # smoke run
+python benchmark/plot.py                                 # writes docs/assets/benchmark.png
 ```
+
+```bash
+# Or ephemerally with uv (no venv setup; uv must already be installed):
+uv run --with-requirements benchmark/requirements.txt python benchmark/run.py
+uv run --with-requirements benchmark/requirements.txt python benchmark/plot.py
+```
+
+Single cell: `python benchmark/run_one.py pulp 10` (or the uv equivalent).
+
+Linux only — `run_one.py` reads `/proc/self/status` and cgroup v2
+`memory.peak`, both Linux-specific. Cross-platform support would
+need a `psutil` fallback for the memory reads and `NaN` for the
+cgroup column; not currently wired up.
 
 CSV output goes to `benchmark/results/results.csv` (gitignored).
 
@@ -66,23 +80,28 @@ CSV output goes to `benchmark/results/results.csv` (gitignored).
 | polar-high | `benchmark/models/polar.py` | `Problem.solve()` → `highspy` |
 | linopy | `benchmark/models/linopy.py` | `Model.solve(solver_name="highs")` |
 | Pyomo | `benchmark/models/pyomo.py` | `pyomo.contrib.appsi.solvers.Highs` (persistent) |
+| PuLP | `benchmark/models/pulp.py` | `HiGHS_CMD` (LP file + `highs` subprocess) |
 
 The Pyomo path uses **appsi_highs** (persistent in-process), which
 is the fastest Pyomo→HiGHS path. Falling back to the file-based
 `SolverFactory("highs")` interface would inflate Pyomo's solve_s
 unfairly via the LP-write-and-reread overhead.
 
+PuLP uses **HiGHS_CMD**, the file-based path analogous to linopy's
+``io_api="lp"``. The `highs` executable must be on ``PATH`` (or
+install the system/conda HiGHS package alongside `highspy`).
+
 ## Fairness caveats
 
-- All three build their own version of the same LP; whitespace-level
+- All four build their own version of the same LP; whitespace-level
   identity isn't enforced. The closed-form objective check provides
   a cross-tool correctness anchor.
 - Subprocess isolation prevents memory carry-over but adds ~50 ms
   fixed overhead per cell (irrelevant at the sizes we care about).
 - The `polar-high` and `linopy` builds defer most work into
-  vectorised numpy/polars/xarray ops; the `Pyomo` build loops in
-  Python over each (i, j). This is *the* difference the benchmark
-  is designed to surface.
+  vectorised numpy/polars/xarray ops; the `Pyomo` and `PuLP` builds
+  loop in Python over each (i, j). This is *the* difference the
+  benchmark is designed to surface.
 - Solve time is included as the dominant component at large `N` and
   to confirm the three tools are sending equivalent LPs to HiGHS.
 
