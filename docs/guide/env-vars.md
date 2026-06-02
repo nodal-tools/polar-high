@@ -5,17 +5,17 @@ runtime. All variables are optional — the defaults give zero-overhead
 behaviour and match what `Problem.solve()` / `Problem.write_mps()` do
 out of the box.
 
-Two reasons to set any of them:
+You'd set one of these to:
 
-- **Profiling / instrumentation.** Print per-phase RSS markers when
-  you are diagnosing a memory hot spot during MPS export or autoscale
-  range detection.
-- **Workload tuning.** Cap the work the autoscaler does on very wide
-  constraint families.
+- **Profile / instrument.** Print per-phase RSS markers when you are
+  diagnosing a memory hot spot during MPS export or autoscale range
+  detection.
+- **Opt out of a build optimisation.** Fall back to a pre-optimisation
+  code path if you suspect it of a numerical regression.
+- **Override polars threading.**
 
 For runtime tuning on the polar-high side that is *not* an env var
-(threading, solver options, `release=True`), see
-[Performance](performance.md).
+(solver options, `release=True`), see [Performance](performance.md).
 
 ## Profiling / instrumentation
 
@@ -46,19 +46,6 @@ deltas to find the phase that allocated.
 | `POLAR_HIGH_DISABLE_PRUNE_DOWN` | unset (off — prune-down active) | `1` | Disable the per-atomic prune-down for `Param` chains in `_build_canonical_matrix` (RHS), `_build_lhs_pruned_plan` (LHS), `_solve_streaming` and `WarmProblem._initial_build`. With the var set, every multi-atomic chain falls through to the original merged-lazy semi-join path. Use as a fallback if a future model surfaces a numerical drift on the prune-down path; report the affected scenario so the engine can be fixed and the env var retired. Numerics are identical between the two paths for all currently-tested scenarios. |
 | `POLAR_HIGH_DISABLE_WHERE_PUSHDOWN` | unset (off — pushdown active) | `1` | Disable the pure-filter `Where(expr, frame)` deferral added in v2.3.0. With the var set, every `Where` call eagerly inner-joins `frame` into `t.lazy` and clears the leaf metadata (`var_source`, `coef_scalar`, `where_frames`) exactly as the pre-v2.3.0 path. Use as a fallback if a model surfaces a numerical drift on the pushdown path; the LP matrix is byte-identical between the two paths for all tested scenarios. |
 
-## Workload tuning
-
-| Variable | Default | Set to | What it does |
-|---|---|---|---|
-| `POLAR_HIGH_RANGES_MAX_FAMILY_ROWS` | `1000000` | positive integer; `0` disables the cap | Family-size threshold for the autoscale range readout. Families larger than this contribute their min/max via streaming but skip the full readout. `0` forces the full readout on every family regardless of size. |
-
-This is the only knob worth changing on real workloads. On models
-where autoscale range detection itself dominates the build budget,
-lowering it (e.g. `200000`) trades a small amount of range-detection
-accuracy on the largest families for a noticeable wall-time win.
-Raising it (or setting `0`) is only useful when debugging a
-range-detection regression.
-
 ## Polars threading
 
 | Variable | Default | Set to | What it does |
@@ -75,9 +62,9 @@ polars). The `setdefault` no-ops once a value is already present.
 
 - [Performance](performance.md) — `release=True`, solver options, and
   the underlying build-path reasoning behind the profiling vars above.
-- FlexTool's
-  [Environment variables](https://irena-flextool.github.io/flextool/dev/env_vars/)
-  page documents the `FLEXTOOL_*` variables. `FLEXTOOL_SAVE_MEMORY=1`
-  enables a subprocess solver path that benefits from
-  `POLAR_HIGH_WRITE_MPS_PROFILE` when diagnosing the MPS write step
-  in that path.
+- [FlexTool](https://github.com/irena-flextool/flextool) documents its
+  own `FLEXTOOL_*` variables (the env-vars page is still on a
+  not-yet-default branch, so it isn't published at a stable URL yet).
+  `FLEXTOOL_SAVE_MEMORY=1` enables a subprocess solver path that
+  benefits from `POLAR_HIGH_WRITE_MPS_PROFILE` when diagnosing the MPS
+  write step in that path.

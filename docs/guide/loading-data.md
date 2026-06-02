@@ -148,55 +148,41 @@ pl_df = pl.from_pandas(pd_df)
 `pl.from_pandas` and `pl.from_numpy` cover the cases where another
 library got the data first.
 
-## Memory: long format vs wide grids
+## Memory
 
-Every polar-high `Param` frame is `(*dims, value)` long format. For
-a regular grid with N nodes × T hours that's **N · T rows each
-carrying both index columns plus the value**. xarray's dense layout
-would store the dim coordinates *once* and a bare `(N × T)` value
-array. For a 1000-node × 8760-hour grid with `int64` indices:
+Three things govern polar-high's memory footprint. Two of them keep it
+down; one constant-factor cost works against it. Worth understanding all
+three before reaching for the back-of-envelope "long format is 3× wider"
+conclusion — because in practice it usually isn't the number that
+matters.
 
-| storage | columns | bytes |
-|---|---|---:|
-| polar-high (long) | node + hour + value, all `int64`/`float64`, 8.76 M rows | ≈ 210 MB |
-| xarray (wide) | 1000-long node coord + 8760-long hour coord + 1000×8760 value | ≈ 70 MB |
+### The matrix is integers and floats
 
-Three-ish times. polars does **not** auto-deduplicate the repeated
-index values; what you load is what's in memory.
+Every `Var` is assigned an integer column id (`col_id`) the moment you
+create it. The *coefficient* data polar-high hands to HiGHS is nothing
+but those integer column ids, integer row ids, and `float64`
+coefficients — the string dim labels you load (`"wind"`, `"node_42"`,
+…) never enter the numeric matrix. They live in the input `Var` /
+`Param` frames, and only matter while the join that produces a
+constraint family's coefficients is running.
 
-This overhead applies to *most* parameters in real models. Even
-when entity-side topology is irregular (different processes connect
-to different nodes), the **time dim is regular and dense**, and it's
-usually the longest dim by a large margin. A typical hourly model
-runs on 8760 time steps; entities number in the hundreds or low
-thousands. So the regular-grid case isn't a corner case — it's the
-common case for time-coupled parameters.
+The labels *do* reappear in one place: HiGHS also gets a human-readable
+**column name** per variable, formatted from the labels as
+`wind[node_42,t5]`, so solver logs, duals, and MPS output stay
+legible. On a wide dense model these names are not free — at a 3000²
+grid the Python-side name list alone is ~1.1 GB. They are usually the
+largest *string* cost in the build, not the dim columns. Two ways to
+shed them: [`save_memory=True`](performance.md#writing-mps-without-highs)
+drops the Python-side copy once HiGHS owns the names (at the cost of an
+empty `Solution.col_names`), and `Problem.write_mps(..., emit_names=False)`
+omits them from the MPS entirely.
 
-polar-high pays this overhead in exchange for two things, which you
-should weigh against your own constraints:
-
-1. **Faster build** at the matrix-assembly stage. polars's joins
-   and group-bys outpace xarray's broadcast on the operations
-   polar-high hits during `Problem.solve()`. The benchmark page
-   shows the time numbers; for irregular topology the spread
-   widens further.
-2. **Simpler join semantics** for irregular relations
-   (edge → node, process → commodity, period → block). These
-   become explicit polars joins, which is cleaner than the
-   masking-and-reindexing required to express the same thing in
-   xarray. linopy can do it; the model code just gets harder.
-
-If your model is *dominated* by time-coupled parameters on a
-regular grid and memory is your tightest constraint, linopy/xarray
-will likely use less RAM than polar-high. The benchmark page
-confirms this on the dense `N × N` case — at full HiGHS solve,
-xarray's compactness wins. Pick the layout that matches what you
-care about most.
-
-You can recover part of the constant factor with polars'
-`Categorical` or `Enum` dtype on string-valued dim columns. Each
-unique string is stored once and rows carry a 4-byte index instead
-of a variable-length string:
+You can shrink the input frames too: cast string-valued dim columns to
+polars' `Categorical` or `Enum` dtype and each unique label is stored
+once, with a small integer code per row. Joins and group-bys behave
+identically — polar-high doesn't care that the column is categorical
+(and it reconciles mismatched [`Enum` vocabularies](#enum-dtype-alignment)
+across frames for you):
 
 ```python
 demand_df = pl.read_csv("demand.csv").with_columns(
@@ -205,9 +191,59 @@ demand_df = pl.read_csv("demand.csv").with_columns(
 demand = Param(("node", "hour"), demand_df)
 ```
 
-polar-high doesn't care that `node` is categorical — joins and
-group-bys behave identically. For numeric dim columns there's no
-equivalent shortcut; you pay 8 bytes per row.
+For numeric dim columns there's no equivalent shortcut; you pay 8 bytes
+per row.
+
+### The matrix is built in sections, and inputs are released after each
+
+polar-high doesn't assemble the whole LP in memory at once. It walks
+the **constraint families one at a time**: for each family it
+materialises that family's term frames, joins them into
+coordinate-format (COO) triples, hands those rows to HiGHS via
+`addRows`, then **drops every frame it touched** before moving to the
+next family. The objective and each `Param` chain work the same way — a
+term is collected into a local frame, reduced to its COO contribution,
+and released; nothing is cached on the term.
+
+The practical consequence: a model with *many distinct input
+parameters* doesn't pay for all of them at peak. Each parameter is
+resident only long enough to contribute its coefficients to the family
+currently being built, then it's gone. Peak memory tracks the largest
+single family's working set plus the growing HiGHS-side matrix — not
+the sum of every input frame you loaded. This is why models that load
+dozens of small heterogeneous parameters stay lean even though no
+single frame was ever deduplicated.
+
+### The constant-factor cost: long format vs dense grids
+
+What polar-high does pay, per frame, is the long-format layout itself.
+Every `Param` frame is `(*dims, value)` — for a regular N-node × T-hour
+grid that's N · T rows each carrying both index columns plus the value,
+where xarray would store the dim coordinates *once* and a bare
+`(N × T)` value array. For a 1000-node × 8760-hour grid with `int64`
+indices:
+
+| storage | columns | bytes |
+|---|---|---:|
+| polar-high (long) | node + hour + value, all `int64`/`float64`, 8.76 M rows | ≈ 210 MB |
+| xarray (wide) | 1000-long node coord + 8760-long hour coord + 1000×8760 value | ≈ 70 MB |
+
+Roughly three times, for a single dense parameter held in isolation.
+polars does **not** auto-deduplicate the repeated index values; the
+categorical/enum cast above recovers part of the constant for string
+dims, but not for numeric ones.
+
+This factor is real per-frame, but the section-by-section build above
+keeps it from compounding across many parameters. End to end, the
+[benchmark](../compare/benchmark.md) shows polar-high's peak memory
+**matching or beating linopy/xarray** on the irregular network LP, and
+on the dense `N × N` LP once [`save_memory=True`](performance.md#writing-mps-without-highs)
+is enabled. The layout's constant factor only dominates the overall
+picture in the narrow case where a model is *both* dominated by a
+single large dense-grid parameter *and* run without `save_memory`. Pick
+the mode that matches what you care about; the benchmark page has the
+numbers, and [the comparison page](../compare/alternatives.md) covers
+why the join-based layout is the deliberate trade.
 
 ### Enum dtype alignment
 

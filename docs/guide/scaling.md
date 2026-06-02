@@ -1,14 +1,18 @@
 # Scaling — `polar_high.autoscale`
 
-LP coefficient ranges that span more than six decades make HiGHS' presolve unhappy. Sometimes it prints a hint like *"Consider setting the `user_bound_scale` option to -6"* and solves anyway; other times the presolve mishandles near-zero rows and the LP comes back falsely infeasible. The `polar_high.autoscale` package detects the four-range readout, recommends `user_bound_scale` and `user_objective_scale` exponents, and (optionally) writes them back onto the `Problem` for HiGHS to apply at solve time.
+LP coefficient ranges that span more than six decades make HiGHS' presolve unhappy. Most often it prints a hint like *"Consider setting the `user_bound_scale` option to -6"* and solves anyway. Only when a model is *badly* scaled — coefficients spanning eight or nine decades, with near-zero rows the presolve can mishandle — does it risk coming back falsely infeasible. The `polar_high.autoscale` package detects the four-range readout, recommends `user_bound_scale` and `user_objective_scale` exponents, and (optionally) writes them back onto the `Problem` for HiGHS to apply at solve time. It's worth reaching for when the automatic settings give you trouble — a scaling warning you can't shake, or a model that solves with presolve off but not on.
 
-This guide is for callers who:
+If your LP's coefficients all sit within a few decades of 1.0, you don't need any of this — HiGHS' own `simplex_scale_strategy` handles it and polar-high changes nothing.
 
-- have an LP that spans many orders of magnitude in matrix / cost / bound / RHS values,
-- see HiGHS warnings about "excessively small" or "excessively large" bound values, or
-- have hit a falsely-infeasible result and suspect HiGHS' built-in scaling is the culprit.
+## The scaling layers
 
-If your LP's coefficients all sit within a few decades of 1.0, you don't need this — HiGHS' own `simplex_scale_strategy` will handle it - and polar-high will not change anything.
+polar-high thinks about scaling in three layers, which compose rather than compete. HiGHS' own `simplex_scale_strategy` (matrix equilibration, Curtis–Reid) sits underneath all of them and is always available; the `autoscale` package layers on top of it:
+
+- **Layer 1 — detection.** Read the four coefficient ranges (matrix `A`, cost `c`, variable/row bounds, RHS) off the built LP and decide whether the spread warrants attention. No model changes. This is `detect_ranges`.
+- **Layer 2 — semantic rewrites.** Per-quantity column/row factors applied to the matrix *before* it reaches HiGHS — e.g. expressing power in GW instead of MW so a whole group of coefficients shifts by a known factor. This is domain knowledge the modeller has and the solver doesn't, so it lives in the orchestration layer (FlexTool implements it); the library proper does not, and `BASIC` mode skips it. When present, Layer 2 runs first and Layers 1/3 see the already-rewritten matrix.
+- **Layer 3 — HiGHS-native global scaling.** Recommend power-of-two `user_bound_scale` and `user_objective_scale` exponents that pull the worst bound/cost magnitudes into HiGHS' comfort zone, plus `simplex_scale_strategy` for the residual matrix spread. HiGHS applies these internally and unscales on output, so your `Solution` values come back in the original units. This is `recommend_scaling` + `apply_scaling`.
+
+The three are independent dials: you can run detection alone, hand-tune the Layer 2 units, let Layer 3 recommend the solver exponents, or any combination. The rest of this guide focuses on Layers 1 and 3, the part the library owns.
 
 ## Quick example
 

@@ -4,13 +4,24 @@ A short list of things that move the needle on real models.
 
 ## Threading
 
-`polar_high` defaults `POLARS_MAX_THREADS=1` at import time. On the
-indexed-LP build patterns the engine drives, polars's Rayon
-coordination overhead consistently exceeds the parallel speedup —
-single-thread is faster *and* leaner. The benchmark page has the
-numbers; the short version is "polars threading helps the matrix
-assembly by maybe 10–15 % at large N, while costing per-thread
-scratch memory at every N".
+`polar_high` defaults `POLARS_MAX_THREADS=1` at import time. Raising
+the thread count *does* speed up the build — polars parallelises the
+joins and group-bys that matrix assembly leans on — but the gain comes
+with two trade-offs:
+
+- **A bit more memory.** Each Rayon worker carries its own scratch
+  buffers, so peak RSS rises with the thread count even when the LP
+  itself is unchanged.
+- **Fewer parallel runs.** If you launch many models at once (a
+  parameter sweep, a rolling horizon farmed across processes), every
+  process grabbing many threads contends for the same cores and the
+  same memory ceiling, cutting how many you can run concurrently.
+  Single-thread-per-process is usually the better total-throughput
+  choice in that mode.
+
+So the default of 1 thread is tuned for the common "many independent
+solves" deployment, not because threading never helps. For a single
+large model on an otherwise idle box, raising it is often a win.
 
 To override:
 
@@ -48,6 +59,11 @@ p.set_solver_options({"solver": "simplex"})     # for LPs with simplex-friendly 
   turning presolve off is usually a win.
 - `solver=ipm` (interior point) can be much faster on large LPs
   without warm starts, but provides no basis to re-use.
+- **Scaling** matters when coefficients span many decades — a badly
+  scaled LP can stall the simplex or come back falsely infeasible. Let
+  [`polar_high.autoscale`](scaling.md) pick `user_bound_scale` /
+  `user_objective_scale`, or set HiGHS' `simplex_scale_strategy`
+  directly.
 
 Always benchmark your specific model — these are starting points,
 not rules.
