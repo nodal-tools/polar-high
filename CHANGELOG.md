@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.5.0] — 2026-06-10
+
+Routes the HiGHS solver log through Python's `sys.stdout` so it is visible in
+consoles that only capture the Python-level stream (not the native fd-1 write).
+The LP build, autoscale, and solve numerics are byte-identical to 2.4.5; only
+where the log *appears* changes.
+
+### Added
+
+- **`route_highs_log_to_stdout(h, *, stream=None)`** (new module
+  `polar_high._log_routing`): registers a HiGHS `kCallbackLogging` callback that
+  re-emits each message through `sys.stdout` (resolved lazily, so it follows
+  later redirection such as ipykernel's) and suppresses the duplicate native
+  console write (`log_to_console=False`) once the callback is confirmed
+  registered. Idempotent (safe on a reused `Highs`), a no-op on silent solves
+  (`output_flag` false), and fully defensive — any `highspy` error leaves the
+  native logging path untouched rather than risking a lost log.
+
+### Changed
+
+- The in-process solve sites (`solvers/_highs.py`, the streaming
+  `Problem.solve`, and `WarmProblem._initial_build`) now route the HiGHS log
+  through `sys.stdout` by default, right after options are applied so the
+  version banner is captured. This makes the solver log visible under the
+  **Jupyter / Spine-Toolbox Basic Console on Windows** (where `ipykernel` only
+  redirects fd 1 on POSIX, so the entire HiGHS log was previously lost) and
+  under `redirect_stdout` / pytest `capsys`. Set **`POLAR_HIGH_NATIVE_LOG=1`**
+  to opt out and keep HiGHS' native fd-1 logging.
+
 ## [2.4.5] — 2026-06-02
 
 Docs-polish release. **No runtime or public-API changes** — the LP
