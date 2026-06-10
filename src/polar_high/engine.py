@@ -35,6 +35,8 @@ import highspy
 import numpy as np
 import polars as pl
 
+from ._log_routing import route_highs_log_to_stdout
+
 # ---------------------------------------------------------------------------
 # Stream-time LP-range helpers
 #
@@ -5037,6 +5039,12 @@ class Problem:
                 n_opts=(len(opts) if opts else 0),
             )
 
+        # Route HiGHS' log through Python ``sys.stdout`` now — BEFORE any
+        # model op (the version banner is emitted on HiGHS' first log call,
+        # which can precede ``run()``), so the whole log is captured under
+        # Jupyter / Spine-Toolbox on Windows where fd 1 is not forwarded.
+        route_highs_log_to_stdout(h)
+
         # Objective sense + offset up front; column data comes next.
         h.changeObjectiveSense(
             highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
@@ -6567,6 +6575,8 @@ class WarmProblem:
             self._initial_build(options=options)
         # subsequent: just rerun
         h = self._h
+        # Idempotent: installs once on the first solve, no-ops on reuse.
+        route_highs_log_to_stdout(h)
         h.run()
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
@@ -7258,6 +7268,11 @@ class WarmProblem:
                 "highs_options_applied",
                 n_opts=(len(opts) if opts else 0),
             )
+        # Route HiGHS' log through Python ``sys.stdout`` before passModel —
+        # the version banner can be emitted on the first log call (pre-run),
+        # so register early to capture it under Jupyter / Spine-Toolbox on
+        # Windows.  Idempotent: the per-solve ``run()`` call site re-checks.
+        route_highs_log_to_stdout(h)
         if _sp_on:
             _sp_emit("highs_passmodel_pre", n_cols=int(n_cols), n_rows=int(n_rows))
         h.passModel(lp)

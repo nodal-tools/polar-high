@@ -39,6 +39,7 @@ from typing import Any
 import highspy
 import numpy as np
 
+from .._log_routing import route_highs_log_to_stdout
 from ._base import SolverResult, SolverStatus
 from ._lp_view import LpView
 
@@ -171,6 +172,12 @@ def run(
                     f"HiGHS rejected option {key}={val!r} (status={status!r})",
                     stacklevel=2,
                 )
+
+    # Route HiGHS' log through Python ``sys.stdout`` before passModel so the
+    # whole log (incl. the version banner emitted on the first log call) is
+    # visible under consoles that do not capture the C-level fd 1 — notably
+    # Jupyter / Spine-Toolbox on Windows.  No-op when output is off.
+    route_highs_log_to_stdout(h)
 
     h.passModel(lp)
 
