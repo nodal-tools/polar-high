@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.5.1] — 2026-06-11
+
+Hardens the 2.5.0 HiGHS-log routing so it can never lose the log. The LP build,
+autoscale, and solve numerics are unchanged from 2.5.0.
+
+### Fixed
+
+- `route_highs_log_to_stdout` suppressed HiGHS' native console write
+  (`log_to_console=False`) and re-emitted via the `sys.stdout` callback on every
+  routed solve. Suppressing native logging is a bet that the callback fires, and
+  some `highspy` builds register the `kCallbackLogging` callback but never
+  deliver a message — so suppress-native + silent-callback dropped the **entire**
+  HiGHS log (observed in a Linux GUI subprocess on one machine, while an
+  otherwise-identical machine with a different `highspy` was fine). The routing
+  now suppresses native logging **only when `sys.stdout` is not backed by the
+  native stdout fd (fd 1)**. When the sink already is fd 1 — a terminal, a pipe
+  (e.g. a GUI reading a subprocess), or a file on fd 1 — HiGHS' own native log
+  already reaches it, so native logging is left intact and the callback is
+  skipped (new helper `_sink_is_native_stdout`). Routing + suppression now
+  happens only where `sys.stdout` genuinely diverges from fd 1 (Windows Basic
+  Console `OutStream`, `redirect_stdout`, pytest `capsys`), i.e. where the native
+  write is unreachable anyway. `POLAR_HIGH_NATIVE_LOG=1` still opts out
+  everywhere.
+
 ## [2.5.0] — 2026-06-10
 
 Routes the HiGHS solver log through Python's `sys.stdout` so it is visible in
