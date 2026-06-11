@@ -67,6 +67,7 @@ class _FakeStream:
 # _sink_is_native_stdout
 # --------------------------------------------------------------------------
 
+
 def test_sink_is_native_stdout_classification():
     assert _sink_is_native_stdout(_FakeStream(fd=1)) is True
     assert _sink_is_native_stdout(_FakeStream(fd=5)) is False
@@ -78,6 +79,7 @@ def test_sink_is_native_stdout_classification():
 # --------------------------------------------------------------------------
 # route_highs_log_to_stdout — gating
 # --------------------------------------------------------------------------
+
 
 def test_fd1_sink_leaves_native_logging_untouched():
     h = _FakeHighs(output_flag=True)
@@ -135,6 +137,7 @@ def test_already_routed_is_idempotent():
 # --------------------------------------------------------------------------
 # Real solves — exercise the actual highspy callback on each path
 # --------------------------------------------------------------------------
+
 
 def _trivial_problem():
     import polars as pl
