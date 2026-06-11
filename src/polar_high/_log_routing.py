@@ -12,13 +12,25 @@ just fine, but some do not:
   ``capsys`` — those patch ``sys.stdout``, which the native fd-1 writes
   bypass.
 
-:func:`route_highs_log_to_stdout` installs a HiGHS *logging callback* that
-re-emits each message through ``sys.stdout`` and suppresses the native
-console write (``log_to_console=False``), so the log appears exactly once on
-every platform and integrates with Python stream redirection.
+:func:`route_highs_log_to_stdout` handles those cases by installing a HiGHS
+*logging callback* that re-emits each message through ``sys.stdout`` and
+suppressing the native console write (``log_to_console=False``), so the log
+appears exactly once and integrates with Python stream redirection.
+
+It does this **only when ``sys.stdout`` is not the native fd-1 sink** — i.e.
+when re-routing actually changes where the log lands.  When ``sys.stdout`` is
+backed by fd 1 (a terminal, a pipe such as the FlexTool GUI reading a
+subprocess, or a file opened on fd 1), HiGHS' native log already reaches that
+exact sink, so the function leaves native logging untouched.  Suppressing the
+native write there would be a bet that the callback fires, and some
+``highspy`` builds register the ``kCallbackLogging`` callback but never
+deliver a message — suppress-native + silent-callback then loses the log
+entirely.  Routing only when ``sys.stdout`` diverges from fd 1 keeps the
+robust native path on the common case and confines callback-dependence to
+environments where the native write is unreachable anyway.
 
 Set ``POLAR_HIGH_NATIVE_LOG=1`` to opt out and keep HiGHS' native fd-1
-logging untouched.
+logging untouched everywhere.
 """
 
 from __future__ import annotations
@@ -38,6 +50,25 @@ _ROUTED_ATTR = "_polar_high_log_routed"
 _CB_ATTR = "_polar_high_log_cb"
 
 
+def _sink_is_native_stdout(stream: Any) -> bool:
+    """Return True when the log sink is backed by the native stdout fd (fd 1).
+
+    In that case HiGHS' own native log already reaches the sink, so the
+    ``sys.stdout`` callback is redundant and suppressing the native write
+    would risk losing the log on ``highspy`` builds whose logging callback is
+    silent.  A stream with no real fd — ``io.StringIO``, an ``ipykernel``
+    ``OutStream``, a ``pytest`` capture buffer, or a closed stream — is
+    treated as *not* native stdout, so the callback is used to surface the
+    log.  (``io.UnsupportedOperation`` subclasses both ``OSError`` and
+    ``ValueError``, so the broad ``except`` covers "no usable fileno".)
+    """
+    target = stream if stream is not None else sys.stdout
+    try:
+        return target.fileno() == 1
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def route_highs_log_to_stdout(h: Any, *, stream: Any = None) -> None:
     """Make ``Highs`` instance *h* log through Python ``sys.stdout``.
 
@@ -46,7 +77,11 @@ def route_highs_log_to_stdout(h: Any, *, stream: Any = None) -> None:
     * ``POLAR_HIGH_NATIVE_LOG`` is set (operator opted out),
     * the instance was already routed (idempotent),
     * HiGHS output is disabled (``output_flag`` is false — a silent solve
-      stays silent).
+      stays silent),
+    * the sink is already backed by fd 1 (terminal / pipe / file on fd 1):
+      HiGHS' native log reaches it directly, so native logging is left
+      untouched rather than suppressed in favour of a callback that may be
+      silent on some ``highspy`` builds.
 
     Defensive throughout: any ``highspy`` error leaves the native logging
     path untouched rather than risking a lost log or a broken solve.  The
@@ -75,6 +110,18 @@ def route_highs_log_to_stdout(h: Any, *, stream: Any = None) -> None:
     except Exception:
         return
     if not output_flag:
+        return
+
+    # When the sink is the native stdout fd (fd 1), HiGHS' own log already
+    # lands exactly where the callback would write it.  Re-emitting would
+    # only duplicate it, and suppressing the native write to avoid that
+    # duplication bets the callback fires — some highspy builds register the
+    # callback but never deliver a message, which would then lose the log
+    # (native suppressed + callback silent).  Leave native logging untouched:
+    # it is the robust path and needs no callback.  Do *not* stamp
+    # ``_ROUTED_ATTR`` here, so a later solve whose ``sys.stdout`` has been
+    # redirected away from fd 1 (e.g. ``capsys``) is still re-evaluated.
+    if _sink_is_native_stdout(stream):
         return
 
     def _log_callback(
