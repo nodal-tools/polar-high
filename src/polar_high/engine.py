@@ -82,6 +82,27 @@ def _running_finite_nonzero_min_max(
     return (lo, hi)
 
 
+def _floor_small_coefs(arr: np.ndarray, threshold: float) -> np.ndarray:
+    """Return ``arr`` with every entry whose ``abs`` is strictly below
+    ``threshold`` replaced by exactly ``0.0``.
+
+    The cutoff is information-preserving on the small end only: values
+    with ``abs(value) == threshold`` are kept, and large values are
+    untouched.  ``threshold <= 0.0`` is a no-op (returns ``arr``
+    unchanged, no copy).  ``±inf`` and ``NaN`` are never floored —
+    ``abs(inf) < threshold`` and ``abs(nan) < threshold`` are both
+    ``False`` — so one-sided row-bound sentinels survive verbatim.
+
+    The replacement keeps array shape/length intact (it sets cells to
+    ``0.0`` rather than dropping them), so downstream COO/CSC structure
+    and ordering are preserved.
+    """
+    if threshold <= 0.0 or arr.size == 0:
+        return arr
+    out = np.where(np.abs(arr) < threshold, 0.0, arr)
+    return out.astype(np.float64, copy=False)
+
+
 # ---------------------------------------------------------------------------
 # Solve-path memory profiling helper
 #
@@ -3030,6 +3051,23 @@ class Problem:
         self._obj_terms: list[_Term] = []
         self._obj_sense = "min"
         self._obj_offset: float = 0.0
+        # Generic small-coefficient cutoff.  When > 0.0, any constraint-
+        # matrix coefficient OR row-bound (RHS) term whose absolute value
+        # is strictly LESS THAN this threshold is floored to exactly
+        # ``0.0`` at LP-assembly time, just before the coefficients are
+        # handed to HiGHS.  Values exactly equal to the threshold are
+        # kept; ``±inf`` row-bound sentinels are never affected
+        # (``abs(inf) < thr`` is false).  Applied in BOTH build paths:
+        # :meth:`_solve_streaming` (per-family ``addRows``) and
+        # :meth:`_build_canonical_matrix` (the CSC ``val`` + ``row_lb`` /
+        # ``row_ub`` arrays consumed by the non-streaming ``passModel``
+        # path and by :class:`WarmProblem`).  polar-high knows nothing
+        # about why a caller wants this; it is a pure numeric floor.
+        # Default ``0.0`` ⇒ OFF — behaviour is byte-identical to code
+        # that never sets it.  The floor REPLACES the value with 0.0; it
+        # never drops a matrix entry, so matrix structure/determinism is
+        # preserved.
+        self.coef_zero_threshold: float = 0.0
         # HiGHS option-name → value applied via setOptionValue at solve()
         # time.  Populated by ``set_solver_options`` (or by flextool's
         # ``build_flextool`` when ``FlexData.solver_options`` is set).
@@ -4394,6 +4432,18 @@ class Problem:
             row_ub = np.zeros(0, dtype=np.float64)
             sense_char = np.zeros(0, dtype=np.uint8)
 
+        # Small-coefficient cutoff (0.0 ⇒ OFF).  Floors the CSC matrix
+        # coefficients and the row bounds (RHS) so this canonical matrix —
+        # consumed by the non-streaming ``passModel`` path AND by
+        # :class:`WarmProblem` — carries the same floored values the
+        # streaming path produces.  Replaces |value| < threshold with 0.0;
+        # ±inf row-bound sentinels survive (abs(inf) < thr is False).
+        _coef_zero_thr = float(getattr(self, "coef_zero_threshold", 0.0) or 0.0)
+        if _coef_zero_thr > 0.0:
+            sorted_v = _floor_small_coefs(sorted_v, _coef_zero_thr)
+            row_lb = _floor_small_coefs(row_lb, _coef_zero_thr)
+            row_ub = _floor_small_coefs(row_ub, _coef_zero_thr)
+
         if _profile:
             _cm_emit(
                 "canonicalise_exit",
@@ -4894,6 +4944,9 @@ class Problem:
         tmp_dir: str | os.PathLike | None = None,
     ) -> Solution | None:
         _sp_emit, _sp_on = _make_solve_profile_emitter()
+        # Small-coefficient cutoff threshold (0.0 ⇒ OFF).  Read once here
+        # so every per-family floor below shares the same value.
+        _coef_zero_thr = float(getattr(self, "coef_zero_threshold", 0.0) or 0.0)
         if _sp_on:
             _sp_emit(
                 "enter",
@@ -5267,6 +5320,12 @@ class Problem:
             else:
                 raise ValueError(f"sense must be '<=', '>=' or '=='; got {sense!r}")
 
+            # Small-coefficient cutoff on the RHS (row bounds).  Floors
+            # finite |bound| < threshold to 0.0; ±inf sentinels survive.
+            if _coef_zero_thr > 0.0:
+                row_lb = _floor_small_coefs(row_lb, _coef_zero_thr)
+                row_ub = _floor_small_coefs(row_ub, _coef_zero_thr)
+
             if _sp_on:
                 _sp_emit(
                     "fam_rhs_built",
@@ -5614,6 +5673,11 @@ class Problem:
                 sorted_r = fr[order]
                 idx32 = fc[order].astype(np.int32)
                 val64 = fv[order]
+                # Small-coefficient cutoff on the LHS matrix coefficients.
+                # Replaces |coef| < threshold with 0.0; keeps the entry
+                # (structure/determinism preserved).
+                if _coef_zero_thr > 0.0:
+                    val64 = _floor_small_coefs(val64, _coef_zero_thr)
                 starts = np.zeros(row_count + 1, dtype=np.int32)
                 # bincount of row indices → counts per row, then cumsum
                 counts = np.bincount(sorted_r.astype(np.int64), minlength=row_count)
@@ -6190,6 +6254,18 @@ class WarmProblem:
         else:
             lb = new_rhs.astype(np.float64, copy=False)
             ub = lb
+
+        # Mirror the initial-build small-coefficient cutoff on the warm
+        # RHS path: any updated row bound that newly lands in
+        # ``(0, threshold)`` is floored to 0.0, exactly as ``row_lb`` /
+        # ``row_ub`` are floored at build time.  ``±inf`` sentinels (the
+        # cached one-sided bounds) are preserved verbatim.  No-op when
+        # the threshold is 0.0 (default), so warm updates stay
+        # byte-identical with the cutoff off.
+        _coef_zero_thr = float(getattr(self._p, "coef_zero_threshold", 0.0) or 0.0)
+        if _coef_zero_thr > 0.0:
+            lb = _floor_small_coefs(lb, _coef_zero_thr)
+            ub = _floor_small_coefs(ub, _coef_zero_thr)
         self._h.changeRowsBounds(int(row_count), row_idx, lb, ub)
 
     def update_obj_coef(self, var_name: str, new_param: Param | float | int) -> None:
@@ -6473,6 +6549,16 @@ class WarmProblem:
             denom_coefs = factor / safe_vals
             denom_coefs = np.where(denom_mask & (new_vals == 0.0), 0.0, denom_coefs)
             new_coefs = np.where(denom_mask, denom_coefs, new_coefs)
+
+        # Mirror the initial-build small-coefficient cutoff on the warm
+        # in-place path: any updated matrix coefficient that newly lands
+        # in ``(0, threshold)`` is floored to exactly 0.0 before it
+        # reaches HiGHS, exactly as ``sorted_v`` / ``val64`` are floored
+        # at build time.  No-op when the threshold is 0.0 (default), so
+        # warm updates stay byte-identical with the cutoff off.
+        _coef_zero_thr = float(getattr(self._p, "coef_zero_threshold", 0.0) or 0.0)
+        if _coef_zero_thr > 0.0:
+            new_coefs = _floor_small_coefs(new_coefs, _coef_zero_thr)
 
         h = self._h
         rows_list = rows.tolist()
