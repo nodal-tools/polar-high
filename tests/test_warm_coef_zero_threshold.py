@@ -81,8 +81,9 @@ class _RowBoundsSpy:
         self.calls: list[tuple[np.ndarray, np.ndarray]] = []
 
     def changeRowsBounds(self, n, idx, lb, ub):  # noqa: N802
-        self.calls.append((np.asarray(lb, dtype=np.float64).copy(),
-                            np.asarray(ub, dtype=np.float64).copy()))
+        self.calls.append(
+            (np.asarray(lb, dtype=np.float64).copy(), np.asarray(ub, dtype=np.float64).copy())
+        )
         return self._h.changeRowsBounds(n, idx, lb, ub)
 
     def __getattr__(self, name):
@@ -177,8 +178,13 @@ def test_warm_update_rhs_preserves_inf_sentinel():
         lhs_terms={"flow": v_flow.to_expr()},
         rhs_terms={"demand": demand_p},
     )
-    p.set_objective(fp.Param(("t",), pl.DataFrame(
-        {"t": np.arange(n_t, dtype=np.int64), "value": -np.ones(n_t)})) * v_flow, sense="min")
+    p.set_objective(
+        fp.Param(
+            ("t",), pl.DataFrame({"t": np.arange(n_t, dtype=np.int64), "value": -np.ones(n_t)})
+        )
+        * v_flow,
+        sense="min",
+    )
     p.coef_zero_threshold = 1e-4
     wp = fp.WarmProblem(p)
     wp.solve()
