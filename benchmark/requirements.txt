@@ -4,7 +4,7 @@
 # specific run for the docs.
 polar-high
 linopy>=0.7.0
-pyomo>=6.10.0
+pyomo>=6.10.1
 pulp==4.0.0a9
 highspy
 xarray
