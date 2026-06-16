@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.6.0] — 2026-06-16
+
+Adds an opt-in small-coefficient cutoff. Default behaviour is unchanged —
+byte-identical to 2.5.1 unless a caller sets the new threshold.
+
+### Added
+
+- **`Problem.coef_zero_threshold`** (default `0.0` = off): floors any LP matrix
+  coefficient or RHS row-bound whose absolute value is below the threshold to
+  exactly `0.0`, narrowing the numerical range (conditioning) of the LP for
+  callers that opt in. Applied at every coefficient/RHS finalize point so it is
+  independent of the build path — initial build (`_solve_streaming`,
+  `_build_canonical_matrix`, including `row_lb`/`row_ub`) and warm in-place
+  updates (`WarmProblem.update_param`, `update_rhs`). `±inf` / `NaN` sentinels
+  are preserved and entries are replaced, never dropped, so matrix structure and
+  determinism are unchanged; a threshold of `0.0` short-circuits to a no-op.
+
 ## [2.5.1] — 2026-06-11
 
 Hardens the 2.5.0 HiGHS-log routing so it can never lose the log. The LP build,
