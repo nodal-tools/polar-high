@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.8.0] — 2026-06-17
+
+Retains each region's recovered-primal column values in the Lagrangian
+result so a downstream caller can reconstruct every subproblem's primal
+(e.g. investment-variable values) after the solve. Opt-in/backward-
+compatible — the new field defaults to an empty list and existing callers
+are unaffected.
+
+### Added
+
+- **`LagrangianSolution.subproblem_col_values`**: one numpy float64
+  `col_value` array per subproblem (region), in subproblem order, each the
+  region's FINAL recovered-primal column values. Populated on every return
+  path of `LagrangianProblem.solve()` — the main subgradient/primal-recovery
+  path (a region whose recovery solve is skipped/non-optimal falls back to its
+  most recent iterate, so the list is always full-length and index-aligned)
+  and the trivial no-coupling early-return path (from each subproblem's initial
+  solve). Each array is layout-aligned with that region's own
+  `subproblems[i]._vars[name].frame['col_id']`, so a caller can index those
+  col_ids into entry `i` to assemble a whole-system primal from the per-region
+  solves.
+
 ## [2.7.0] — 2026-06-17
 
 Adds opt-in live progress reporting to the Lagrangian driver. Default

@@ -168,6 +168,60 @@ def test_progress_callback_exception_never_breaks_solve() -> None:
 
 
 # ---------------------------------------------------------------------------
+# subproblem_col_values retention
+# ---------------------------------------------------------------------------
+
+
+def test_subproblem_col_values_populated_and_aligned() -> None:
+    """The retained per-region recovered-primal ``col_value`` arrays are
+    full-length, 1-D float arrays, and index-aligned with each region's
+    own ``_vars[name].frame['col_id']`` — so a caller can reconstruct the
+    region's ``x`` value by indexing into them."""
+    lp = _two_region_consensus_problem()
+    sol = lp.solve(max_iters=200, tol=1e-9, step=0.5, initial_lambda=0.0, min_iters=20)
+
+    n_sp = len(lp.subproblems)
+    assert len(sol.subproblem_col_values) == n_sp
+    for cv in sol.subproblem_col_values:
+        assert isinstance(cv, np.ndarray)
+        assert cv.ndim == 1
+        assert cv.dtype == np.float64
+
+    # For each region, reconstruct x via that region's own col_id.  The
+    # retained array is that region's FINAL recovered-primal solve in its
+    # own col layout, so the reconstructed x must equal that region's
+    # reported recovery objective (cost == 1 ⇒ obj == x).
+    recon_x = []
+    for i, p in enumerate(lp.subproblems):
+        col_ids = p._vars["x"].frame["col_id"].to_numpy()
+        recon = sol.subproblem_col_values[i][col_ids]
+        assert recon.shape == (1,)
+        assert recon[0] == pytest.approx(sol.subproblem_objectives[i], rel=1e-9)
+        recon_x.append(recon[0])
+    # Consensus coupling x_A == x_B holds in the recovered primal: the two
+    # regions' reconstructed x values agree.
+    assert recon_x[0] == pytest.approx(recon_x[1], rel=1e-9)
+
+
+def test_subproblem_col_values_trivial_path_full_length() -> None:
+    """The trivial/no-coupling early-return path (single subproblem,
+    empty couplings) still returns a full-length ``subproblem_col_values``
+    populated from the initial solve."""
+    p = _demand_problem(demand=4.0, cost=2.5)
+    lp = LagrangianProblem([p], [])
+    sol = lp.solve(max_iters=10, tol=1e-9)
+    assert sol.iterations == 0
+    assert len(sol.subproblem_col_values) == 1
+    cv = sol.subproblem_col_values[0]
+    assert isinstance(cv, np.ndarray)
+    assert cv.ndim == 1
+    assert cv.dtype == np.float64
+    # The region's own col_id reconstructs x = demand = 4.
+    col_ids = lp.subproblems[0]._vars["x"].frame["col_id"].to_numpy()
+    assert cv[col_ids][0] == pytest.approx(4.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # 2. Trivial 1-subproblem case
 # ---------------------------------------------------------------------------
 

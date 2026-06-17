@@ -83,6 +83,12 @@ class LagrangianSolution:
     primal_recovery: list[np.ndarray] = field(default_factory=list)
     best_dual_total: float = 0.0
     recovered_total: float = 0.0
+    # One numpy float64 ``col_value`` array per subproblem (region), in
+    # subproblem order, each the region's FINAL recovered-primal column
+    # values.  Lets callers reconstruct a whole-system primal by indexing
+    # ``subproblems[i]._vars[name].frame['col_id']`` into entry ``i``.
+    # Opt-in/backward-compatible: default empty list.
+    subproblem_col_values: list = field(default_factory=list)
 
 
 @dataclass
@@ -174,7 +180,12 @@ class LagrangianProblem:
                 pass
 
         # Initial solve — also builds each WarmProblem's HiGHS state.
+        # Retain each region's col_value so the trivial (no-coupling)
+        # early-return path can hand back a full-length
+        # ``subproblem_col_values``, and so the main loop has a seeded
+        # fallback for any region whose recovery solve is skipped.
         first_obj: list[float] = []
+        last_col_values: list[np.ndarray] = [None] * len(self._warm)  # type: ignore[list-item]
         for i, wp in enumerate(self._warm):
             sol = wp.solve()
             if not sol.optimal:
@@ -182,6 +193,7 @@ class LagrangianProblem:
                     f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
                 )
             first_obj.append(sol.obj)
+            last_col_values[i] = sol.col_value.copy()
 
         self._resolved = self._resolve_couplings(initial_lambda)
         # Snapshot per-cell base objective costs from the live LPs so
@@ -206,6 +218,7 @@ class LagrangianProblem:
                 primal_recovery=[],
                 best_dual_total=sum(first_obj),
                 recovered_total=sum(first_obj),
+                subproblem_col_values=[cv.copy() for cv in last_col_values],
             )
 
         if primal_tail is None:
@@ -246,6 +259,7 @@ class LagrangianProblem:
                     )
                 iter_obj[i] = sol.obj
                 primal_by_sp[i] = sol.col_value
+                last_col_values[i] = sol.col_value.copy()
 
             # Residual = Σ coef · x − rhs, per cell.
             max_abs_res = 0.0
@@ -327,6 +341,7 @@ class LagrangianProblem:
                 sol = wp.solve()
                 if sol.optimal:
                     recovery_obj[i] = sol.obj
+                    last_col_values[i] = sol.col_value.copy()
             if max_avg_res < tol:
                 converged = True
 
@@ -355,6 +370,7 @@ class LagrangianProblem:
             primal_recovery=primal_recovery,
             best_dual_total=best_dual_total,
             recovered_total=recovered_total,
+            subproblem_col_values=[cv.copy() for cv in last_col_values],
         )
 
     def _resolve_couplings(self, initial_lambda: float) -> list[_ResolvedCoupling]:
