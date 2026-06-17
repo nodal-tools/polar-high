@@ -26,8 +26,11 @@ flextool-side wrapper.
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -152,6 +155,8 @@ class LagrangianProblem:
         min_iters: int = 1,
         primal_tail: int | None = None,
         progress_callback: Callable[[dict], None] | None = None,
+        max_workers: int | None = None,
+        subsolve_callback: Callable[[dict], None] | None = None,
     ) -> LagrangianSolution:
         """Run the dual-subgradient loop.
 
@@ -169,6 +174,33 @@ class LagrangianProblem:
         live progress; ``None`` (default) is a no-op and preserves the
         silent behaviour.  Callback exceptions are suppressed so a
         faulty observer can never abort the solve.
+
+        ``max_workers`` — optional cap on the number of worker threads
+        used to solve subproblems concurrently within each barrier
+        (initial / per-iteration / recovery).  ``None`` (default) or
+        ``1`` keeps today's fully sequential behaviour.  The effective
+        worker count is clamped to ``[1, n_subproblems]``.  When >1, each
+        subsolve is forced to ``threads=1`` so every ``h.run()`` is
+        deterministic (HiGHS is non-deterministic with threads>1) and the
+        box is not oversubscribed; the initial build loop always runs
+        sequentially on the calling thread (it may reset the global HiGHS
+        scheduler).
+
+        ``subsolve_callback`` — optional callable invoked at the start and
+        finish of every individual subproblem solve, with a dict carrying
+        ``event`` (``"start"`` / ``"finish"``), ``iter``, ``subproblem``
+        and ``phase`` (``"initial"`` / ``"iterate"`` / ``"recovery"``);
+        ``finish`` entries additionally carry ``obj`` when the subsolve
+        reached optimality.  It fires from worker threads when
+        ``max_workers > 1`` and MUST be thread-safe.  Exceptions are
+        suppressed so a faulty observer can never abort the solve.
+        ``None`` (default) is a no-op.
+
+        When the caller uses the new functionality (``max_workers > 1`` or
+        a ``subsolve_callback``) the per-subsolve HiGHS native log is
+        silenced; set ``POLAR_HIGH_LAGRANGIAN_VERBOSE=1`` to force the
+        verbose native log.  Plain existing callers keep today's verbose
+        native log.
         """
 
         def _emit(entry: dict) -> None:
@@ -179,199 +211,271 @@ class LagrangianProblem:
             except Exception:  # noqa: BLE001 — an observer must not break the solve
                 pass
 
-        # Initial solve — also builds each WarmProblem's HiGHS state.
-        # Retain each region's col_value so the trivial (no-coupling)
-        # early-return path can hand back a full-length
-        # ``subproblem_col_values``, and so the main loop has a seeded
-        # fallback for any region whose recovery solve is skipped.
-        first_obj: list[float] = []
-        last_col_values: list[np.ndarray] = [None] * len(self._warm)  # type: ignore[list-item]
-        for i, wp in enumerate(self._warm):
-            sol = wp.solve()
-            if not sol.optimal:
-                raise RuntimeError(
-                    f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
-                )
-            first_obj.append(sol.obj)
-            last_col_values[i] = sol.col_value.copy()
+        n_sp = len(self._warm)
+        _eff_workers = max(1, min(max_workers if max_workers is not None else 1, n_sp))
+        _parallel = _eff_workers > 1
+        # Silence the per-subsolve HiGHS log when the caller uses the new
+        # functionality (parallel OR a progress hook); plain existing callers
+        # keep today's verbose native log. Env override forces verbose.
+        _silence = (_parallel or subsolve_callback is not None) and not os.environ.get(
+            "POLAR_HIGH_LAGRANGIAN_VERBOSE"
+        )
+        _subsolve_options: dict = {}
+        if _silence:
+            _subsolve_options["output_flag"] = False
+        if _parallel:
+            # threads=1 per subsolve: avoid N_workers x cores oversubscription
+            # AND make each h.run() deterministic (HiGHS is non-deterministic
+            # with threads>1). Setting "threads" triggers the one-time
+            # resetGlobalScheduler in WarmProblem._initial_build (engine.py
+            # ~7333) — safe because the build loop below is forced sequential.
+            _subsolve_options["threads"] = 1
+        _first_opts = _subsolve_options or None
 
-        self._resolved = self._resolve_couplings(initial_lambda)
-        # Snapshot per-cell base objective costs from the live LPs so
-        # the per-iter ``cost = base + coef·λ`` push-down is correct
-        # for variables that have a non-zero base cost.  HiGHS exposes
-        # the column-cost vector via getLp(); we grab the entries we
-        # need.
-        for rc in self._resolved:
-            for ent in rc.entries:
-                lp = self._warm[ent.subproblem_idx]._h.getLp()
-                col_cost = np.asarray(lp.col_cost_, dtype=np.float64)
-                ent.base_costs = col_cost[ent.cols].astype(np.float64, copy=True)
-        if not self._resolved:
-            return LagrangianSolution(
-                converged=True,
-                iterations=0,
-                total_objective=sum(first_obj),
-                report_kind="best_dual",
-                subproblem_objectives=list(first_obj),
-                iteration_log=[],
-                final_lambdas=[],
-                primal_recovery=[],
-                best_dual_total=sum(first_obj),
-                recovered_total=sum(first_obj),
-                subproblem_col_values=[cv.copy() for cv in last_col_values],
+        def _fire_subsolve(event: str, *, it: int, i: int, phase: str, obj=None) -> None:
+            if subsolve_callback is None:
+                return
+            entry = {"event": event, "iter": it, "subproblem": i, "phase": phase}
+            if obj is not None:
+                entry["obj"] = obj
+            try:
+                subsolve_callback(entry)
+            except Exception:  # noqa: BLE001 — an observer must not break the solve
+                pass
+
+        def _run_one(i, wp, *, it, phase, options=None):
+            _fire_subsolve("start", it=it, i=i, phase=phase)
+            sol = wp.solve(options=options)
+            _fire_subsolve(
+                "finish", it=it, i=i, phase=phase, obj=(sol.obj if sol.optimal else None)
             )
+            return i, sol
 
-        if primal_tail is None:
-            primal_tail = max(20, max_iters // 4)
+        pool_cm = (
+            ThreadPoolExecutor(max_workers=_eff_workers)
+            if _parallel
+            else contextlib.nullcontext(None)
+        )
+        with pool_cm as _pool:
 
-        iteration_log: list[dict] = []
-        converged = False
-        last_obj = list(first_obj)
-        # Per-coupling per-entry tail accumulators.
-        sum_entry_vals: list[list[np.ndarray]] = [
-            [np.zeros(rc.n_cells) for _ in rc.entries] for rc in self._resolved
-        ]
-        tail_count = 0
+            def _solve_all(phase, it):
+                if _pool is None:
+                    return [_run_one(i, wp, it=it, phase=phase) for i, wp in enumerate(self._warm)]
+                futs = {
+                    i: _pool.submit(_run_one, i, wp, it=it, phase=phase)
+                    for i, wp in enumerate(self._warm)
+                }
+                out = [None] * len(self._warm)
+                try:
+                    for i in range(len(self._warm)):
+                        out[i] = futs[i].result()  # re-raises worker exceptions, in index order
+                except BaseException:
+                    for f in futs.values():
+                        f.cancel()
+                    raise  # `with` still does shutdown(wait=True)
+                return out
 
-        max_abs_res = float("inf")
-        it = 0
-        for it in range(1, max_iters + 1):
-            alpha_k = step / math.sqrt(it)
-
-            # Apply per-cell λ to every entry's column costs.
-            for rc in self._resolved:
-                for ent in rc.entries:
-                    new_cost = ent.base_costs + ent.coef * rc.lam
-                    self._warm[ent.subproblem_idx]._h.changeColsCost(
-                        int(ent.cols_i32.size),
-                        ent.cols_i32,
-                        new_cost,
-                    )
-
-            # Solve every subproblem.
-            iter_obj = [0.0] * len(self._warm)
-            primal_by_sp: dict[int, np.ndarray] = {}
+            # Initial solve — also builds each WarmProblem's HiGHS state.
+            # Retain each region's col_value so the trivial (no-coupling)
+            # early-return path can hand back a full-length
+            # ``subproblem_col_values``, and so the main loop has a seeded
+            # fallback for any region whose recovery solve is skipped.
+            # ALWAYS SEQUENTIAL (never via _pool): the first wp.solve()
+            # builds each WarmProblem and may resetGlobalScheduler (a global,
+            # threads-option-gated operation), so the build loop must run on
+            # the calling thread, one region at a time.
+            first_obj: list[float] = [0.0] * n_sp
+            last_col_values: list[np.ndarray] = [None] * len(self._warm)  # type: ignore[list-item]
             for i, wp in enumerate(self._warm):
-                sol = wp.solve()
+                _, sol = _run_one(i, wp, it=0, phase="initial", options=_first_opts)
                 if not sol.optimal:
                     raise RuntimeError(
-                        f"LagrangianProblem iter {it}: subproblem {i} did not reach optimality"
+                        f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
                     )
-                iter_obj[i] = sol.obj
-                primal_by_sp[i] = sol.col_value
+                first_obj[i] = sol.obj
                 last_col_values[i] = sol.col_value.copy()
 
-            # Residual = Σ coef · x − rhs, per cell.
-            max_abs_res = 0.0
-            in_tail = it > max_iters - primal_tail
-            for ic, rc in enumerate(self._resolved):
-                res = -rc.rhs.copy()
-                for ie, ent in enumerate(rc.entries):
-                    vals = primal_by_sp[ent.subproblem_idx][ent.cols]
-                    res = res + ent.coef * vals
-                    if in_tail:
-                        sum_entry_vals[ic][ie] += vals
-                rc.last_residual = res
-                cell_max = float(np.abs(res).max()) if res.size else 0.0
-                if cell_max > max_abs_res:
-                    max_abs_res = cell_max
-            if in_tail:
-                tail_count += 1
+            self._resolved = self._resolve_couplings(initial_lambda)
+            # Snapshot per-cell base objective costs from the live LPs so
+            # the per-iter ``cost = base + coef·λ`` push-down is correct
+            # for variables that have a non-zero base cost.  HiGHS exposes
+            # the column-cost vector via getLp(); we grab the entries we
+            # need.
+            for rc in self._resolved:
+                for ent in rc.entries:
+                    lp = self._warm[ent.subproblem_idx]._h.getLp()
+                    col_cost = np.asarray(lp.col_cost_, dtype=np.float64)
+                    ent.base_costs = col_cost[ent.cols].astype(np.float64, copy=True)
+            if not self._resolved:
+                return LagrangianSolution(
+                    converged=True,
+                    iterations=0,
+                    total_objective=sum(first_obj),
+                    report_kind="best_dual",
+                    subproblem_objectives=list(first_obj),
+                    iteration_log=[],
+                    final_lambdas=[],
+                    primal_recovery=[],
+                    best_dual_total=sum(first_obj),
+                    recovered_total=sum(first_obj),
+                    subproblem_col_values=[cv.copy() for cv in last_col_values],
+                )
 
+            if primal_tail is None:
+                primal_tail = max(20, max_iters // 4)
+
+            iteration_log: list[dict] = []
+            converged = False
+            last_obj = list(first_obj)
+            # Per-coupling per-entry tail accumulators.
+            sum_entry_vals: list[list[np.ndarray]] = [
+                [np.zeros(rc.n_cells) for _ in rc.entries] for rc in self._resolved
+            ]
+            tail_count = 0
+
+            max_abs_res = float("inf")
+            it = 0
+            for it in range(1, max_iters + 1):
+                alpha_k = step / math.sqrt(it)
+
+                # Apply per-cell λ to every entry's column costs.
+                for rc in self._resolved:
+                    for ent in rc.entries:
+                        new_cost = ent.base_costs + ent.coef * rc.lam
+                        self._warm[ent.subproblem_idx]._h.changeColsCost(
+                            int(ent.cols_i32.size),
+                            ent.cols_i32,
+                            new_cost,
+                        )
+
+                # Solve every subproblem (optionally in parallel; collected
+                # in index order, so the raise fires on the lowest non-optimal
+                # index — same as the sequential path).
+                iter_obj = [0.0] * n_sp
+                primal_by_sp: dict[int, np.ndarray] = {}
+                for i, sol in _solve_all("iterate", it):
+                    if not sol.optimal:
+                        raise RuntimeError(
+                            f"LagrangianProblem iter {it}: subproblem {i} did not reach optimality"
+                        )
+                    iter_obj[i] = sol.obj
+                    primal_by_sp[i] = sol.col_value
+                    last_col_values[i] = sol.col_value.copy()
+
+                # Residual = Σ coef · x − rhs, per cell.
+                max_abs_res = 0.0
+                in_tail = it > max_iters - primal_tail
+                for ic, rc in enumerate(self._resolved):
+                    res = -rc.rhs.copy()
+                    for ie, ent in enumerate(rc.entries):
+                        vals = primal_by_sp[ent.subproblem_idx][ent.cols]
+                        res = res + ent.coef * vals
+                        if in_tail:
+                            sum_entry_vals[ic][ie] += vals
+                    rc.last_residual = res
+                    cell_max = float(np.abs(res).max()) if res.size else 0.0
+                    if cell_max > max_abs_res:
+                        max_abs_res = cell_max
+                if in_tail:
+                    tail_count += 1
+
+                iteration_log.append(
+                    {
+                        "iter": it,
+                        "alpha_k": alpha_k,
+                        "max_abs_residual": max_abs_res,
+                        "total_obj": sum(iter_obj),
+                    }
+                )
+                _emit(iteration_log[-1])
+
+                last_obj = iter_obj
+                if max_abs_res < tol and it >= min_iters:
+                    converged = True
+                    break
+
+                for rc in self._resolved:
+                    rc.lam = rc.lam + alpha_k * rc.last_residual
+
+            # Primal recovery: tail-average then fix-and-resolve.
+            recovery_obj = list(last_obj)
+            primal_recovery: list[np.ndarray] = []
+            best_dual_total = max(
+                (log["total_obj"] for log in iteration_log), default=sum(first_obj)
+            )
+
+            if tail_count > 0:
+                avg_entry_vals: list[list[np.ndarray]] = [
+                    [s / tail_count for s in row] for row in sum_entry_vals
+                ]
+                max_avg_res = 0.0
+                for ic, rc in enumerate(self._resolved):
+                    res = -rc.rhs.copy()
+                    for ie, ent in enumerate(rc.entries):
+                        res = res + ent.coef * avg_entry_vals[ic][ie]
+                    cell_max = float(np.abs(res).max()) if res.size else 0.0
+                    max_avg_res = max(max_avg_res, cell_max)
+
+                # 2-entry consensus (coefs +1/-1, rhs 0) → fix both sides
+                # to ½(avg_pos + avg_neg).  Otherwise fix each entry to its
+                # own tail mean.
+                for ic, rc in enumerate(self._resolved):
+                    if (
+                        len(rc.entries) == 2
+                        and rc.entries[0].coef == 1.0
+                        and rc.entries[1].coef == -1.0
+                        and np.allclose(rc.rhs, 0.0)
+                    ):
+                        consensus = 0.5 * (avg_entry_vals[ic][0] + avg_entry_vals[ic][1])
+                        fix_vals = [consensus, consensus]
+                    else:
+                        fix_vals = avg_entry_vals[ic]
+                    primal_recovery.append(fix_vals[0].copy())
+
+                    for ie, ent in enumerate(rc.entries):
+                        wp = self._warm[ent.subproblem_idx]
+                        wp._h.changeColsCost(
+                            int(ent.cols_i32.size), ent.cols_i32, ent.base_costs.astype(np.float64)
+                        )
+                        fv = fix_vals[ie].astype(np.float64)
+                        wp._h.changeColsBounds(int(ent.cols_i32.size), ent.cols_i32, fv, fv)
+
+                # Collected in index order; LENIENT (no raise — preserve the
+                # ``if sol.optimal`` fallback to the most recent iterate).
+                for i, sol in _solve_all("recovery", -1):
+                    if sol.optimal:
+                        recovery_obj[i] = sol.obj
+                        last_col_values[i] = sol.col_value.copy()
+                if max_avg_res < tol:
+                    converged = True
+
+            recovered_total = sum(recovery_obj)
+            # For minimisation: best_dual is the tight lower bound.
+            reported_total = best_dual_total
+            report_kind = "best_dual"
             iteration_log.append(
                 {
-                    "iter": it,
-                    "alpha_k": alpha_k,
-                    "max_abs_residual": max_abs_res,
-                    "total_obj": sum(iter_obj),
+                    "iter": -1,
+                    "report_kind": report_kind,
+                    "best_dual_total": best_dual_total,
+                    "recovered_total": recovered_total,
                 }
             )
             _emit(iteration_log[-1])
 
-            last_obj = iter_obj
-            if max_abs_res < tol and it >= min_iters:
-                converged = True
-                break
-
-            for rc in self._resolved:
-                rc.lam = rc.lam + alpha_k * rc.last_residual
-
-        # Primal recovery: tail-average then fix-and-resolve.
-        recovery_obj = list(last_obj)
-        primal_recovery: list[np.ndarray] = []
-        best_dual_total = max((log["total_obj"] for log in iteration_log), default=sum(first_obj))
-
-        if tail_count > 0:
-            avg_entry_vals: list[list[np.ndarray]] = [
-                [s / tail_count for s in row] for row in sum_entry_vals
-            ]
-            max_avg_res = 0.0
-            for ic, rc in enumerate(self._resolved):
-                res = -rc.rhs.copy()
-                for ie, ent in enumerate(rc.entries):
-                    res = res + ent.coef * avg_entry_vals[ic][ie]
-                cell_max = float(np.abs(res).max()) if res.size else 0.0
-                max_avg_res = max(max_avg_res, cell_max)
-
-            # 2-entry consensus (coefs +1/-1, rhs 0) → fix both sides
-            # to ½(avg_pos + avg_neg).  Otherwise fix each entry to its
-            # own tail mean.
-            for ic, rc in enumerate(self._resolved):
-                if (
-                    len(rc.entries) == 2
-                    and rc.entries[0].coef == 1.0
-                    and rc.entries[1].coef == -1.0
-                    and np.allclose(rc.rhs, 0.0)
-                ):
-                    consensus = 0.5 * (avg_entry_vals[ic][0] + avg_entry_vals[ic][1])
-                    fix_vals = [consensus, consensus]
-                else:
-                    fix_vals = avg_entry_vals[ic]
-                primal_recovery.append(fix_vals[0].copy())
-
-                for ie, ent in enumerate(rc.entries):
-                    wp = self._warm[ent.subproblem_idx]
-                    wp._h.changeColsCost(
-                        int(ent.cols_i32.size), ent.cols_i32, ent.base_costs.astype(np.float64)
-                    )
-                    fv = fix_vals[ie].astype(np.float64)
-                    wp._h.changeColsBounds(int(ent.cols_i32.size), ent.cols_i32, fv, fv)
-
-            for i, wp in enumerate(self._warm):
-                sol = wp.solve()
-                if sol.optimal:
-                    recovery_obj[i] = sol.obj
-                    last_col_values[i] = sol.col_value.copy()
-            if max_avg_res < tol:
-                converged = True
-
-        recovered_total = sum(recovery_obj)
-        # For minimisation: best_dual is the tight lower bound.
-        reported_total = best_dual_total
-        report_kind = "best_dual"
-        iteration_log.append(
-            {
-                "iter": -1,
-                "report_kind": report_kind,
-                "best_dual_total": best_dual_total,
-                "recovered_total": recovered_total,
-            }
-        )
-        _emit(iteration_log[-1])
-
-        return LagrangianSolution(
-            converged=converged,
-            iterations=it,
-            total_objective=reported_total,
-            report_kind=report_kind,
-            subproblem_objectives=list(recovery_obj),
-            iteration_log=iteration_log,
-            final_lambdas=[rc.lam.copy() for rc in self._resolved],
-            primal_recovery=primal_recovery,
-            best_dual_total=best_dual_total,
-            recovered_total=recovered_total,
-            subproblem_col_values=[cv.copy() for cv in last_col_values],
-        )
+            return LagrangianSolution(
+                converged=converged,
+                iterations=it,
+                total_objective=reported_total,
+                report_kind=report_kind,
+                subproblem_objectives=list(recovery_obj),
+                iteration_log=iteration_log,
+                final_lambdas=[rc.lam.copy() for rc in self._resolved],
+                primal_recovery=primal_recovery,
+                best_dual_total=best_dual_total,
+                recovered_total=recovered_total,
+                subproblem_col_values=[cv.copy() for cv in last_col_values],
+            )
 
     def _resolve_couplings(self, initial_lambda: float) -> list[_ResolvedCoupling]:
         n_sp = len(self._subproblems)

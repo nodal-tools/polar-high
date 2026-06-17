@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.9.0] — 2026-06-17
+
+Adds opt-in thread-parallel subsolves and a per-subsolve callback to the
+Lagrangian driver, with HiGHS-log silencing for that path. Default
+behaviour is unchanged — with no new kwargs the solve stays sequential,
+fires no per-subsolve callback, and keeps today's verbose native log.
+
+### Added
+
+- **`LagrangianProblem.solve(max_workers=...)`**: optional cap on the number
+  of worker threads used to solve subproblems concurrently within each
+  barrier (initial build, per-iteration, primal recovery). `None` (default)
+  or `1` keeps the fully sequential path. The effective count is clamped to
+  `[1, n_subproblems]`. When `> 1`, every subsolve is forced to `threads=1`
+  so each `h.run()` is deterministic (HiGHS is non-deterministic with
+  `threads > 1`) and the box is not oversubscribed — two parallel solves with
+  different `max_workers` are byte-identical. The initial build loop always
+  runs sequentially on the calling thread (it may reset the global HiGHS
+  scheduler). The executor is shut down on every exit path, including the
+  no-coupling early return and any raised exception (fail-fast on the lowest
+  non-optimal subproblem index, queued siblings cancelled).
+- **`LagrangianProblem.solve(subsolve_callback=...)`**: optional callable
+  invoked at the start and finish of every individual subproblem solve. It
+  fires from worker threads when `max_workers > 1` and MUST be thread-safe;
+  exceptions are suppressed so a faulty observer can never abort the solve.
+  The callback dict schema (pinned):
+  - start: `{"event": "start", "iter": <int>, "subproblem": <int>, "phase": <"initial"|"iterate"|"recovery">}`
+  - finish: `{"event": "finish", "iter": <int>, "subproblem": <int>, "phase": <same>, "obj": <float>}`
+    — `"obj"` is present only when that subsolve reached optimality.
+  `phase` is `"initial"` for the build solve (`iter == 0`), `"iterate"` for
+  outer iterations (`iter >= 1`), and `"recovery"` for the primal-recovery
+  solve (`iter == -1`).
+
+### Changed
+
+- When the caller uses the new functionality (`max_workers > 1` or a
+  `subsolve_callback`), the per-subsolve HiGHS native log is silenced. Set
+  `POLAR_HIGH_LAGRANGIAN_VERBOSE=1` to force the verbose native log back on.
+  Plain existing callers keep today's verbose native log unchanged.
+
 ## [2.8.0] — 2026-06-17
 
 Retains each region's recovered-primal column values in the Lagrangian

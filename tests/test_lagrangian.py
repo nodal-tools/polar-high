@@ -17,6 +17,9 @@ Test inventory:
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import polars as pl
 import pytest
@@ -391,3 +394,297 @@ def test_warm_fix_cols_matches_unvectorised() -> None:
     assert sol_a.optimal and sol_b.optimal
     assert sol_a.obj == pytest.approx(sol_b.obj, rel=1e-12)
     np.testing.assert_allclose(sol_a.col_value, sol_b.col_value, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Thread-parallel subsolves + per-subsolve callback + HiGHS-log silencing
+# ---------------------------------------------------------------------------
+
+
+def _three_region_consensus_problem() -> LagrangianProblem:
+    """Three demand LPs coupled by a chain ``x_0 == x_1`` and
+    ``x_1 == x_2`` — real cross-subproblem coupling over 3 regions."""
+    p_a = _demand_problem(demand=4.0, cost=1.0)
+    p_b = _demand_problem(demand=2.0, cost=1.0)
+    p_c = _demand_problem(demand=3.0, cost=1.0)
+    spec_ab = CouplingSpec(
+        entries=[
+            CouplingEntry(0, "x", [(0,)], +1.0),
+            CouplingEntry(1, "x", [(0,)], -1.0),
+        ],
+        rhs=0.0,
+    )
+    spec_bc = CouplingSpec(
+        entries=[
+            CouplingEntry(1, "x", [(0,)], +1.0),
+            CouplingEntry(2, "x", [(0,)], -1.0),
+        ],
+        rhs=0.0,
+    )
+    return LagrangianProblem([p_a, p_b, p_c], [spec_ab, spec_bc])
+
+
+_SOLVE_KW = dict(max_iters=30, tol=1e-9, step=0.5, initial_lambda=0.0, min_iters=10)
+
+
+def test_parallel_determinism_2_vs_4_workers() -> None:
+    """Both sides parallel (threads=1) ⇒ byte-identical results, so 2 and 4
+    workers must agree exactly on every numeric field."""
+    sol2 = _three_region_consensus_problem().solve(max_workers=2, **_SOLVE_KW)
+    sol4 = _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+
+    assert len(sol2.final_lambdas) == len(sol4.final_lambdas)
+    for a, b in zip(sol2.final_lambdas, sol4.final_lambdas):
+        assert np.array_equal(a, b)
+    assert len(sol2.primal_recovery) == len(sol4.primal_recovery)
+    for a, b in zip(sol2.primal_recovery, sol4.primal_recovery):
+        assert np.array_equal(a, b)
+    assert len(sol2.subproblem_col_values) == len(sol4.subproblem_col_values)
+    for a, b in zip(sol2.subproblem_col_values, sol4.subproblem_col_values):
+        assert np.array_equal(a, b)
+    assert sol2.subproblem_objectives == sol4.subproblem_objectives
+    assert sol2.total_objective == sol4.total_objective
+    assert sol2.best_dual_total == sol4.best_dual_total
+    assert sol2.recovered_total == sol4.recovered_total
+    assert sol2.iterations == sol4.iterations
+    assert sol2.converged == sol4.converged
+
+
+def test_sequential_vs_parallel_correctness() -> None:
+    """The default sequential path (max_workers=1) and parallel (max_workers=4)
+    reach the same solution to high tolerance.  HiGHS thread counts differ
+    (sequential keeps today's default; parallel forces threads=1), so use
+    ``allclose`` rather than exact equality."""
+    sol1 = _three_region_consensus_problem().solve(max_workers=1, **_SOLVE_KW)
+    sol4 = _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+
+    for a, b in zip(sol1.final_lambdas, sol4.final_lambdas):
+        assert np.allclose(a, b, rtol=1e-9, atol=1e-9)
+    for a, b in zip(sol1.primal_recovery, sol4.primal_recovery):
+        assert np.allclose(a, b, rtol=1e-9, atol=1e-9)
+    for a, b in zip(sol1.subproblem_col_values, sol4.subproblem_col_values):
+        assert np.allclose(a, b, rtol=1e-9, atol=1e-9)
+    assert np.allclose(sol1.subproblem_objectives, sol4.subproblem_objectives, rtol=1e-9, atol=1e-9)
+    assert sol1.total_objective == pytest.approx(sol4.total_objective, rel=1e-9, abs=1e-9)
+    assert sol1.best_dual_total == pytest.approx(sol4.best_dual_total, rel=1e-9, abs=1e-9)
+
+
+def test_backward_compat_no_new_kwargs() -> None:
+    """No new kwargs ⇒ default sequential behaviour matches max_workers=1
+    exactly; the solve converges and stays correct."""
+    sol_default = _three_region_consensus_problem().solve(**_SOLVE_KW)
+    sol_w1 = _three_region_consensus_problem().solve(max_workers=1, **_SOLVE_KW)
+
+    assert sol_default.converged == sol_w1.converged
+    assert sol_default.iterations == sol_w1.iterations
+    for a, b in zip(sol_default.final_lambdas, sol_w1.final_lambdas):
+        assert np.array_equal(a, b)
+    assert sol_default.total_objective == sol_w1.total_objective
+    assert sol_default.best_dual_total == sol_w1.best_dual_total
+
+
+def test_backward_compat_default_log_not_silenced(capsys, monkeypatch) -> None:
+    """Silencing is opt-in: with no new kwargs the native HiGHS log IS present
+    (output_flag is left at HiGHS' default), proving plain existing callers
+    keep today's verbose native log.  The silence-on-opt-in contract is pinned
+    in :func:`test_silencing_parallel_suppresses_log`."""
+    monkeypatch.delenv("POLAR_HIGH_LAGRANGIAN_VERBOSE", raising=False)
+    capsys.readouterr()
+    _three_region_consensus_problem().solve(**_SOLVE_KW)
+    out = capsys.readouterr()
+    assert _has_highs_banner(out.out + out.err)
+
+
+def test_callback_events_parallel() -> None:
+    _run_callback_assertions(max_workers=3)
+
+
+def test_callback_events_sequential() -> None:
+    _run_callback_assertions(max_workers=1)
+
+
+def _run_callback_assertions(*, max_workers: int) -> None:
+    """The subsolve_callback fires for every individual subsolve regardless of
+    parallelism, with the pinned start/finish schema."""
+    lp = _three_region_consensus_problem()
+    n = len(lp.subproblems)
+    lock = threading.Lock()
+    events: list[dict] = []
+
+    def _collect(entry: dict) -> None:
+        with lock:
+            events.append(dict(entry))
+
+    sol = lp.solve(
+        max_iters=3,
+        tol=1e-12,
+        step=0.5,
+        min_iters=3,
+        max_workers=max_workers,
+        subsolve_callback=_collect,
+    )
+
+    for e in events:
+        assert e["event"] in {"start", "finish"}
+        assert e["phase"] in {"initial", "iterate", "recovery"}
+        assert isinstance(e["iter"], int)
+        assert isinstance(e["subproblem"], int)
+
+    starts = [e for e in events if e["event"] == "start"]
+    finishes = [e for e in events if e["event"] == "finish"]
+    assert len(starts) == len(finishes)
+
+    def by_phase(phase, ev):
+        return [e for e in events if e["phase"] == phase and e["event"] == ev]
+
+    # initial: exactly 2*n (one start + one finish per region).
+    assert len(by_phase("initial", "start")) == n
+    assert len(by_phase("initial", "finish")) == n
+    # iterate: 2*n per iteration actually run.
+    assert len(by_phase("iterate", "start")) == n * sol.iterations
+    assert len(by_phase("iterate", "finish")) == n * sol.iterations
+    # recovery: 2*n when recovery runs (it does here — primal_tail > 0).
+    rec_starts = by_phase("recovery", "start")
+    rec_finishes = by_phase("recovery", "finish")
+    assert len(rec_starts) == len(rec_finishes)
+    assert len(rec_starts) in (0, n)
+
+    # Every optimal finish carries a float "obj"; no start carries "obj".
+    for e in starts:
+        assert "obj" not in e
+    for e in finishes:
+        if "obj" in e:
+            assert isinstance(e["obj"], float)
+
+
+def _has_highs_banner(text: str) -> bool:
+    return "HiGHS" in text
+
+
+def test_silencing_parallel_suppresses_log(capsys, monkeypatch) -> None:
+    """max_workers>1 with POLAR_HIGH_LAGRANGIAN_VERBOSE unset ⇒ no HiGHS
+    banner reaches stdout."""
+    monkeypatch.delenv("POLAR_HIGH_LAGRANGIAN_VERBOSE", raising=False)
+    capsys.readouterr()
+    _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+    out = capsys.readouterr()
+    assert not _has_highs_banner(out.out)
+    assert not _has_highs_banner(out.err)
+
+
+def test_silencing_verbose_env_reenables_log(capsys, monkeypatch) -> None:
+    """POLAR_HIGH_LAGRANGIAN_VERBOSE=1 forces the native log back on even
+    under parallel/hooked solves."""
+    monkeypatch.setenv("POLAR_HIGH_LAGRANGIAN_VERBOSE", "1")
+    capsys.readouterr()
+    _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert _has_highs_banner(combined)
+
+
+def _infeasible_demand_problem() -> Problem:
+    """A demand LP whose feasible region is empty: ``x >= 200`` but
+    ``x <= 100`` ⇒ the initial solve is non-optimal (infeasible)."""
+    return _demand_problem(demand=200.0, cost=1.0, upper=100.0)
+
+
+def test_exception_names_subproblem_and_pool_shuts_down() -> None:
+    """An infeasible region at index 1 makes its initial solve non-optimal;
+    the RuntimeError names that index, and the ThreadPoolExecutor shuts down
+    (no leaked worker threads) afterwards."""
+    p_a = _demand_problem(demand=4.0, cost=1.0)
+    p_b = _infeasible_demand_problem()
+    p_c = _demand_problem(demand=3.0, cost=1.0)
+    spec_ab = CouplingSpec(
+        entries=[
+            CouplingEntry(0, "x", [(0,)], +1.0),
+            CouplingEntry(1, "x", [(0,)], -1.0),
+        ],
+        rhs=0.0,
+    )
+    spec_bc = CouplingSpec(
+        entries=[
+            CouplingEntry(1, "x", [(0,)], +1.0),
+            CouplingEntry(2, "x", [(0,)], -1.0),
+        ],
+        rhs=0.0,
+    )
+    lp = LagrangianProblem([p_a, p_b, p_c], [spec_ab, spec_bc])
+
+    baseline = threading.active_count()
+    with pytest.raises(RuntimeError, match="subproblem 1"):
+        lp.solve(max_workers=4, **_SOLVE_KW)
+    # Pool shut down: active thread count settles back to baseline.
+    deadline = time.time() + 5.0
+    while threading.active_count() > baseline and time.time() < deadline:
+        time.sleep(0.02)
+    assert threading.active_count() <= baseline
+
+
+def test_exception_on_iteration_solve_names_subproblem() -> None:
+    """A *per-iteration* (not initial) non-optimal subsolve must surface as a
+    RuntimeError naming the offending subproblem via the iterate-loop's
+    ``iter {it}: subproblem {i}`` message, and the pool must shut down.
+
+    The LP feasible set is fixed across iterations (only costs change in the
+    iterate barrier), so we force a mid-iteration non-optimal Solution by
+    making subproblem 1's WarmProblem.solve return a non-optimal result on its
+    SECOND call (iteration 1) — the initial build (first call) stays optimal so
+    the barrier reaches the iterate loop.
+    """
+    lp = _three_region_consensus_problem()
+    target_wp = lp.warm_problems[1]
+    orig_solve = WarmProblem.solve
+    call_counts: dict[int, int] = {}
+    lock = threading.Lock()
+
+    def _flaky_solve(self, *, options=None):
+        sol = orig_solve(self, options=options)
+        if self is target_wp:
+            with lock:
+                call_counts[id(self)] = call_counts.get(id(self), 0) + 1
+                n = call_counts[id(self)]
+            if n >= 2:  # 1st call = initial build (stay optimal); 2nd = iterate
+                sol.optimal = False
+        return sol
+
+    WarmProblem.solve = _flaky_solve
+    baseline = threading.active_count()
+    try:
+        with pytest.raises(RuntimeError, match="iter 1: subproblem 1"):
+            lp.solve(max_workers=4, **_SOLVE_KW)
+    finally:
+        WarmProblem.solve = orig_solve
+
+    deadline = time.time() + 5.0
+    while threading.active_count() > baseline and time.time() < deadline:
+        time.sleep(0.02)
+    assert threading.active_count() <= baseline
+
+
+def test_initial_build_runs_on_main_thread(monkeypatch) -> None:
+    """The initial build loop MUST run sequentially on the calling thread even
+    when ``max_workers > 1`` (it may resetGlobalScheduler, a global op).  Pin
+    that by recording the thread ident of each WarmProblem's FIRST solve()."""
+    main_ident = threading.get_ident()
+    first_solve_threads: dict[int, int] = {}
+    lock = threading.Lock()
+    orig_solve = WarmProblem.solve
+
+    def _recording_solve(self, *, options=None):
+        with lock:
+            key = id(self)
+            if key not in first_solve_threads:
+                first_solve_threads[key] = threading.get_ident()
+        return orig_solve(self, options=options)
+
+    monkeypatch.setattr(WarmProblem, "solve", _recording_solve)
+
+    lp = _three_region_consensus_problem()
+    lp.solve(max_workers=4, **_SOLVE_KW)
+
+    # Every WarmProblem's FIRST solve (the build) ran on the main thread.
+    assert first_solve_threads, "no solves were recorded"
+    for ident in first_solve_threads.values():
+        assert ident == main_ident
