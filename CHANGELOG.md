@@ -23,9 +23,16 @@ fires no per-subsolve callback, and keeps today's verbose native log.
   `[1, n_subproblems]`. When `> 1`, every subsolve is forced to `threads=1`
   so each `h.run()` is deterministic (HiGHS is non-deterministic with
   `threads > 1`) and the box is not oversubscribed — two parallel solves with
-  different `max_workers` are byte-identical. The initial build loop always
-  runs sequentially on the calling thread (it may reset the global HiGHS
-  scheduler). The executor is shut down on every exit path, including the
+  different `max_workers` are byte-identical. The COLD initial build also
+  parallelizes ACROSS regions: the process-global HiGHS scheduler is pre-pinned
+  to a single thread ONCE up front (`_prewarm_global_scheduler`), after which
+  the per-region first solves fan out concurrently WITHOUT passing `threads`
+  (so no per-instance `resetGlobalScheduler`). Parallelism is across regions
+  only — each individual solve stays single-threaded on the pinned pool. If the
+  one-time prewarm fails, the build falls back to a sequential cold loop on the
+  calling thread (`threads=1` per first solve pins the scheduler) and the warm
+  iterations still parallelize; the cold-parallel and cold-sequential builds
+  are bit-identical. The executor is shut down on every exit path, including the
   no-coupling early return and any raised exception (fail-fast on the lowest
   non-optimal subproblem index, queued siblings cancelled).
 - **`LagrangianProblem.solve(subsolve_callback=...)`**: optional callable

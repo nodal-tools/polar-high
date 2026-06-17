@@ -40,6 +40,53 @@ from polar_high.engine import Problem, WarmProblem
 __all__ = ["CouplingEntry", "CouplingSpec", "LagrangianProblem", "LagrangianSolution"]
 
 
+def _prewarm_global_scheduler(threads: int = 1) -> bool:
+    """Initialize HiGHS' process-global task scheduler ONCE, single-threaded,
+    so subsequent concurrent first-solves on distinct Highs instances need
+    not each call resetGlobalScheduler.  Best-effort; returns False if any
+    highspy step fails (caller then falls back to a sequential cold build).
+
+    Once this returns True the global scheduler is pinned to ``threads`` and a
+    subsequent ``run()`` with NO ``threads`` option inherits that pool — so the
+    concurrent cold builds need not (and must not) pass ``threads`` per
+    instance, which would re-trigger ``resetGlobalScheduler`` and is unsafe to
+    run concurrently.
+    """
+    try:
+        import highspy
+
+        h = highspy.Highs()
+        try:
+            h.resetGlobalScheduler(False)
+        except Exception:  # noqa: BLE001 — best-effort no-op on old highspy
+            pass
+        h.setOptionValue("output_flag", False)
+        h.setOptionValue("threads", threads)
+        # Trivial 1-col / 0-row LP to force scheduler init at the pinned thread
+        # count.  Mirror the minimal HighsLp idiom used by
+        # WarmProblem._initial_build (engine.py ~7290) so it can't break on this
+        # highspy version.
+        lp = highspy.HighsLp()
+        lp.num_col_ = 1
+        lp.num_row_ = 0
+        lp.col_cost_ = np.array([0.0])
+        lp.col_lower_ = np.array([0.0])
+        lp.col_upper_ = np.array([1.0])
+        lp.row_lower_ = np.array([])
+        lp.row_upper_ = np.array([])
+        lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
+        lp.a_matrix_.num_col_ = 1
+        lp.a_matrix_.num_row_ = 0
+        lp.a_matrix_.start_ = np.array([0, 0])
+        lp.a_matrix_.index_ = np.array([], dtype=np.int32)
+        lp.a_matrix_.value_ = np.array([])
+        h.passModel(lp)
+        h.run()
+        return True
+    except Exception:  # noqa: BLE001 — best-effort; caller falls back to sequential
+        return False
+
+
 @dataclass(frozen=True)
 class CouplingEntry:
     """One participant in a :class:`CouplingSpec`.  ``dim_tuples`` has
@@ -179,12 +226,17 @@ class LagrangianProblem:
         used to solve subproblems concurrently within each barrier
         (initial / per-iteration / recovery).  ``None`` (default) or
         ``1`` keeps today's fully sequential behaviour.  The effective
-        worker count is clamped to ``[1, n_subproblems]``.  When >1, each
-        subsolve is forced to ``threads=1`` so every ``h.run()`` is
-        deterministic (HiGHS is non-deterministic with threads>1) and the
-        box is not oversubscribed; the initial build loop always runs
-        sequentially on the calling thread (it may reset the global HiGHS
-        scheduler).
+        worker count is clamped to ``[1, n_subproblems]``.  When >1, every
+        ``h.run()`` uses a single-threaded HiGHS scheduler so it is
+        deterministic (HiGHS is non-deterministic with threads>1) and the box
+        is not oversubscribed.  The COLD initial build also parallelizes across
+        regions: the process-global HiGHS scheduler is pre-pinned to one thread
+        ONCE up front (:func:`_prewarm_global_scheduler`), after which the
+        first solves fan out concurrently WITHOUT passing ``threads`` (so no
+        per-instance ``resetGlobalScheduler``).  If that one-time prewarm fails
+        the build falls back to a sequential cold loop on the calling thread
+        (threads=1 per first solve pins the scheduler), and the warm iterations
+        still parallelize.  Bit-identical to the sequential cold build.
 
         ``subsolve_callback`` — optional callable invoked at the start and
         finish of every individual subproblem solve, with a dict carrying
@@ -226,11 +278,37 @@ class LagrangianProblem:
         if _parallel:
             # threads=1 per subsolve: avoid N_workers x cores oversubscription
             # AND make each h.run() deterministic (HiGHS is non-deterministic
-            # with threads>1). Setting "threads" triggers the one-time
-            # resetGlobalScheduler in WarmProblem._initial_build (engine.py
-            # ~7333) — safe because the build loop below is forced sequential.
+            # with threads>1). For the WARM iterations/recovery the instances
+            # are already built, so passing "threads" here is moot (WarmProblem
+            # ignores options after the first solve). The COLD build's thread
+            # pinning is handled by the prewarm / sequential-fallback paths
+            # below, so the per-iteration option dict carries threads=1 only as
+            # a belt-and-suspenders no-op for any code that re-reads it.
             _subsolve_options["threads"] = 1
-        _first_opts = _subsolve_options or None
+
+        # Pre-pin HiGHS' process-global scheduler to a single thread ONCE, up
+        # front (single-threaded), so the COLD initial-build loop can fan out
+        # across regions concurrently. Each first wp.solve() builds its HiGHS
+        # model and, if it sees a "threads"/"parallel" option, calls the
+        # process-global resetGlobalScheduler (engine.py ~7333) — unsafe to run
+        # concurrently. With the scheduler pre-pinned we build in parallel
+        # WITHOUT passing "threads", so no per-instance reset occurs and every
+        # run() (cold + warm) inherits the pinned single-thread pool. Proven
+        # bit-identical to the sequential cold build. Best-effort: if the
+        # prewarm fails we fall back to the sequential cold build (which pins
+        # the scheduler via threads=1 on each first solve).
+        _cold_parallel = False
+        if _parallel:
+            _cold_parallel = _prewarm_global_scheduler(1)
+
+        # Option dicts for the FIRST (build) solve:
+        #  * prewarmed path — scheduler already pinned, so DO NOT pass "threads"
+        #    (avoids re-triggering resetGlobalScheduler concurrently).
+        #  * sequential fallback — today's behaviour: threads=1 on each first
+        #    solve pins the scheduler via the sequential builds, keeping the
+        #    warm phase parallel-safe even when the prewarm failed.
+        _first_opts_prewarmed = {"output_flag": False} if _silence else None
+        _first_opts_seq = _subsolve_options or None
 
         def _fire_subsolve(event: str, *, it: int, i: int, phase: str, obj=None) -> None:
             if subsolve_callback is None:
@@ -245,7 +323,7 @@ class LagrangianProblem:
 
         def _run_one(i, wp, *, it, phase, options=None):
             _fire_subsolve("start", it=it, i=i, phase=phase)
-            sol = wp.solve(options=options)
+            sol = wp.solve(options=options)  # ignored after the first solve
             _fire_subsolve(
                 "finish", it=it, i=i, phase=phase, obj=(sol.obj if sol.optimal else None)
             )
@@ -258,11 +336,14 @@ class LagrangianProblem:
         )
         with pool_cm as _pool:
 
-            def _solve_all(phase, it):
+            def _solve_all(phase, it, options=None):
                 if _pool is None:
-                    return [_run_one(i, wp, it=it, phase=phase) for i, wp in enumerate(self._warm)]
+                    return [
+                        _run_one(i, wp, it=it, phase=phase, options=options)
+                        for i, wp in enumerate(self._warm)
+                    ]
                 futs = {
-                    i: _pool.submit(_run_one, i, wp, it=it, phase=phase)
+                    i: _pool.submit(_run_one, i, wp, it=it, phase=phase, options=options)
                     for i, wp in enumerate(self._warm)
                 }
                 out = [None] * len(self._warm)
@@ -280,20 +361,39 @@ class LagrangianProblem:
             # early-return path can hand back a full-length
             # ``subproblem_col_values``, and so the main loop has a seeded
             # fallback for any region whose recovery solve is skipped.
-            # ALWAYS SEQUENTIAL (never via _pool): the first wp.solve()
-            # builds each WarmProblem and may resetGlobalScheduler (a global,
-            # threads-option-gated operation), so the build loop must run on
-            # the calling thread, one region at a time.
+            #
+            # The first wp.solve() builds each WarmProblem; if it sees a
+            # "threads"/"parallel" option it calls the process-global
+            # resetGlobalScheduler (engine.py ~7333), which is unsafe to run
+            # concurrently. Two build paths:
+            #   * PARALLEL (``_cold_parallel``): the global scheduler was
+            #     pre-pinned to 1 thread up front, so the first solves can fan
+            #     out across regions on ``_pool``. They pass output_flag only
+            #     (no "threads" => no per-instance resetGlobalScheduler).
+            #     Bit-identical to the sequential cold build (proven).
+            #   * SEQUENTIAL fallback (today's path): build one region at a time
+            #     on the calling thread. threads=1 on each first solve pins the
+            #     scheduler so the WARM iterations below stay parallel-safe even
+            #     when the prewarm failed or max_workers<=1.
             first_obj: list[float] = [0.0] * n_sp
             last_col_values: list[np.ndarray] = [None] * len(self._warm)  # type: ignore[list-item]
-            for i, wp in enumerate(self._warm):
-                _, sol = _run_one(i, wp, it=0, phase="initial", options=_first_opts)
-                if not sol.optimal:
-                    raise RuntimeError(
-                        f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
-                    )
-                first_obj[i] = sol.obj
-                last_col_values[i] = sol.col_value.copy()
+            if _cold_parallel:
+                for i, sol in _solve_all("initial", 0, options=_first_opts_prewarmed):
+                    if not sol.optimal:
+                        raise RuntimeError(
+                            f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
+                        )
+                    first_obj[i] = sol.obj
+                    last_col_values[i] = sol.col_value.copy()
+            else:
+                for i, wp in enumerate(self._warm):
+                    _, sol = _run_one(i, wp, it=0, phase="initial", options=_first_opts_seq)
+                    if not sol.optimal:
+                        raise RuntimeError(
+                            f"LagrangianProblem: initial solve for subproblem {i} did not reach optimality"
+                        )
+                    first_obj[i] = sol.obj
+                    last_col_values[i] = sol.col_value.copy()
 
             self._resolved = self._resolve_couplings(initial_lambda)
             # Snapshot per-cell base objective costs from the live LPs so

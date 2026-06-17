@@ -26,6 +26,7 @@ import pytest
 
 import polar_high as fp
 from polar_high import CouplingEntry, CouplingSpec, LagrangianProblem, Problem, WarmProblem
+from polar_high.lagrangian import _prewarm_global_scheduler
 
 # ---------------------------------------------------------------------------
 # Helper: build a tiny 1-cell maximisation LP   max c · x   s.t. x ≤ ub
@@ -663,11 +664,9 @@ def test_exception_on_iteration_solve_names_subproblem() -> None:
     assert threading.active_count() <= baseline
 
 
-def test_initial_build_runs_on_main_thread(monkeypatch) -> None:
-    """The initial build loop MUST run sequentially on the calling thread even
-    when ``max_workers > 1`` (it may resetGlobalScheduler, a global op).  Pin
-    that by recording the thread ident of each WarmProblem's FIRST solve()."""
-    main_ident = threading.get_ident()
+def _record_first_solve_threads(monkeypatch) -> dict[int, int]:
+    """Monkeypatch ``WarmProblem.solve`` to record, per instance, the thread
+    ident of its FIRST solve (the cold build).  Returns the recording dict."""
     first_solve_threads: dict[int, int] = {}
     lock = threading.Lock()
     orig_solve = WarmProblem.solve
@@ -680,11 +679,126 @@ def test_initial_build_runs_on_main_thread(monkeypatch) -> None:
         return orig_solve(self, options=options)
 
     monkeypatch.setattr(WarmProblem, "solve", _recording_solve)
+    return first_solve_threads
+
+
+def test_initial_build_parallelizes_across_regions_when_prewarmed(monkeypatch) -> None:
+    """With ``max_workers >= 2`` and a successful one-time global-scheduler
+    prewarm, the COLD initial build fans out ACROSS regions: at least one
+    region's FIRST solve runs on a WORKER thread (NOT all on the calling
+    thread).  Parallelism is across regions only — each solve stays
+    single-threaded (pinned pool).  Pins the cold-parallel build path."""
+    # Prewarm must succeed on this box for the parallel cold-build path to run.
+    assert _prewarm_global_scheduler(1) is True
+
+    main_ident = threading.get_ident()
+    first_solve_threads = _record_first_solve_threads(monkeypatch)
 
     lp = _three_region_consensus_problem()
     lp.solve(max_workers=4, **_SOLVE_KW)
 
-    # Every WarmProblem's FIRST solve (the build) ran on the main thread.
+    assert first_solve_threads, "no solves were recorded"
+    idents = set(first_solve_threads.values())
+    # At least one cold build ran OFF the calling thread (across-region fan-out).
+    assert idents != {main_ident}, (
+        "cold initial build did not parallelize: all first solves ran on the main thread"
+    )
+
+
+def test_initial_build_sequential_on_main_thread_when_prewarm_fails(monkeypatch) -> None:
+    """When the one-time prewarm FAILS (monkeypatched to False) the COLD initial
+    build falls back to a sequential loop on the calling thread — every
+    WarmProblem's FIRST solve runs on the main thread — while the WARM
+    iterations still parallelize (worker threads appear for non-first solves)
+    and the result is still correct."""
+    monkeypatch.setattr("polar_high.lagrangian._prewarm_global_scheduler", lambda threads=1: False)
+
+    main_ident = threading.get_ident()
+    first_solve_threads: dict[int, int] = {}
+    all_solve_threads: set[int] = set()
+    lock = threading.Lock()
+    orig_solve = WarmProblem.solve
+
+    def _recording_solve(self, *, options=None):
+        with lock:
+            ident = threading.get_ident()
+            all_solve_threads.add(ident)
+            key = id(self)
+            if key not in first_solve_threads:
+                first_solve_threads[key] = ident
+        return orig_solve(self, options=options)
+
+    monkeypatch.setattr(WarmProblem, "solve", _recording_solve)
+
+    lp = _three_region_consensus_problem()
+    sol = lp.solve(max_workers=4, **_SOLVE_KW)
+
+    # Every cold build (first solve) ran on the calling thread.
     assert first_solve_threads, "no solves were recorded"
     for ident in first_solve_threads.values():
         assert ident == main_ident
+    # Warm iterations still parallelized: some solve ran off the main thread.
+    assert all_solve_threads != {main_ident}, (
+        "warm iterations did not parallelize in the sequential-fallback path"
+    )
+
+    # And the fallback path is still correct vs. the parallel cold-build path.
+    ref = _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+    assert sol.total_objective == pytest.approx(ref.total_objective, rel=1e-9, abs=1e-9)
+
+
+def test_cold_parallel_vs_cold_sequential_bit_identical(monkeypatch) -> None:
+    """The parallel cold build (prewarm succeeds) and the sequential cold build
+    (prewarm forced False) must be BIT-IDENTICAL — pins "parallel cold build ==
+    sequential cold build" on objectives, lambdas, recovery and col_values."""
+    sol_parallel = _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+
+    monkeypatch.setattr("polar_high.lagrangian._prewarm_global_scheduler", lambda threads=1: False)
+    sol_seq = _three_region_consensus_problem().solve(max_workers=4, **_SOLVE_KW)
+
+    assert len(sol_parallel.final_lambdas) == len(sol_seq.final_lambdas)
+    for a, b in zip(sol_parallel.final_lambdas, sol_seq.final_lambdas):
+        assert np.array_equal(a, b)
+    assert len(sol_parallel.primal_recovery) == len(sol_seq.primal_recovery)
+    for a, b in zip(sol_parallel.primal_recovery, sol_seq.primal_recovery):
+        assert np.array_equal(a, b)
+    assert len(sol_parallel.subproblem_col_values) == len(sol_seq.subproblem_col_values)
+    for a, b in zip(sol_parallel.subproblem_col_values, sol_seq.subproblem_col_values):
+        assert np.array_equal(a, b)
+    assert sol_parallel.subproblem_objectives == sol_seq.subproblem_objectives
+    assert sol_parallel.total_objective == sol_seq.total_objective
+    assert sol_parallel.best_dual_total == sol_seq.best_dual_total
+    assert sol_parallel.recovered_total == sol_seq.recovered_total
+    assert sol_parallel.iterations == sol_seq.iterations
+    assert sol_parallel.converged == sol_seq.converged
+
+
+def test_prewarm_global_scheduler_returns_true_and_run_works() -> None:
+    """:func:`_prewarm_global_scheduler` returns True on this box, and a fresh
+    Highs ``run()`` with NO ``threads`` option works afterward (smoke) — i.e.
+    the run inherits the pinned single-thread pool."""
+    import highspy
+
+    assert _prewarm_global_scheduler(1) is True
+
+    # Fresh Highs instance, no threads option ⇒ must still solve optimally
+    # (inherits the pre-pinned single-thread scheduler).
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    lp = highspy.HighsLp()
+    lp.num_col_ = 1
+    lp.num_row_ = 0
+    lp.col_cost_ = np.array([1.0])
+    lp.col_lower_ = np.array([0.0])
+    lp.col_upper_ = np.array([5.0])
+    lp.row_lower_ = np.array([])
+    lp.row_upper_ = np.array([])
+    lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
+    lp.a_matrix_.num_col_ = 1
+    lp.a_matrix_.num_row_ = 0
+    lp.a_matrix_.start_ = np.array([0, 0])
+    lp.a_matrix_.index_ = np.array([], dtype=np.int32)
+    lp.a_matrix_.value_ = np.array([])
+    h.passModel(lp)
+    h.run()
+    assert h.getModelStatus() == highspy.HighsModelStatus.kOptimal
