@@ -27,7 +27,7 @@ flextool-side wrapper.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -145,6 +145,7 @@ class LagrangianProblem:
         initial_lambda: float = 0.0,
         min_iters: int = 1,
         primal_tail: int | None = None,
+        progress_callback: Callable[[dict], None] | None = None,
     ) -> LagrangianSolution:
         """Run the dual-subgradient loop.
 
@@ -153,7 +154,25 @@ class LagrangianProblem:
         equilibria).  ``min_iters`` floors the iteration count so the
         early-termination test can't fire on iter 1.  ``primal_tail``
         defaults to ``max(20, max_iters//4)``.
+
+        ``progress_callback`` — optional callable invoked once per outer
+        iteration with that iteration's log dict (keys ``iter``,
+        ``alpha_k``, ``max_abs_residual``, ``total_obj``), and once more
+        at the end with the final-summary dict (``iter == -1``, carrying
+        ``best_dual_total`` / ``recovered_total``).  Lets callers stream
+        live progress; ``None`` (default) is a no-op and preserves the
+        silent behaviour.  Callback exceptions are suppressed so a
+        faulty observer can never abort the solve.
         """
+
+        def _emit(entry: dict) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(entry)
+            except Exception:  # noqa: BLE001 — an observer must not break the solve
+                pass
+
         # Initial solve — also builds each WarmProblem's HiGHS state.
         first_obj: list[float] = []
         for i, wp in enumerate(self._warm):
@@ -253,6 +272,7 @@ class LagrangianProblem:
                     "total_obj": sum(iter_obj),
                 }
             )
+            _emit(iteration_log[-1])
 
             last_obj = iter_obj
             if max_abs_res < tol and it >= min_iters:
@@ -322,6 +342,7 @@ class LagrangianProblem:
                 "recovered_total": recovered_total,
             }
         )
+        _emit(iteration_log[-1])
 
         return LagrangianSolution(
             converged=converged,

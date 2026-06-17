@@ -100,6 +100,73 @@ def test_two_subproblem_consensus_closed_form() -> None:
     assert sol.total_objective == pytest.approx(sol.best_dual_total, rel=1e-12)
 
 
+def _two_region_consensus_problem() -> LagrangianProblem:
+    """Build the standard 2-region ``x_A == x_B`` consensus problem."""
+    p_a = _demand_problem(demand=4.0, cost=1.0)
+    p_b = _demand_problem(demand=2.0, cost=1.0)
+    spec = CouplingSpec(
+        entries=[
+            CouplingEntry(0, "x", [(0,)], +1.0),
+            CouplingEntry(1, "x", [(0,)], -1.0),
+        ],
+        rhs=0.0,
+    )
+    return LagrangianProblem([p_a, p_b], [spec])
+
+
+def test_progress_callback_invoked_per_iteration() -> None:
+    """``progress_callback`` fires once per outer iteration with that
+    iteration's log dict, plus once for the final-summary marker
+    (``iter == -1``)."""
+    lp = _two_region_consensus_problem()
+    calls: list[dict] = []
+    sol = lp.solve(
+        max_iters=5,
+        tol=1e-12,
+        step=0.5,
+        min_iters=5,
+        progress_callback=calls.append,
+    )
+    iter_entries = [c for c in calls if c["iter"] != -1]
+    final_entries = [c for c in calls if c["iter"] == -1]
+    # One per outer iteration actually run.
+    assert len(iter_entries) == sol.iterations
+    assert iter_entries[0].keys() >= {
+        "iter",
+        "alpha_k",
+        "max_abs_residual",
+        "total_obj",
+    }
+    # Exactly one final-summary marker carrying the dual / recovered totals.
+    assert len(final_entries) == 1
+    assert final_entries[0]["best_dual_total"] == sol.best_dual_total
+    assert final_entries[0]["recovered_total"] == sol.recovered_total
+
+
+def test_progress_callback_default_none_is_silent() -> None:
+    """No callback (default) preserves the original behaviour."""
+    lp = _two_region_consensus_problem()
+    sol = lp.solve(max_iters=5, tol=1e-12, step=0.5, min_iters=5)
+    assert sol.iterations >= 1
+
+
+def test_progress_callback_exception_never_breaks_solve() -> None:
+    """A faulty observer cannot abort the solve."""
+    lp = _two_region_consensus_problem()
+
+    def _boom(_entry: dict) -> None:
+        raise RuntimeError("observer blew up")
+
+    sol = lp.solve(
+        max_iters=3,
+        tol=1e-12,
+        step=0.5,
+        min_iters=3,
+        progress_callback=_boom,
+    )
+    assert sol.iterations >= 1
+
+
 # ---------------------------------------------------------------------------
 # 2. Trivial 1-subproblem case
 # ---------------------------------------------------------------------------

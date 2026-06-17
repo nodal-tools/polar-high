@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [2.7.0] — 2026-06-17
+
+Adds opt-in live progress reporting to the Lagrangian driver. Default
+behaviour is unchanged — `solve()` stays silent unless a callback is passed.
+
+### Added
+
+- **`LagrangianProblem.solve(progress_callback=...)`**: an optional callable
+  invoked once per outer subgradient iteration with that iteration's log dict
+  (`iter`, `alpha_k`, `max_abs_residual`, `total_obj`), and once at the end with
+  the final-summary dict (`iter == -1`, carrying `best_dual_total` /
+  `recovered_total`). Lets callers stream live decomposition progress instead of
+  only inspecting `iteration_log` after the fact. `None` (default) is a no-op and
+  preserves the prior silent behaviour; callback exceptions are suppressed so a
+  faulty observer can never abort the solve.
+
 ## [2.6.0] — 2026-06-16
 
 Adds an opt-in small-coefficient cutoff. Default behaviour is unchanged —
