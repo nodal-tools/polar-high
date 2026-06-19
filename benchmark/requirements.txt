@@ -5,7 +5,7 @@
 polar-high
 linopy>=0.8.0
 pyomo>=6.10.1
-pulp==4.0.0a9
+pulp==4.0.0a12
 highspy
 xarray
 numpy
