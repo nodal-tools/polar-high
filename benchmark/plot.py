@@ -99,6 +99,9 @@ TOOL_LABELS = {
 # irregular topology surfaces a real (small) difference, so
 # ``polar_da_net`` stays in TOOL_ORDER_NET.
 TOOL_ORDER_DENSE = ["polar", "polar_sm", "linopy", "pyomo", "pulp"]
+# Threads figure drops Pyomo (single-threaded by design — a flat line that
+# only clutters a thread-scaling plot) and reads cleaner on a linear y-axis.
+TOOL_ORDER_THREADS = ["polar", "polar_sm", "linopy", "pulp"]
 TOOL_ORDER_NET = ["polar_net", "polar_sm_net", "polar_da_net", "linopy_net", "pyomo_net", "pulp_net"]
 
 
@@ -341,8 +344,10 @@ def _draw_two_panels(
     out_path: Path,
     tool_order: list[str],
     x_log: bool = True,
+    y_log: bool = True,
     y_limits: dict | None = None,
     time_panel_title: str = "Time in build() + solve()",
+    title_prefix: str = "polar-high vs linopy vs Pyomo",
 ) -> None:
     """2-panel layout: total_s (build+solve) | peak_rss_mb. The total
     is the apples-to-apples cross-tool measurement — each tool draws
@@ -371,7 +376,7 @@ def _draw_two_panels(
             ax.set_xscale("log")
         ax.set_xlabel(x_label)
         ax.grid(True, which="both", linestyle=":", alpha=0.45)
-        ax.set_yscale("log")
+        ax.set_yscale("log" if y_log else "linear")
 
     if y_limits and "time_s" in y_limits:
         axes[0].set_ylim(*y_limits["time_s"])
@@ -385,7 +390,7 @@ def _draw_two_panels(
     axes[0].legend(loc="best", fontsize=9)
 
     fig.suptitle(
-        f"polar-high vs linopy vs Pyomo — LP benchmark {title_suffix}",
+        f"{title_prefix} — LP benchmark {title_suffix}",
         y=1.02,
         fontsize=11,
     )
@@ -550,9 +555,11 @@ def main() -> None:
             x_label="threads",
             title_suffix=(f"(N = {N_thr}, scaling with threads, build-only)"),
             out_path=Path(args.out_threads),
-            tool_order=TOOL_ORDER_DENSE,
+            tool_order=TOOL_ORDER_THREADS,
             x_log=False,
-            y_limits=y_lims,
+            y_log=False,
+            y_limits=None,
+            title_prefix="polar-high vs linopy",
             time_panel_title=("Time in build() + solve()  (HiGHS short-circuited)"),
         )
 
