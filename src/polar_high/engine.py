@@ -6734,7 +6734,7 @@ class WarmProblem:
 
     # -- solve -----------------------------------------------------------
 
-    def solve(self, *, options: dict | None = None) -> Solution:
+    def solve(self, *, options: dict | None = None, retry_on_unknown: bool = False) -> Solution:
         """Solve the LP.  First call builds the LP from scratch (same
         pipeline as :meth:`Problem.solve`); subsequent calls just run
         HiGHS again on the (possibly updated) live model.
@@ -6742,6 +6742,19 @@ class WarmProblem:
         ``options`` is honoured on the FIRST solve only — subsequent
         solves use the same HiGHS instance.  To change options on a
         rebuilt LP, drop the WarmProblem and create a new one.
+
+        ``retry_on_unknown`` (default ``False`` → byte-identical to the
+        legacy path for every existing caller) enables a warm-restart
+        retry: the solver runs WARM first (retaining the basis so dual
+        simplex hot-starts after rows appended via :meth:`add_cut_row`);
+        only if the warm run does NOT return a certified ``kOptimal`` —
+        i.e. a stale-basis transient (kUnknown / kSolveError) or a
+        spurious kUnbounded / kInfeasible / primal-infeasible miss — do we
+        drop the basis with ``clearSolver()`` and re-run ONCE (the proven
+        cold fallback) to re-certify the true status.  Used by the Benders
+        master, which appends a cut each iteration; on a well-scaled
+        master the warm path stays ``kOptimal`` and the fallback never
+        fires.
         """
         if self._h is None:
             self._initial_build(options=options)
@@ -6750,6 +6763,23 @@ class WarmProblem:
         # Idempotent: installs once on the first solve, no-ops on reuse.
         route_highs_log_to_stdout(h)
         h.run()
+        if retry_on_unknown and h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+            # The warm re-solve did NOT return a certified optimum.  Appending
+            # a >= cut row off a retained basis can leave HiGHS in a transient
+            # non-optimal state — kUnknown / kSolveError (status not determined),
+            # but also a spurious kUnbounded / kInfeasible / primal-infeasible
+            # kOptimal-miss off the stale basis.  Drop the basis with
+            # ``clearSolver()`` and re-presolve ONCE from cold (the proven
+            # fallback): this re-certifies the true status.  Callers that expect
+            # optimality (the Benders master) thus pay the cold cost only when
+            # the warm path failed to certify, never on the hot common case.
+            h.clearSolver()
+            h.run()
+        return self._build_solution(h)
+
+    def _build_solution(self, h) -> Solution:
+        """Read the live HiGHS handle into a :class:`Solution` (shared by
+        the warm path and the cold-fallback retry in :meth:`solve`)."""
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
         col_value = np.asarray(sol.col_value, dtype=np.float64)
