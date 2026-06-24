@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [2.9.0] — 2026-06-17
+## [2.9.0] — 2026-06-24
 
 Adds opt-in thread-parallel subsolves and a per-subsolve callback to the
 Lagrangian driver, with HiGHS-log silencing for that path. Default
