@@ -6445,6 +6445,92 @@ class WarmProblem:
         self._require_built()
         self._h.changeCoeff(int(row), int(col), float(value))
 
+    # -- incremental row/col append (cutting-plane primitive) -----------
+
+    def add_cut_row(self, col_ids: list[int], coefs: list[float], lower: float) -> int:
+        """Append a ``>=`` constraint row to the live (already-built) LP and
+        return the new row's id.
+
+        Appends ``Σ coefs[k] · x[col_ids[k]] >= lower`` to the live HiGHS
+        model via ``addRow``.  This is a POST-build mutation of the warm
+        ``_h`` handle (the same class of live edit as :meth:`update_rhs` /
+        :meth:`update_coef`); it deliberately bypasses the build-time
+        ``Problem.add_cstr`` DSL lock, which only guards the fixed-size
+        Layer-2 autoscale side vectors and is irrelevant once the model is
+        built.  The caller is responsible for keeping the master autoscale
+        OFF (or for pre-scaling ``coefs``) so the appended row lives on the
+        built columns' scale — there is no auto-scaling for appended rows.
+
+        ``col_ids`` may mix existing column ids (resolve via
+        :meth:`col_id_of_var`) and ids of columns previously appended with
+        :meth:`add_recourse_col`.  A subsequent :meth:`solve` warm
+        re-optimises the grown model; the appended row's dual is then
+        readable on the returned :class:`Solution` by ``row_dual[row_id]``
+        (read BY ROW ID, not via :meth:`Solution.constraint_dual`, which
+        only knows named build-time rows).
+
+        Bumps the cached ``_n_rows`` (the zero-fill fallback size in
+        :meth:`solve`) and appends a generated name to ``_row_names`` (kept
+        index-aligned so name-indexed reads stay correct).  Returns the
+        ``row_id`` HiGHS assigned (== the pre-append ``getNumRow()``).
+        """
+        self._require_built()
+        if len(col_ids) != len(coefs):
+            raise ValueError(
+                f"add_cut_row: col_ids and coefs length mismatch ({len(col_ids)} != {len(coefs)})"
+            )
+        idx = np.asarray(col_ids, dtype=np.int32)
+        val = np.asarray(coefs, dtype=np.float64)
+        inf = highspy.kHighsInf
+        row_id = int(self._h.getNumRow())
+        # addRow(lower, upper, num_nz, indices_i32, values_f64)
+        self._h.addRow(float(lower), inf, int(idx.size), idx, val)
+        # Bump cached row metadata that an append does NOT auto-update:
+        #  * _n_rows sizes the solve() zero-fill fallback (mis-sized after
+        #    append would silently return a wrong-length dual array on the
+        #    empty-dual LP edge case).
+        #  * _row_names is passed verbatim into Solution and walked by
+        #    constraint_dual; keep it index-aligned so a name-indexed read
+        #    of a build-time row is not shifted.
+        self._n_rows += 1
+        name = f"benders_cut_{row_id}"
+        if self._row_names is not None:
+            self._row_names.append(name)
+        # Mirror the cached name into the live HiGHS model so MPS/name
+        # readers (Solution.highs consumers) see the appended row too.
+        self._h.passRowName(row_id, name)
+        return row_id
+
+    def add_recourse_col(
+        self, name: str, cost: float, lower: float = -np.inf, upper: float = np.inf
+    ) -> int:
+        """Append a single free/bounded column (e.g. a Benders recourse
+        ``η``) to the live LP and return its col id.
+
+        Symmetric with :meth:`add_cut_row`: a POST-build ``addCol`` on the
+        warm ``_h`` handle, bumping the cached ``_n_cols`` (zero-fill
+        fallback size) and ``_col_names``.  ``±np.inf`` bounds are mapped to
+        the HiGHS ``kHighsInf`` sentinel.  The returned id can be referenced
+        from a later :meth:`add_cut_row`; its value is read on the
+        :class:`Solution` by ``col_value[col_id]`` (appended columns are not
+        in any ``Problem._vars`` frame, so :meth:`Solution.value` cannot see
+        them — read by id).
+        """
+        self._require_built()
+        inf = highspy.kHighsInf
+        lo = -inf if lower == -np.inf else float(lower)
+        hi = inf if upper == np.inf else float(upper)
+        col_id = int(self._h.getNumCol())
+        # addCol(cost, lower, upper, num_nz, indices_i32, values_f64)
+        self._h.addCol(
+            float(cost), lo, hi, 0, np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float64)
+        )
+        self._n_cols += 1
+        if self._col_names is not None:
+            self._col_names.append(name)
+        self._h.passColName(col_id, name)
+        return col_id
+
     # -- Param-tracked auto-update --------------------------------------
 
     def declare_mutable(self, *param_names: str) -> None:
