@@ -52,6 +52,12 @@ upgrade gains the primitives, not just loses the driver.)
   deterministic), and `resolve_worker_count`. `workers <= 1` keeps a sequential
   path byte-identical to a plain `for` loop. Recovers the scheduler-pin pattern
   from the removed subgradient pool; enables parallel Benders region solves.
+- **`WarmProblem.set_output_flag(enabled)`**: enable/disable HiGHS' native solve
+  log for this problem; the preference persists on the handle across cold / warm /
+  retry solves (applied immediately if built, else at the initial build — before
+  the log routing, so `False` also suppresses the HiGHS version banner). Lets a
+  driver that fans out many sub-solves (Benders regions) mute the per-sub-solve
+  output and show its own concise log instead.
 
 ### Changed
 
