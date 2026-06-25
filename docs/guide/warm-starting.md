@@ -1,6 +1,6 @@
 # Warm-starting with WarmProblem
 
-For rolling-horizon, parameter-sweep, or Lagrangian workflows you
+For rolling-horizon, parameter-sweep, or decomposition workflows you
 want to **re-solve** with small parameter / RHS / coefficient updates
 without rebuilding the LP. `WarmProblem` does this on top of
 `Problem`.

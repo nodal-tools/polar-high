@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.0.0] — 2026-06-25
+
+Refocuses regional decomposition: the built-in dual-subgradient
+`LagrangianProblem` driver is **removed** and replaced by small, generic
+cutting-plane primitives, on top of which the caller builds a Benders
+decomposition. `Problem` / `WarmProblem` / `Param` and all engine + solver
+exports are otherwise unchanged. (The subgradient driver shipped only in the
+unreleased 2.7–2.9 line; those tags never reached PyPI, so **3.0.0 is the first
+published release to carry this decomposition rework** — a `2.x → 3.0.0`
+upgrade gains the primitives, not just loses the driver.)
+
+### Removed
+
+- **`LagrangianProblem` and the whole subgradient decomposition** (`lagrangian.py`:
+  `LagrangianProblem`, `CouplingSpec`, `CouplingEntry`, `LagrangianSolution`, and
+  the parallel-subsolve pool), plus their top-level exports. Its one consumer
+  (FlexTool) moved to a Benders decomposition built from the cut-append /
+  warm-restart / parallel primitives below, which give a tight bound without a
+  subgradient tail. **Pin `polar-high<3` for the old driver.**
+
+### Added
+
+- **`WarmProblem.add_cut_row(col_ids, coefs, lower) -> int`**: append an
+  optimality-cut row `Σ coefs·x >= lower` to the live (already-built) master and
+  return its `row_id`; the cut dual is read by `Solution.row_dual[row_id]`. Plus
+  **`add_recourse_col(name, cost, lower, upper)`** for lazy recourse columns. Both
+  are post-build live edits that deliberately bypass the build-time DSL lock (it
+  only guards the fixed-size autoscale side vectors). **No auto-scaling for
+  appended rows** — keep the master autoscale off, or pre-scale `coefs` so the cut
+  lives on the built columns' scale.
+- **`WarmProblem.solve(*, retry_on_unknown=False)`**: warm re-solve after a cut
+  append — the retained basis lets dual simplex hot-start across the appended `>=`
+  row, falling back to a single `clearSolver` cold re-presolve only if the warm run
+  fails to certify `kOptimal` (`kUnknown` / transient `kSolveError` / spurious
+  `kUnbounded` off a stale basis). Default `False` is byte-identical to before. On
+  a well-scaled master the warm path holds with no fallback, removing the
+  super-linear cold-presolve cost that dominated the Benders master at scale.
+- **`polar_high.parallel`** (exported at top level): `solve_indexed_parallel`
+  (fan `fn(i)` across a thread pool, collect into per-index slots so the result is
+  timing-independent; requires every `WarmProblem` already built, raises on an
+  unbuilt one), `prewarm_global_scheduler` (pin the process-global HiGHS scheduler
+  to one thread ONCE so concurrent `run()` calls stay single-threaded and
+  deterministic), and `resolve_worker_count`. `workers <= 1` keeps a sequential
+  path byte-identical to a plain `for` loop. Recovers the scheduler-pin pattern
+  from the removed subgradient pool; enables parallel Benders region solves.
+
+### Changed
+
+- Coverage for two live `WarmProblem` methods (`update_obj_coef_array`,
+  `fix_cols`) that the deleted Lagrangian tests exercised is relocated into
+  `test_warm_problem.py`.
+- Docs: the "Lagrangian" guide is replaced by **"Decomposition building blocks"**
+  (cut-append / warm-restart / parallel); the API reference and cross-links are
+  updated to the new public surface.
+
 ## [2.9.0] — 2026-06-24
 
 Adds opt-in thread-parallel subsolves and a per-subsolve callback to the

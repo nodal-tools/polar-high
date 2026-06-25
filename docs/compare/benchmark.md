@@ -395,7 +395,7 @@ sparse matrix. linopy's numbers reproduce within run-to-run noise.
 
 ## What's not in the benchmark
 
-- **MIP**, **QP**, **warm starts**, and **Lagrangian decomposition**.
+- **MIP**, **QP**, **warm starts**, and **decomposition** (cutting-plane / Benders).
   The benchmark deliberately exercises the matrix-assembly path on
   plain LPs.
 - **JuMP** and **gurobipy**. Both have toolchain or licence friction

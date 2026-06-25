@@ -96,7 +96,7 @@ nav:
       - Solvers: guide/solvers.md
       - Scaling: guide/scaling.md
       - Warm-starting: guide/warm-starting.md
-      - Lagrangian: guide/lagrangian.md
+      - Decomposition: guide/decomposition.md
       - Performance: guide/performance.md
       - Debugging: guide/debugging.md
       - Environment variables: guide/env-vars.md

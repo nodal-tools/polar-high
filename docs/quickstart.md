@@ -40,4 +40,4 @@ alone covers demand.
 - Idiomatic patterns: `Sum`, `Where`, `Lag` —
   [Expressions](concepts/expressions.md)
 - Re-solve with parameter updates: [Warm-starting](guide/warm-starting.md)
-- Decompose coupled subproblems: [Lagrangian](guide/lagrangian.md)
+- Decompose coupled subproblems: [Decomposition building blocks](guide/decomposition.md)

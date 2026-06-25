@@ -49,6 +49,6 @@ between solves.
 ## When you need duals during build
 
 Duals are only available after `solve()`. If you need them inside an
-iterative scheme (e.g. column generation, Benders), look at
-[`LagrangianProblem`](../guide/lagrangian.md) — it provides a
-generic dual-subgradient driver wired to `WarmProblem`.
+iterative scheme (e.g. column generation, Benders), see the
+[decomposition building blocks](../guide/decomposition.md) — the
+cut-append / warm-restart / parallel primitives wired to `WarmProblem`.
