@@ -6191,6 +6191,11 @@ class WarmProblem:
         #                                multiplies or divides by the
         #                                ratio)
         self._param_cells: dict[str, dict] = {}
+        # Output-flag preference set via :meth:`set_output_flag` BEFORE the
+        # first solve().  ``None`` means "leave HiGHS at its default"; once
+        # the handle is built the flag is applied immediately and this
+        # remembers the last requested value.
+        self._output_flag: bool | None = None
 
     @property
     def problem(self) -> Problem:
@@ -6556,6 +6561,24 @@ class WarmProblem:
                     f"declare_mutable: param names must be strings, got {type(n).__name__}"
                 )
             self._mutable_params.add(n)
+
+    def set_output_flag(self, enabled: bool) -> None:
+        """Enable or disable HiGHS' native solve log for this problem.
+
+        ``enabled=False`` mutes the per-solve HiGHS output (the
+        ``output_flag`` HiGHS option) for THIS WarmProblem across all of
+        its cold / warm / retry solves — callers that drive many parallel
+        sub-solves (Benders regions, Lagrangian subproblems) use this to
+        keep stdout clean and emit their own concise progress log instead.
+
+        May be called either before the first :meth:`solve` (the flag is
+        applied when the HiGHS handle is built) or after it (applied to the
+        live handle immediately).  The preference persists on the handle,
+        so a single call suffices for the whole lifetime.
+        """
+        self._output_flag = bool(enabled)
+        if self._h is not None:
+            self._h.setOptionValue("output_flag", bool(enabled))
 
     def update_param(self, param_name: str, new_param: Param | float | int) -> None:
         """Replace the values of a tracked Param.  Every LP cell whose
@@ -7500,6 +7523,13 @@ class WarmProblem:
         self._n_rows = int(n_rows)
         self._col_names = col_names
         self._row_names = row_names
+
+        # Apply an output-flag preference requested via set_output_flag()
+        # before the LP was built.  Done here (not in solve()) so the
+        # build's own options dict — which may set output_flag — is
+        # overridden by the caller's explicit, persistent preference.
+        if self._output_flag is not None:
+            h.setOptionValue("output_flag", self._output_flag)
 
         # Release the per-term ``SumBlockMeta`` recipe now the build has
         # consumed it.  A ``Sum``-reduced term survivor-filters its own

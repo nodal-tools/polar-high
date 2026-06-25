@@ -273,3 +273,55 @@ def test_warm_fix_cols_matches_unvectorised() -> None:
     assert sol_a.optimal and sol_b.optimal
     assert sol_a.obj == pytest.approx(sol_b.obj, rel=1e-12)
     np.testing.assert_allclose(sol_a.col_value, sol_b.col_value, rtol=1e-12)
+
+
+# ----------------------------------------------------------------------------
+# set_output_flag — silencing the per-solve HiGHS log must not change the
+# optimum.  Exercises the API both before and after the first solve().
+
+
+def test_set_output_flag_before_solve_silent_optimum(capfd):
+    """set_output_flag(False) before build mutes HiGHS output yet returns
+    the same optimum as a default (verbose) solve of the same LP."""
+    costs, demands = _make_chain(n_rolls=1, n_t=24, seed=7)
+
+    # Reference: default output_flag.
+    p_ref = _build_synthetic_problem(24, costs[0], demands[0])
+    sol_ref = fp.WarmProblem(p_ref).solve()
+    assert sol_ref.optimal
+
+    # Silenced.
+    p = _build_synthetic_problem(24, costs[0], demands[0])
+    wp = fp.WarmProblem(p)
+    wp.set_output_flag(False)
+    capfd.readouterr()  # drop anything emitted during build setup
+    sol = wp.solve()
+    out, err = capfd.readouterr()
+
+    assert sol.optimal
+    assert sol.obj == pytest.approx(sol_ref.obj, rel=1e-12)
+    # No HiGHS native solve banner leaked to stdout/stderr.
+    combined = out + err
+    for needle in ("Solving the presolved LP", "Simplex   iterations", "HiGHS run time"):
+        assert needle not in combined, f"unexpected HiGHS log line: {needle!r}"
+
+
+def test_set_output_flag_after_solve_persists(capfd):
+    """set_output_flag(False) after the first solve silences subsequent
+    warm solves on the same handle."""
+    costs, demands = _make_chain(n_rolls=2, n_t=24, seed=3)
+    p = _build_synthetic_problem(24, costs[0], demands[0])
+    wp = fp.WarmProblem(p)
+    wp.solve()  # first (build) solve — may print
+    wp.set_output_flag(False)
+
+    cost_p = fp.Param(("t",), pl.DataFrame({"t": np.arange(24, dtype=np.int64), "value": costs[1]}))
+    wp.update_obj_coef("v_flow", cost_p)
+    capfd.readouterr()
+    sol = wp.solve()
+    out, err = capfd.readouterr()
+
+    assert sol.optimal
+    combined = out + err
+    for needle in ("Solving the presolved LP", "Simplex   iterations", "HiGHS run time"):
+        assert needle not in combined, f"unexpected HiGHS log line: {needle!r}"
