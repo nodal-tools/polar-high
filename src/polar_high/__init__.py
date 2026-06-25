@@ -21,6 +21,11 @@ from polar_high.engine import (
     WarmProblem,
     Where,
 )
+from polar_high.parallel import (
+    prewarm_global_scheduler,
+    resolve_worker_count,
+    solve_indexed_parallel,
+)
 from polar_high.solvers import (
     IOMode,
     LicenseError,
@@ -42,6 +47,9 @@ __all__ = [
     "WarmProblem",
     "Solution",
     "CstrRecord",
+    "prewarm_global_scheduler",
+    "resolve_worker_count",
+    "solve_indexed_parallel",
     "solve",
     "IOMode",
     "SolverStatus",
