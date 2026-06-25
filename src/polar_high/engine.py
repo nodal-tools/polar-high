@@ -7493,6 +7493,14 @@ class WarmProblem:
                 "highs_options_applied",
                 n_opts=(len(opts) if opts else 0),
             )
+        # Apply a set_output_flag() preference BEFORE routing the log / the
+        # first log call: HiGHS emits the version banner on its first log call
+        # (which ``route_highs_log_to_stdout`` can trigger pre-run), so a False
+        # preference set here suppresses the banner too — not just the solve
+        # log.  The build's own options dict was already applied above; this
+        # persistent caller preference overrides it.
+        if self._output_flag is not None:
+            h.setOptionValue("output_flag", self._output_flag)
         # Route HiGHS' log through Python ``sys.stdout`` before passModel —
         # the version banner can be emitted on the first log call (pre-run),
         # so register early to capture it under Jupyter / Spine-Toolbox on
@@ -7524,12 +7532,8 @@ class WarmProblem:
         self._col_names = col_names
         self._row_names = row_names
 
-        # Apply an output-flag preference requested via set_output_flag()
-        # before the LP was built.  Done here (not in solve()) so the
-        # build's own options dict — which may set output_flag — is
-        # overridden by the caller's explicit, persistent preference.
-        if self._output_flag is not None:
-            h.setOptionValue("output_flag", self._output_flag)
+        # (output_flag preference is applied earlier — before the log routing —
+        # so it suppresses the version banner, not just the solve log.)
 
         # Release the per-term ``SumBlockMeta`` recipe now the build has
         # consumed it.  A ``Sum``-reduced term survivor-filters its own
