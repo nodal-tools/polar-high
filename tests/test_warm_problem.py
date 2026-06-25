@@ -191,3 +191,85 @@ def test_warm_problem_does_not_affect_cold_problem() -> None:
     p_cold_after = _build_synthetic_problem(24, costs[0], demands[0])
     sol_after = p_cold_after.solve()
     assert abs(sol_after.obj - sol_before.obj) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# WarmProblem array-form methods: update_obj_coef_array / fix_cols
+# (relocated from the deleted test_lagrangian.py — these exercise live
+# WarmProblem API independent of any Lagrangian decomposition.)
+# ---------------------------------------------------------------------------
+
+
+def _build_three_cell_lp() -> fp.Problem:
+    """3-cell LP:  min Σ_k c_k · x_k   s.t.  x_k ∈ [0, 10]."""
+    p = fp.Problem()
+    idx = pl.DataFrame({"k": [0, 1, 2]})
+    x = p.add_var("x", "k", idx, lower=0.0, upper=10.0)
+    # Objective: c · x with all coefs = 1 initially
+    coef = fp.Param(("k",), pl.DataFrame({"k": [0, 1, 2], "value": [1.0, 1.0, 1.0]}), name="cost")
+    p.set_objective(coef * x, sense="min")
+    # Add a dummy constraint to force a feasible solve
+    p.add_cstr(
+        "ub_total",
+        over=None,
+        sense="<=",
+        lhs_terms={"sum_x": fp.Sum(x.to_expr(), over=("k",))},
+        rhs_terms={"limit": 30.0},
+    )
+    return p
+
+
+def test_warm_update_obj_coef_array_matches_unvectorised() -> None:
+    """Pushing an array of new objective coefs via the new vectorised
+    method must yield the same solve result as updating via the old
+    Param-based ``update_obj_coef`` path."""
+    # Path A: vectorised update_obj_coef_array
+    p_a = _build_three_cell_lp()
+    wp_a = fp.WarmProblem(p_a)
+    wp_a.solve()
+    new_coefs = np.array([2.0, -3.0, 1.5], dtype=np.float64)
+    wp_a.update_obj_coef_array("x", [(0,), (1,), (2,)], new_coefs)
+    sol_a = wp_a.solve()
+
+    # Path B: equivalent via update_obj_coef with a Param
+    p_b = _build_three_cell_lp()
+    wp_b = fp.WarmProblem(p_b)
+    wp_b.solve()
+    new_param = fp.Param(("k",), pl.DataFrame({"k": [0, 1, 2], "value": new_coefs.tolist()}))
+    wp_b.update_obj_coef("x", new_param)
+    sol_b = wp_b.solve()
+
+    assert sol_a.optimal and sol_b.optimal
+    assert sol_a.obj == pytest.approx(sol_b.obj, rel=1e-12)
+    np.testing.assert_allclose(sol_a.col_value, sol_b.col_value, rtol=1e-12)
+
+
+def test_warm_fix_cols_matches_unvectorised() -> None:
+    """Vectorised fix_cols with a list of dim_tuples must match the
+    effect of one-cell-at-a-time changeColsBounds calls."""
+    # Path A: vectorised fix_cols
+    p_a = _build_three_cell_lp()
+    wp_a = fp.WarmProblem(p_a)
+    wp_a.solve()
+    fix_vals = np.array([4.0, 2.5, 1.0], dtype=np.float64)
+    wp_a.fix_cols("x", [(0,), (1,), (2,)], fix_vals)
+    sol_a = wp_a.solve()
+
+    # Path B: per-cell via changeColsBounds
+    p_b = _build_three_cell_lp()
+    wp_b = fp.WarmProblem(p_b)
+    wp_b.solve()
+    h = wp_b._h
+    for k, val in zip([0, 1, 2], fix_vals):
+        col_id = wp_b.col_id_of_var("x", (k,))
+        h.changeColsBounds(
+            1,
+            np.array([col_id], dtype=np.int32),
+            np.array([val], dtype=np.float64),
+            np.array([val], dtype=np.float64),
+        )
+    sol_b = wp_b.solve()
+
+    assert sol_a.optimal and sol_b.optimal
+    assert sol_a.obj == pytest.approx(sol_b.obj, rel=1e-12)
+    np.testing.assert_allclose(sol_a.col_value, sol_b.col_value, rtol=1e-12)

@@ -21,12 +21,6 @@ from polar_high.engine import (
     WarmProblem,
     Where,
 )
-from polar_high.lagrangian import (
-    CouplingEntry,
-    CouplingSpec,
-    LagrangianProblem,
-    LagrangianSolution,
-)
 from polar_high.solvers import (
     IOMode,
     LicenseError,
@@ -48,10 +42,6 @@ __all__ = [
     "WarmProblem",
     "Solution",
     "CstrRecord",
-    "CouplingEntry",
-    "CouplingSpec",
-    "LagrangianProblem",
-    "LagrangianSolution",
     "solve",
     "IOMode",
     "SolverStatus",
