@@ -6014,6 +6014,35 @@ class Solution:
         # synthesised outside a streaming solve.
         self.streamed_lp_ranges = streamed_lp_ranges
 
+    @property
+    def max_primal_infeasibility(self) -> float:
+        """Largest primal-constraint violation in the returned solution.
+
+        A solver returns a vertex that sits within its feasibility tolerance
+        of the active constraints, so a hand-rolled feasibility re-check on the
+        solution (``f <= cap``, balance rows, …) must use a tolerance at least
+        this large — a hard-coded magic constant either masks real violations
+        or trips on the normal solver slack.  HiGHS enforces feasibility on the
+        INTERNALLY-SCALED problem, so the unscaled slack reported here can
+        exceed :attr:`primal_feasibility_tolerance`.
+
+        ``0.0`` when no live solver is attached (a synthesised Solution)."""
+        if self.highs is None:
+            return 0.0
+        return float(self.highs.getInfo().max_primal_infeasibility)
+
+    @property
+    def primal_feasibility_tolerance(self) -> float:
+        """The solver's primal feasibility tolerance for this solve (the
+        nominal, scaled-problem tolerance; see
+        :attr:`max_primal_infeasibility` for the achieved unscaled slack).
+
+        ``0.0`` when no live solver is attached (a synthesised Solution)."""
+        if self.highs is None:
+            return 0.0
+        _status, val = self.highs.getOptionValue("primal_feasibility_tolerance")
+        return float(val)
+
     def value(self, var_name: str) -> pl.DataFrame:
         """Long-form per-variable solution: ``(*dims, value)``."""
         v = self._vars[var_name]

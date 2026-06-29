@@ -52,3 +52,41 @@ def test_flex_toy_free_gas():
     sol = pb.solve()
     assert sol.optimal
     assert abs(sol.obj) < 1e-6
+
+
+def test_solution_feasibility_accessors():
+    """A live solve (handle retained) exposes the solver's achieved primal
+    infeasibility and its feasibility tolerance, so callers re-checking a
+    constraint on the returned solution can size their tolerance from the
+    solver instead of a magic constant."""
+    pb = Problem()
+    build_flex_toy(pb, make_flex_toy_data())
+    sol = pb.solve(keep_solver=True)
+    assert sol.optimal
+    assert sol.highs is not None
+    # Both are non-negative finite floats; an optimal solution is feasible to
+    # within the reported tolerance.
+    assert sol.primal_feasibility_tolerance > 0.0
+    assert sol.max_primal_infeasibility >= 0.0
+    assert sol.max_primal_infeasibility <= max(1e-6, 10.0 * sol.primal_feasibility_tolerance)
+
+
+def test_synthesised_solution_feasibility_accessors_default_zero():
+    """A Solution built without a live HiGHS handle (synthesised outside a
+    real solve) reports 0.0 rather than raising."""
+    import numpy as np
+
+    from polar_high.engine import Solution
+
+    sol = Solution(
+        optimal=True,
+        obj=0.0,
+        col_value=np.zeros(1),
+        row_dual=np.zeros(1),
+        col_names=["x"],
+        row_names=["c"],
+        vars={},
+        highs=None,
+    )
+    assert sol.max_primal_infeasibility == 0.0
+    assert sol.primal_feasibility_tolerance == 0.0
