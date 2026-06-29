@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polar-high"
-version = "3.0.0"
+version = "3.1.0"
 description = "Python library for building indexed linear and mixed-integer programs in polars; assembles into HiGHS, exportable as MPS."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.1.0] — 2026-06-25
+
+### Added
+
+- **`Solution.max_primal_infeasibility`** and
+  **`Solution.primal_feasibility_tolerance`**: expose the solver's achieved
+  unscaled primal slack and its primal feasibility tolerance, so a caller that
+  hand-checks a constraint on the returned solution (e.g. a Benders master
+  coupling self-check) can size its tolerance from the solver's own achieved
+  feasibility instead of a hard-coded magic constant. HiGHS enforces feasibility
+  on the internally-scaled problem, so the unscaled slack reported here can
+  exceed the nominal scaled tolerance — a normal solver artifact callers must
+  allow for. Both return `0.0` for a synthesised `Solution` with no live HiGHS
+  handle.
+
 ## [3.0.0] — 2026-06-25
 
 Refocuses regional decomposition: the built-in dual-subgradient
