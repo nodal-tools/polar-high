@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.2.0] — 2026-06-30
+
+### Changed
+
+- **Autoscale Layer 3 now centres the objective over HiGHS' cost comfort
+  zone.** When a cost coefficient would trip a HiGHS warning — smallest
+  `|c| < 1e-4` ("excessively small costs") or worst `|c| > 1e+4` — Layer 3
+  picks the power-of-two `user_objective_scale` exponent that places the
+  band's geometric centre `sqrt(min·max)` at the zone's geometric centre
+  (`1.0`), instead of clamping the offending end to a boundary. For a band
+  narrower than the zone both ends land inside `[1e-4, 1e+4]`; for a band
+  wider than the zone the unavoidable violation falls **symmetrically** on
+  both ends in log-space. Bands already inside the zone are untouched
+  (`N = 0`), so well-scaled models are never perturbed. The exponent is a
+  power of two and HiGHS unscales the objective and duals on output, so the
+  reported solution is unchanged — only the magnitudes the simplex pivots
+  on. The new audit tag is `center`.
+- The previously-unhandled **small-cost** case (HiGHS' "Problem has some
+  excessively small costs" warning) is now corrected: it was silently
+  ignored before — only large costs were scaled.
+- The pure **large-cost** case now centres as well (previously clamped the
+  worst `|c|` to the `1e+4` working ceiling). The result is a slightly
+  larger-magnitude down-scale; being power-of-two it remains
+  output-invariant.
+
 ## [3.1.0] — 2026-06-25
 
 ### Added
