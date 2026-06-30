@@ -5,8 +5,15 @@ power-of-two-exact, internally unscaled-on-output global magnitude
 shifts before the simplex starts:
 
 * ``user_objective_scale`` — exponent ``N_obj`` such that HiGHS sees
-  cost coefficients multiplied by ``2 ** N_obj``.  Pulls the worst-cost
-  magnitude into HiGHS' comfort zone ``|c| <= 1e+4``.
+  cost coefficients multiplied by ``2 ** N_obj``.  When a cost would
+  trip a HiGHS warning (smallest ``|c| < 1e-4`` or worst ``|c| > 1e+4``)
+  the band is **geometrically centred** over the comfort zone ``[1e-4,
+  1e+4]`` — straddling ``1.0`` when it fits, overshooting symmetrically
+  on both ends when the spread is wider than the zone (the warnings are
+  soft, so centring beats slamming one end to a boundary).  HiGHS
+  applies this power-of-two-exact scale internally and unscales the
+  objective and duals on output, so it never perturbs the reported
+  solution — only the magnitudes the simplex pivots on.
 * ``user_bound_scale`` — exponent ``N_bnd`` such that HiGHS sees
   variable bounds AND row bounds (RHS) multiplied by ``2 ** N_bnd``.
   Pulls the worst-bound magnitude into HiGHS' comfort zone
@@ -55,11 +62,19 @@ _logger = logging.getLogger(__name__)
 # ``HighsSolve.cpp::suggestScaling``):
 #
 # * Bounds + RHS: ``[1e-4, 1e+6]``.
-# * Cost: ``|c| <= 1e+4`` (HiGHS prints "Consider scaling the objective"
-#   when the worst |c| exceeds 1e+4).
+# * Cost: HiGHS warns "Problem has some excessively small costs" when the
+#   smallest non-zero ``|c|`` falls below ``1e-4`` and "Problem has some
+#   excessively large costs" when the worst ``|c|`` exceeds ``1e+6``
+#   (both verified empirically against HiGHS 1.14: ``min|c|=1e-5`` warns
+#   while ``1e-4`` does not; ``max|c|=2e+6`` warns while ``1e+6`` does
+#   not).  ``_HIGHS_LARGE_COST`` is polar-high's **conservative working
+#   ceiling** for the cost axis — 2 decades below HiGHS' actual ``1e+6``
+#   warning, mirroring the down-scale target the bound axis uses — so the
+#   autoscaler keeps the scaled costs well clear of the warning band.
 _HIGHS_LARGE_BOUND = 1e6
 _HIGHS_SMALL_BOUND = 1e-4
 _HIGHS_LARGE_COST = 1e4
+_HIGHS_SMALL_COST = 1e-4
 
 # Severe-overshoot trigger for the two-sided escape branch.  When
 # ``max_b >= _HIGHS_LARGE_BOUND * _SEVERE_LARGE_OVERSHOOT`` (~1e+9) the
@@ -128,27 +143,50 @@ def _safe_float(x: float, fallback: float) -> float:
     return float(x)
 
 
-def _recommend_objective_scale(cost_max: float) -> int:
-    """Power-of-two exponent that pulls ``max(|c|)`` into ``|c| <= 1e+4``.
+def _recommend_objective_scale(cost_max: float, cost_min: float) -> tuple[int, str]:
+    """Power-of-two exponent that geometrically **centres** the cost band
+    over the comfort zone ``[_HIGHS_SMALL_COST, _HIGHS_LARGE_COST]``
+    (``[1e-4, 1e+4]``).
 
-    Mirrors HiGHS' ``suggestScaling`` lambda for the objective: when
-    ``cost_max <= _HIGHS_LARGE_COST`` we return 0 (no scaling); when
-    ``cost_max > _HIGHS_LARGE_COST`` we return ``floor(log2(ratio))``
-    so the resulting scaled max lies in ``[_HIGHS_LARGE_COST / 2,
-    _HIGHS_LARGE_COST]``.  Outer rounding (``floor`` for ratio < 1)
-    picks the smaller-|N| value — same conservative rule HiGHS uses.
+    The objective carries a single scale exponent, and HiGHS' small/large
+    cost warnings are soft (conditioning degrades smoothly, not at a hard
+    cliff).  So rather than clamping whichever end is out of zone to a
+    boundary — which can shove the other end further out — we place the
+    band's geometric centre ``sqrt(cost_min * cost_max)`` at the zone's
+    geometric centre ``sqrt(1e-4 * 1e+4) = 1.0``:
 
-    Cost vectors don't have a "min too small" branch in HiGHS'
-    recommendation (HiGHS doesn't warn about excessively small costs
-    the way it does for bounds), so we don't add one either.
+    * **Spread narrower than the zone** (the usual case): both ends land
+      inside ``[1e-4, 1e+4]``, the band straddling ``1.0`` — the
+      best-conditioned position, with margin above the dual-feasibility
+      tolerance for the cheapest costs.
+    * **Spread exactly the zone width** (~8 decades): the two ends land
+      on the two boundaries.
+    * **Spread wider than the zone**: the (unavoidable) violation falls
+      **symmetrically** on both ends in log-space — neither end is
+      slammed to a boundary while the other overshoots far.
+
+    Scaling is only triggered when a cost would actually trip a HiGHS
+    warning (``min(|c|) < 1e-4`` or ``max(|c|) > 1e+4``); a band already
+    inside the zone is left untouched (``N = 0``) so well-scaled models
+    are never perturbed.  Returns ``(exponent, tag)`` with ``tag`` ∈
+    {``in-zone``, ``center``} for the operator audit log.
     """
     if not math.isfinite(cost_max) or cost_max <= 0.0:
-        return 0
-    if cost_max <= _HIGHS_LARGE_COST:
-        return 0
-    ratio = _HIGHS_LARGE_COST / cost_max
-    # ratio < 1 here by construction.
-    return int(math.floor(math.log2(ratio)))
+        return 0, "in-zone"
+    has_min = math.isfinite(cost_min) and cost_min > 0.0
+    small = has_min and cost_min < _HIGHS_SMALL_COST
+    large = cost_max > _HIGHS_LARGE_COST
+    if not small and not large:
+        return 0, "in-zone"
+    # Degenerate single-magnitude vector (min absent) → centre that value.
+    lo = cost_min if has_min else cost_max
+    geo_range = math.sqrt(lo * cost_max)
+    geo_zone = math.sqrt(_HIGHS_SMALL_COST * _HIGHS_LARGE_COST)
+    if not (math.isfinite(geo_range) and geo_range > 0.0):
+        return 0, "in-zone"
+    if not (math.isfinite(geo_zone) and geo_zone > 0.0):
+        return 0, "in-zone"
+    return int(round(math.log2(geo_zone / geo_range))), "center"
 
 
 def _recommend_bound_scale(
@@ -261,22 +299,33 @@ def recommend_scaling(
 
     # --- Objective axis ---------------------------------------------------
     obj_skipped_external = False
+    reasoning_obj_tag = "in-zone"
     if problem is not None and has_explicit_option(problem, "user_objective_scale"):
         ext = get_explicit_option(problem, "user_objective_scale")
         try:
             n_obj = _clamp(int(ext))
         except (TypeError, ValueError):
-            n_obj = _clamp(_recommend_objective_scale(_safe_float(cost_hi, 0.0)))
+            n_obj_raw, obj_tag = _recommend_objective_scale(
+                _safe_float(cost_hi, 0.0), _safe_float(cost_lo, math.inf)
+            )
+            n_obj = _clamp(n_obj_raw)
+            reasoning_obj_tag = obj_tag
         else:
             obj_skipped_external = True
+            reasoning_obj_tag = "external"
             _logger.info(
                 "respecting external user_objective_scale=%d",
                 n_obj,
             )
     elif config.user_objective_scale is not None:
         n_obj = _clamp(int(config.user_objective_scale))
+        reasoning_obj_tag = "manual"
     else:
-        n_obj = _clamp(_recommend_objective_scale(_safe_float(cost_hi, 0.0)))
+        n_obj_raw, obj_tag = _recommend_objective_scale(
+            _safe_float(cost_hi, 0.0), _safe_float(cost_lo, math.inf)
+        )
+        n_obj = _clamp(n_obj_raw)
+        reasoning_obj_tag = obj_tag
 
     # --- Bound axis -------------------------------------------------------
     bnd_skipped_external = False
@@ -326,14 +375,20 @@ def recommend_scaling(
 
     if not parts:
         if n_obj == 0 and n_bnd == 0:
-            reasoning = f"in-zone (bound={reasoning_bnd_tag})"
+            reasoning = f"in-zone (obj={reasoning_obj_tag}, bound={reasoning_bnd_tag})"
         else:
-            reasoning = f"auto (N_obj={n_obj}, N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})"
+            reasoning = (
+                f"auto (N_obj={n_obj}, obj_tag={reasoning_obj_tag}, "
+                f"N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})"
+            )
     else:
         # Mixed: at least one axis is external/manual.  Always surface
         # the auto value too, so the audit shows what the autoscaler
         # would have picked for the non-overridden axis.
-        parts.append(f"auto (N_obj={n_obj}, N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})")
+        parts.append(
+            f"auto (N_obj={n_obj}, obj_tag={reasoning_obj_tag}, "
+            f"N_bnd={n_bnd}, bound_tag={reasoning_bnd_tag})"
+        )
         reasoning = "; ".join(parts)
 
     return Layer3Plan(

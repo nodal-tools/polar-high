@@ -34,6 +34,7 @@ from polar_high.autoscale import (
     ScalingConfig,
     recommend_scaling,
 )
+from polar_high.autoscale._layer3 import _HIGHS_LARGE_COST, _HIGHS_SMALL_COST
 
 
 def _cfg(
@@ -76,12 +77,21 @@ def test_in_zone_no_scaling() -> None:
     assert "in-zone" in plan.reasoning
 
 
-def test_cost_overshoot_only() -> None:
-    """``max(|c|) = 1e+7`` → N_obj = floor(log2(1e+4 / 1e+7)) = -10."""
+def test_cost_overshoot_only_centres() -> None:
+    """``max(|c|) = 1e+7`` (min in zone) → centre the band over the zone.
+
+    geo_range = sqrt(1.0 * 1e+7) = 3162; geo_zone = 1.0;
+    N_obj = round(log2(1 / 3162)) = -12.  The band lands ``[2.4e-4,
+    2.4e+3]`` — both ends inside ``[1e-4, 1e+4]``, straddling 1.0.
+    """
     r = _ranges(cost=(1.0, 1e7), bound=(1e-2, 1e3), rhs=(1e-2, 1e3))
     plan = recommend_scaling(r, _cfg())
-    assert plan.user_objective_scale == -10
+    assert plan.user_objective_scale == -12
     assert plan.user_bound_scale == 0
+    factor = 2.0**plan.user_objective_scale
+    assert _HIGHS_SMALL_COST <= 1.0 * factor
+    assert 1e7 * factor <= _HIGHS_LARGE_COST
+    assert "center" in plan.reasoning
 
 
 def test_bound_overshoot_only_moderate_clamp_large() -> None:
@@ -137,7 +147,7 @@ def test_manual_override_disables_auto_for_bounds_only() -> None:
     r = _ranges(cost=(1.0, 1e7), bound=(1e-2, 1e3), rhs=(1e-2, 1e3))
     plan = recommend_scaling(r, _cfg(user_bound_scale=-5))
     assert plan.user_bound_scale == -5
-    assert plan.user_objective_scale == -10
+    assert plan.user_objective_scale == -12
     assert "manual override" in plan.reasoning
     assert "user_bound_scale=-5" in plan.reasoning
 
@@ -167,3 +177,101 @@ def test_empty_cost_yields_zero() -> None:
     plan = recommend_scaling(r, _cfg())
     assert plan.user_objective_scale == 0
     assert plan.user_bound_scale == 0
+
+
+def test_cost_undershoot_only_centres() -> None:
+    """``min(|c|) < 1e-4`` with a clean max → centre the band over the zone.
+
+    geo_range = sqrt(1e-6 * 1e-3) = 3.16e-5; N_obj = round(log2(1 /
+    3.16e-5)) = 15.  The band lands ``[3.3e-2, 3.3e+1]`` — both ends in
+    zone, straddling 1.0.
+    """
+    r = _ranges(cost=(1e-6, 1e-3), bound=(1e-2, 1e3), rhs=(1e-2, 1e3))
+    plan = recommend_scaling(r, _cfg())
+    assert plan.user_objective_scale == 15
+    assert plan.user_bound_scale == 0
+    assert "center" in plan.reasoning
+    factor = 2.0**plan.user_objective_scale
+    assert _HIGHS_SMALL_COST <= 1e-6 * factor
+    assert 1e-3 * factor <= _HIGHS_LARGE_COST
+
+
+def test_cost_spread_equals_zone_lands_on_edges() -> None:
+    """Spread exactly the zone width (8 decades) → ends land on the edges.
+
+    cost = (1e-6, 1e+2): geo_range = sqrt(1e-6 * 1e+2) = 1e-2;
+    N_obj = round(log2(1 / 1e-2)) = 7.  Band → ``[1.28e-4, 1.28e+4]``:
+    min just clears the 1e-4 floor, max just past the conservative 1e+4
+    ceiling (still ~2 decades below HiGHS' 1e+6 warning).
+    """
+    r = _ranges(cost=(1e-6, 1e2), bound=(1.0, 1.0), rhs=(1.0, 1.0))
+    plan = recommend_scaling(r, _cfg())
+    assert plan.user_objective_scale == 7
+    assert "center" in plan.reasoning
+    factor = 2.0**plan.user_objective_scale
+    assert 1e-6 * factor >= _HIGHS_SMALL_COST  # small end cleared the floor
+
+
+def test_cost_wide_spread_centres_symmetrically() -> None:
+    """Spread > zone width → centre so the overshoot is symmetric.
+
+    cost = (1e-9, 5e+3) (~12.7 decades): geo_range = sqrt(1e-9 * 5e+3) =
+    2.24e-3; N_obj = round(log2(1 / 2.24e-3)) = 9.  Band → ``[5.1e-7,
+    2.6e+6]``: neither end is slammed to a boundary — both overshoot by
+    ~2.3 decades in log-space (small end below 1e-4, large end above
+    1e+4 by nearly the same amount).
+    """
+    r = _ranges(cost=(1e-9, 5e3), bound=(1.0, 1.0), rhs=(1.0, 1.0))
+    plan = recommend_scaling(r, _cfg())
+    assert plan.user_objective_scale == 9
+    assert "center" in plan.reasoning
+    factor = 2.0**plan.user_objective_scale
+    lo, hi = 1e-9 * factor, 5e3 * factor
+    out_lo = math.log10(_HIGHS_SMALL_COST / lo)  # decades below the floor
+    out_hi = math.log10(hi / _HIGHS_LARGE_COST)  # decades above the ceiling
+    assert out_lo > 0 and out_hi > 0  # genuinely wider than the zone
+    assert abs(out_lo - out_hi) < 0.5  # symmetric to within a rounding step
+
+
+def test_both_ends_bind_centres() -> None:
+    """Both ends out of zone (always > zone width) → centre, not clamp.
+
+    cost = (1e-6, 1e+7): min undershoots 1e-4 AND max overshoots 1e+4.
+    geo_range = sqrt(1e-6 * 1e+7) = 3.16; N_obj = round(log2(1 / 3.16))
+    = -2.  Symmetric overshoot around 1.0 rather than pulling the top to
+    the ceiling and crushing the bottom further.
+    """
+    r = _ranges(cost=(1e-6, 1e7), bound=(1.0, 1.0), rhs=(1.0, 1.0))
+    plan = recommend_scaling(r, _cfg())
+    assert plan.user_objective_scale == -2
+    assert "center" in plan.reasoning
+
+
+def test_cost_undershoot_legacy_objective_scale_band() -> None:
+    """Canonical case: a small operational-cost band under a built-in
+    objective rescale.
+
+    A model that multiplies its whole objective by a small constant
+    (e.g. a legacy ``1e-6`` cost scale) leaves a cheap-but-real
+    operational cost near ~2e-5 while a slack/penalty term tops out
+    below 1 — tripping HiGHS' "excessively small costs" warning even
+    though the spread is in-zone.  Layer 3 centres it: geo_range =
+    sqrt(2e-5 * 0.64) = 3.58e-3, N_obj = round(log2(1 / 3.58e-3)) = 8,
+    landing the band in ``[~5e-3, ~1.6e2]`` straddling 1.0 (warning
+    cleared, both ends in zone).
+    """
+    r = _ranges(cost=(2e-5, 0.64), bound=(1.0, 3e2), rhs=(1e-4, 2.5e2))
+    plan = recommend_scaling(r, _cfg())
+    assert plan.user_objective_scale == 8
+    factor = 2.0**plan.user_objective_scale
+    assert _HIGHS_SMALL_COST <= 2e-5 * factor <= _HIGHS_LARGE_COST
+    assert 0.64 * factor <= _HIGHS_LARGE_COST
+    assert "center" in plan.reasoning
+
+
+def test_cost_in_band_not_scaled() -> None:
+    """A band already inside ``[1e-4, 1e+4]`` is left alone — no scaling."""
+    r = _ranges(cost=(1e-4, 1e2), bound=(1.0, 1.0), rhs=(1.0, 1.0))
+    plan = recommend_scaling(r, _cfg())
+    assert plan.user_objective_scale == 0
+    assert "in-zone" in plan.reasoning

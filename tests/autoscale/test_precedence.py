@@ -87,9 +87,9 @@ def test_precedence_bound_skips_recommendation() -> None:
 
     assert plan.bound_skipped_external is True
     assert plan.user_bound_scale == -5  # preserved from caller
-    # Objective axis still auto-runs.
+    # Objective axis still auto-runs (centres the 8-decade cost band).
     assert plan.objective_skipped_external is False
-    assert plan.user_objective_scale == -10
+    assert plan.user_objective_scale == -12
     assert "external user_bound_scale=-5" in plan.reasoning
 
 
@@ -134,8 +134,8 @@ def test_apply_scaling_does_not_overwrite_external_options() -> None:
 
     # Caller's -5 must still be there; autoscaler must NOT overwrite.
     assert pb.get_solver_option("user_bound_scale") == -5
-    # Objective auto picked -10, applied normally.
-    assert pb.get_solver_option("user_objective_scale") == -10
+    # Objective auto picked -12 (centres the cost band), applied normally.
+    assert pb.get_solver_option("user_objective_scale") == -12
     # Simplex strategy always set.
     assert pb.get_solver_option("simplex_scale_strategy") == 2
 
@@ -146,5 +146,5 @@ def test_recommend_without_problem_argument_uses_config_only() -> None:
     plan = recommend_scaling(r, _cfg())
     assert plan.objective_skipped_external is False
     assert plan.bound_skipped_external is False
-    assert plan.user_objective_scale == -10
+    assert plan.user_objective_scale == -12
     assert plan.user_bound_scale == -7
