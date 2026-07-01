@@ -44,6 +44,7 @@ from collections import deque
 from dataclasses import dataclass
 
 __all__ = [
+    "InOutStabilizer",
     "StallMonitor",
     "StallVerdict",
 ]
@@ -186,3 +187,242 @@ class StallMonitor:
             blowup_ratio=blowup_ratio,
             window=window_seen,
         )
+
+
+# ---------------------------------------------------------------------------
+# In-out separation (Ben-Ameur & Neto 2007) — generic interior cut-point picker.
+# ---------------------------------------------------------------------------
+
+# Below this the interpolation weight is treated as an exact ``0.0`` (exact
+# Benders): once a region's ``weight`` has shrunk under this it is PINNED to
+# ``0.0`` permanently. Guarantees the "shrink bottoms out at a forced 0"
+# convergence rule terminates in finitely many null steps rather than
+# asymptoting at a positive value that can never separate a degenerate vertex.
+_WEIGHT_ZERO_EPS = 1e-9
+
+
+class InOutStabilizer:
+    """Generic in-out separation point picker for a Benders-style driver.
+
+    Cutting-plane methods that generate each cut at the raw master vertex
+    ``f_out`` tail off badly when the recourse is flat in the coupling variable
+    (dual-degenerate slopes): the master wanders among cost-equivalent vertices
+    and the bound closes very slowly. Ben-Ameur & Neto (2007) generate the cut
+    at an INTERIOR *separation point* ``f_sep = λ·centre + (1-λ)·f_out`` — a
+    convex combination of a stable centre and the master vertex — instead. The
+    cuts are better centred, the master stops wandering, and the bound closes
+    faster, at zero extra subproblem solves.
+
+    This class is domain-free: it operates only on ``{col_id -> value}`` point
+    dicts and scalar weights. It has NO notion of flows, regions, storage, or
+    capacities — the caller (e.g. FlexTool's ``_benders.py``) owns all of that.
+    Because the correct stabilisation unit is PER-REGION (a single global weight
+    lets one well-behaved region mask a degenerate one), the caller constructs
+    ONE ``InOutStabilizer`` PER REGION; each instance therefore holds a single
+    centre, a single (per-region) weight ``λ`` and a single counter.
+
+    Lifecycle per outer iteration, for one region::
+
+        f_sep = stab.separation_point(f_out)     # where to solve this region
+        # ... solve region at f_sep, form the cut, test separation ...
+        kind = stab.register(master_point=f_out, separated=..., \
+                             incumbent_point=..., improved=...)
+
+    Convergence guarantee (Ben-Ameur & Neto): the MOMENT a region's cut fails
+    to separate its ``f_out`` (``separated=False``), the next
+    :meth:`separation_point` returns ``master_point`` VERBATIM (``λ=0`` ⇒ exact
+    Benders, guaranteed to separate unless already optimal). On such a null step
+    the weight is also SHRUNK, and the shrink bottoms out at a forced ``0`` — not
+    a positive floor, since a cut arbitrarily close to ``f_out`` can still fail
+    to separate a degenerate vertex; only ``λ=0`` guarantees separation.
+    ``out_step_every`` is a secondary belt-and-braces cap that periodically
+    forces an out-step even without a separation failure.
+
+    Parameters
+    ----------
+    weight
+        Initial interpolation weight ``λ`` on the interior centre. ``0.0`` is a
+        verbatim no-op (exact Benders — :meth:`separation_point` returns its
+        input unchanged, by construction, so byte-parity with the off path
+        holds). Must be in ``[0, 1)``: ``weight >= 1`` ("never query the
+        master") is non-convergent and ``weight < 0`` is meaningless — both are
+        REJECTED at construction (a clear error rather than a silent clamp, so a
+        config mistake surfaces).
+    weight_min
+        Threshold at which the geometric null-step descent stops shrinking and
+        SNAPS the weight to a forced exact ``0.0``. It does NOT act as a
+        positive floor: the convergence guarantee is the forced ``0`` (a cut
+        arbitrarily close to ``f_out`` can still fail to separate a degenerate
+        vertex), so once ``λ`` reaches ``max(weight_min, _WEIGHT_ZERO_EPS)`` it
+        is pinned to ``0.0``. A larger ``weight_min`` therefore reaches the
+        exact-Benders out-step SOONER, never blocks it. Must be in
+        ``[0, weight]``.
+    shrink
+        Multiplicative weight-shrink factor applied on each null (no-separation)
+        step, ``0 < shrink < 1``.
+    out_step_every
+        Secondary cap: force an out-step every this-many registered steps even
+        if separation has not failed. ``<= 0`` disables the periodic cap
+        (leaving only the on-no-separation rule). Positive integer otherwise.
+    """
+
+    def __init__(
+        self,
+        *,
+        weight: float = 0.5,
+        weight_min: float = 0.0,
+        shrink: float = 0.5,
+        out_step_every: int = 5,
+    ) -> None:
+        weight = float(weight)
+        if not (0.0 <= weight < 1.0):
+            raise ValueError(
+                "InOutStabilizer weight must be in [0, 1): "
+                f"got {weight!r} (>= 1 never queries the master ⇒ "
+                "non-convergent; < 0 is meaningless)"
+            )
+        weight_min = float(weight_min)
+        if not (0.0 <= weight_min <= weight):
+            raise ValueError(
+                "InOutStabilizer weight_min must be in [0, weight]: "
+                f"got {weight_min!r} with weight {weight!r}"
+            )
+        shrink = float(shrink)
+        if not (0.0 < shrink < 1.0):
+            raise ValueError(f"InOutStabilizer shrink must be in (0, 1): got {shrink!r}")
+        self.weight = weight
+        self.weight_min = weight_min
+        self.shrink = shrink
+        self.out_step_every = int(out_step_every)
+        # The stable interior centre (a ``{col_id -> value}`` point). ``None``
+        # until the caller seeds it — the first ``separation_point`` before any
+        # centre exists returns the master point verbatim (a pass-through).
+        self._centre: dict[int, float] | None = None
+        # When set, the NEXT ``separation_point`` returns ``master_point``
+        # verbatim (the forced out-step). Armed by a no-separation register, and
+        # by the periodic ``out_step_every`` cap.
+        self._force_out = False
+        # Count of registered steps since the last (forced or periodic)
+        # out-step, for the secondary ``out_step_every`` cap.
+        self._since_out = 0
+
+    def set_centre(self, centre: dict[int, float]) -> None:
+        """Explicitly seed / replace the stable interior centre.
+
+        Optional: the centre is otherwise established lazily on the first
+        :meth:`register`. Provided so a caller that knows the natural centre up
+        front (e.g. FlexTool's autarky ``f̄=0``) can set it before the first
+        :meth:`separation_point`. Copies the dict so later caller mutation of
+        the passed point does not alias the stored centre.
+        """
+        self._centre = dict(centre)
+
+    def separation_point(self, master_point: dict[int, float]) -> dict[int, float]:
+        """Return the point to evaluate the subproblem at this iteration.
+
+        ``f_sep[c] = λ·centre[c] + (1-λ)·master_point[c]`` per column, EXCEPT:
+
+        * ``λ == 0.0`` ⇒ return ``master_point`` VERBATIM (the same dict object),
+          skipping the convex-combo arithmetic entirely so byte-parity with the
+          exact-Benders path holds by construction, not by float luck;
+        * no centre yet (first call before any :meth:`register`) ⇒ pass-through;
+        * a pending forced out-step (armed by a prior no-separation
+          :meth:`register`) ⇒ pass-through this once.
+
+        Pure: does NOT mutate any state (the forced-out flag is CONSUMED in
+        :meth:`register`, not here, so re-querying is idempotent).
+        """
+        if self.weight == 0.0 or self._centre is None or self._force_out:
+            return master_point
+        w = self.weight
+        centre = self._centre
+        return {c: w * centre.get(c, v) + (1.0 - w) * v for c, v in master_point.items()}
+
+    def register(
+        self,
+        *,
+        master_point: dict[int, float],
+        separated: bool,
+        incumbent_point: dict[int, float] | None,
+        improved: bool,
+    ) -> str:
+        """Record this iteration's outcome; update centre + weight; return the
+        step kind taken.
+
+        Parameters
+        ----------
+        master_point
+            The raw master vertex ``f_out`` this iteration (establishes the
+            centre on the very first register, when none exists yet).
+        separated
+            Whether the cut generated at ``f_sep`` actually SEPARATED
+            ``f_out`` (strictly, per the caller's tolerance). ``False`` arms a
+            forced out-step for the next :meth:`separation_point` and shrinks
+            the weight toward a forced ``0``.
+        incumbent_point
+            The best-upper-bound point when ``improved`` (else ignored). On a
+            serious step the centre JUMPS to it (Ben-Ameur & Neto default).
+        improved
+            Whether the incumbent (best UB) improved this iteration.
+
+        Returns
+        -------
+        str
+            ``"serious"`` (incumbent improved ⇒ centre jumped),
+            ``"out"``     (cut failed to separate ⇒ forced out-step armed,
+                           weight shrunk toward 0), or
+            ``"null"``    (cut separated but no incumbent improvement ⇒ centre
+                           and weight held).
+        """
+        # Seed the centre on the first register if the caller never set it.
+        if self._centre is None:
+            self._centre = (
+                dict(incumbent_point) if incumbent_point is not None else dict(master_point)
+            )
+
+        # A forced/periodic out-step is now spent (this register follows the
+        # pass-through separation_point it armed).
+        was_forced = self._force_out
+        self._force_out = False
+
+        if improved and incumbent_point is not None:
+            # Serious step: jump the centre to the incumbent (BAN default).
+            self._centre = dict(incumbent_point)
+            self._since_out = 0 if was_forced else self._since_out + 1
+            self._maybe_arm_periodic_out()
+            return "serious"
+
+        if not separated:
+            # Null step (no separation): arm the exact-Benders out-step for the
+            # NEXT separation_point and shrink the weight toward a FORCED 0.
+            self._force_out = True
+            self._since_out = 0
+            self._shrink_weight()
+            return "out"
+
+        # Separated but no incumbent improvement: hold centre and weight.
+        self._since_out = 0 if was_forced else self._since_out + 1
+        self._maybe_arm_periodic_out()
+        return "null"
+
+    def _shrink_weight(self) -> None:
+        """Shrink the weight one null step, bottoming out at a FORCED 0.
+
+        ``λ ← λ·shrink``; then, once the weight has descended to at-or-below the
+        snap threshold ``max(weight_min, _WEIGHT_ZERO_EPS)``, pin it to exactly
+        ``0.0`` for the rest of the run (⇒ exact Benders). The forced ``0`` —
+        NOT a positive floor — is the convergence guarantee: a cut arbitrarily
+        close to ``f_out`` can still fail to separate a degenerate vertex, so
+        ``weight_min`` merely sets where the descent stops shrinking and snaps to
+        zero, it never blocks the eventual exact-Benders out-step.
+        """
+        self.weight *= self.shrink
+        if self.weight <= max(self.weight_min, _WEIGHT_ZERO_EPS):
+            self.weight = 0.0
+
+    def _maybe_arm_periodic_out(self) -> None:
+        """Secondary belt-and-braces cap: force an out-step every
+        ``out_step_every`` registered non-out steps (disabled when ``<= 0``)."""
+        if self.out_step_every > 0 and self._since_out >= self.out_step_every:
+            self._force_out = True
+            self._since_out = 0

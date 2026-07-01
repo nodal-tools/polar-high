@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.4.0] — 2026-07-01
+
+### Added
+
+- **`InOutStabilizer` (`polar_high.decomposition`)** — a domain-agnostic in-out
+  separation point picker (Ben-Ameur & Neto 2007) for cutting-plane / Benders
+  drivers. Cutting-plane methods that generate each cut at the raw master vertex
+  `f_out` tail off badly when the recourse is flat in the coupling variable
+  (dual-degenerate slopes): the master wanders among cost-equivalent vertices and
+  the bound closes very slowly. The stabilizer instead returns an interior
+  *separation point* `f_sep = λ·centre + (1-λ)·f_out` at which to generate the cut
+  — better-centred cuts, no wandering, faster bound closure, at zero extra
+  subproblem solves. Domain-free (operates only on `{col_id -> value}` point dicts
+  and scalar weights); constructed ONE PER REGION. `λ = 0.0` is a verbatim no-op
+  (returns its input unchanged, so byte-parity with exact Benders holds by
+  construction). Convergence guarantee: the moment a region's cut fails to
+  separate its `f_out`, the next `separation_point` returns the master point
+  verbatim (`λ = 0` ⇒ exact Benders), and the null-step weight-shrink bottoms out
+  at a forced `0` rather than a positive floor. Stateful, deterministic,
+  side-effect-free.
+
 ## [3.3.0] — 2026-07-01
 
 ### Added

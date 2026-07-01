@@ -10,6 +10,7 @@ import os as _os
 _os.environ.setdefault("POLARS_MAX_THREADS", "1")
 
 from polar_high.decomposition import (
+    InOutStabilizer,
     StallMonitor,
     StallVerdict,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "WarmProblem",
     "Solution",
     "CstrRecord",
+    "InOutStabilizer",
     "StallMonitor",
     "StallVerdict",
     "prewarm_global_scheduler",
