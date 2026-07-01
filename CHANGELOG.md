@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.3.0] — 2026-07-01
+
+### Added
+
+- **`StallMonitor` / `StallVerdict` (`polar_high.decomposition`)** — a
+  domain-agnostic tail-off / stall detector for cutting-plane / Benders
+  drivers (the outer loop that consumes `WarmProblem.add_cut_row` /
+  `add_recourse_col`). It notices when the outer iteration has stopped making
+  progress and lets the driver bail out with a diagnostic instead of silently
+  burning the iteration cap. The monitor knows only the two scalars every
+  Benders-style loop already maintains — a lower bound and a best-so-far upper
+  bound — plus one caller-supplied `reference_scale` (a "sane objective
+  magnitude" the driver computes from its own problem); it carries no domain
+  concepts. A run is declared stalled only when a CONJUNCTION holds over a full
+  trailing window: the relative gap exceeds `gap_floor` (far from converged),
+  the best upper bound has not improved by more than `min_rel` (incumbent
+  frozen), and the best upper bound is still above `blowup_mult * reference_scale`
+  (frozen *far above* any sane magnitude — the penalty / complete-recourse
+  regime). The conjunction is what separates a genuine tail-off from the benign
+  frozen windows a converging run exhibits (early blow-up that shrinks fast,
+  short flat stretches at a sane magnitude). Stateful (bounded `deque`),
+  deterministic, and side-effect-free — it only reports.
+
 ## [3.2.0] — 2026-06-30
 
 ### Changed
