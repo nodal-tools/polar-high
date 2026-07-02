@@ -6248,6 +6248,12 @@ class WarmProblem:
         # back ``constraint_dual`` / named-row reads.  ``None`` until the first
         # cut is appended.
         self._first_cut_row: int | None = None
+        # Col ids of recourse variables appended via :meth:`add_recourse_col`
+        # (the Benders ``η`` columns).  A retained cut ``η_r − Σ slope·f >= rhs``
+        # names its recourse variable as the single member of
+        # ``col_ids ∩ _recourse_cols``; :meth:`compact_cuts` groups cuts by that
+        # member for the dominance policy.
+        self._recourse_cols: set[int] = set()
 
     @property
     def problem(self) -> Problem:
@@ -6591,41 +6597,69 @@ class WarmProblem:
         if self._col_names is not None:
             self._col_names.append(name)
         self._h.passColName(col_id, name)
+        # Register as a recourse column so :meth:`compact_cuts` (dominance
+        # policy) can group retained cuts by the recourse variable they bound.
+        self._recourse_cols.add(col_id)
         return col_id
 
     # -- cut compaction (bound the growing master LP) -------------------
 
     def compact_cuts(
-        self, solution: Solution, *, tol_rel: float = 1e-7, verify: bool = True
+        self,
+        solution: Solution,
+        *,
+        policy: str = "slack",
+        trial_col_values=None,
+        tol_rel: float = 1e-7,
+        verify: bool = True,
     ) -> dict:
-        """Drop the retained cut rows that are strictly slack at ``solution``,
-        keeping the binding ones, to bound the active master LP.
+        """Prune retained cut rows to bound the active master LP.
 
         A cutting-plane master (the Benders master) grows one ``>=`` cut row
         per iteration via :meth:`add_cut_row`; left unpruned its warm
-        re-solve time grows super-linearly.  Removing a cut that is strictly
-        NON-binding (positive primal slack, hence zero dual by complementary
-        slackness) at the current optimum leaves the LP's optimum — and the
-        Benders lower bound it certifies — unchanged, so this is a
-        correctness-preserving compaction, NOT an approximation.
+        re-solve time grows super-linearly.  Two selection policies are
+        available, both LB-safe (they only drop cuts that do not support the
+        certified lower bound) and both belted by the same verify-restore
+        rollback:
 
-        Classification is purely by PRIMAL slack of the stored cut against
-        ``solution.col_value`` (no domain knowledge, no dual needed): for a
-        cut ``Σ coefs·x >= lower`` the slack is ``Σ coefs·x - lower >= 0``; a
-        cut with ``slack <= tol`` is BINDING (kept), one with ``slack > tol``
-        is strictly slack (dropped).  ``tol`` is a per-cut relative tolerance
-        scaled by the magnitude of ``lower`` and the terms, so it is robust to
-        the cut's units.
+        ``policy="slack"`` (default):
+            Drop the cut rows that are strictly slack (positive primal slack,
+            hence zero dual by complementary slackness) at ``solution``,
+            keeping the binding ones.  Classification is purely by PRIMAL
+            slack of the stored cut against ``solution.col_value``: for a cut
+            ``Σ coefs·x >= lower`` the slack is ``Σ coefs·x - lower >= 0``; a
+            cut with ``slack <= tol`` is BINDING (kept), one with
+            ``slack > tol`` is strictly slack (dropped).  ``tol`` is a per-cut
+            relative tolerance scaled by the magnitude of ``lower`` and the
+            terms.
 
-        When ``verify`` (default), after deleting the strictly-slack rows the
-        master is re-solved and its objective compared to the incumbent
-        ``solution.obj``.  A drift larger than :data:`_COMPACT_VERIFY_TOL`
-        (relative) means a "slack" cut was in fact supporting the optimum (a
-        degenerate numerical edge complementary slackness can't rule out at
-        finite tolerance) — the deletion is ROLLED BACK by re-appending every
-        dropped cut verbatim and re-solving, and the returned dict reports
-        ``restored=True`` with ``dropped=0``.  On a well-behaved master the
-        belt never fires.
+        ``policy="dominance"`` (de Matos–Philpott–Finardi / Guigues
+        Limited-Memory Level-1):
+            At a DEGENERATE optimum almost every cut can be primal-binding
+            (slack ≈ 0), so slack-deletion prunes nothing even though many
+            cuts are redundant TIES at their recourse group's max value.
+            Dominance selection instead groups the retained cuts by the
+            recourse variable they bound (the single member of
+            ``col_ids ∩ _recourse_cols``, registered by
+            :meth:`add_recourse_col`) and, over a WINDOW of recent master
+            trial points ``trial_col_values`` (a list of ``col_value`` arrays,
+            most-recent last; defaults to ``[solution.col_value]``), keeps for
+            each group at each trial point the OLDEST cut that achieves the
+            group's max value there (within a relative tolerance).  Every cut
+            not a keeper at any trial point is DROPPED — it is dominated (or a
+            redundant tie) at every trial point, so the outer approximation of
+            the recourse function at those points, and the LB it certifies,
+            is unchanged.  A cut whose ``col_ids`` contains no recourse column
+            forms its own singleton group and is always kept (generic
+            non-Benders use degrades safely to "keep all").
+
+        When ``verify`` (default), after deleting rows the master is re-solved
+        and its objective compared to the incumbent ``solution.obj``.  A drift
+        larger than :data:`_COMPACT_VERIFY_TOL` (relative) means a dropped cut
+        was in fact supporting the optimum (a degenerate numerical edge) — the
+        deletion is ROLLED BACK by re-appending every dropped cut verbatim and
+        re-solving, and the returned dict reports ``restored=True`` with
+        ``dropped=0``.  On a well-behaved master the belt never fires.
 
         Returns ``{"kept": int, "dropped": int, "restored": bool}`` — cut
         counts AFTER the operation (``kept`` == number of retained cut rows
@@ -6633,10 +6667,19 @@ class WarmProblem:
         the pre-compaction count and ``dropped`` is 0).
         """
         self._require_built()
-        x = solution.col_value
-        obj0 = float(solution.obj)
+        if policy == "slack":
+            drop_ids = self._classify_slack_drops(solution, tol_rel)
+        elif policy == "dominance":
+            drop_ids = self._classify_dominance_drops(solution, trial_col_values, tol_rel)
+        else:
+            raise ValueError(
+                f"compact_cuts: unknown policy {policy!r} (expected 'slack' or 'dominance')"
+            )
+        return self._apply_cut_drops(drop_ids, float(solution.obj), verify)
 
-        keep_ids: list[int] = []
+    def _classify_slack_drops(self, solution: Solution, tol_rel: float) -> list[int]:
+        """Return the cut row ids strictly slack at ``solution`` (slack policy)."""
+        x = solution.col_value
         drop_ids: list[int] = []
         for row_id, (col_ids, coefs, lower) in self._cut_rows.items():
             ax = 0.0
@@ -6647,20 +6690,116 @@ class WarmProblem:
                 abs_terms += abs(term)
             slack = ax - lower
             tol = tol_rel * max(1.0, abs(lower), abs_terms)
-            if slack <= tol:
-                keep_ids.append(row_id)  # binding — keep
-            else:
+            if slack > tol:
                 drop_ids.append(row_id)  # strictly slack — drop candidate
+        return drop_ids
 
+    def _classify_dominance_drops(
+        self, solution: Solution, trial_col_values, tol_rel: float
+    ) -> list[int]:
+        """Return the dominated cut row ids (dominance policy).
+
+        Groups the retained cuts by their recourse column ``η_r`` and, over the
+        window of trial points, keeps per group the oldest cut that imposes the
+        TIGHTEST lower bound on ``η_r`` at each trial point (the active /
+        dominant cut there); every other cut is dropped.
+
+        A Benders optimality cut ``η_r − Σ slope·f >= rhs`` is stored as
+        ``(col_ids, coefs, lower)`` with the recourse column carrying coef
+        ``+1`` and the ``f`` columns carrying ``−slope``; it constrains
+        ``η_r >= rhs + Σ slope·f``.  At a trial point ``x_t`` the lower bound
+        the cut imposes on ``η_r`` is therefore ::
+
+            d = rhs + Σ slope·f
+              = lower − Σ_{i ∈ non-recourse cols} coef_i · x_t[i]
+
+        (the recourse column's own ``+1·η_t`` term is EXCLUDED — it is common to
+        every cut in the group, so it cancels in the comparison and, more
+        importantly, must not be mixed in: including it would rank cuts by their
+        SLACK at ``x_t`` and keep the most-slack cut instead of the binding
+        one).  The dominant cut at ``x_t`` is the one with the greatest ``d``;
+        keeping it preserves ``η_r``'s active lower bound there, so the master
+        optimum — and the certified LB — is unchanged.  See :meth:`compact_cuts`.
+        """
+        # Assemble the trial-point window; always include the incumbent as the
+        # latest point (most-recent last).
+        if trial_col_values is None:
+            trials = [solution.col_value]
+        else:
+            trials = list(trial_col_values)
+            latest = solution.col_value
+            if not trials or trials[-1] is not latest:
+                trials.append(latest)
+        if not trials:
+            trials = [solution.col_value]
+
+        # Group retained cuts by their recourse column.  A cut with no recourse
+        # column is its own singleton group (keyed by a unique sentinel) so it
+        # is always kept (generic non-Benders use degrades safely to keep-all).
+        groups: dict[object, list[int]] = {}
+        for row_id, (col_ids, _coefs, _lower) in self._cut_rows.items():
+            recourse = [c for c in col_ids if c in self._recourse_cols]
+            if len(recourse) == 1:
+                key: object = recourse[0]
+            else:
+                # 0 (generic non-Benders) or >1 (ill-formed cut) → singleton.
+                key = ("__singleton__", row_id)
+            groups.setdefault(key, []).append(row_id)
+
+        keep_ids: set[int] = set()
+        for group_key, group_rows in groups.items():
+            # Sort by row id so "oldest" (smallest id) is deterministic.
+            group_rows.sort()
+            recourse_col = group_key if not isinstance(group_key, tuple) else None
+            for x in trials:
+                best_d = -math.inf
+                best_abs = 0.0
+                dvals: dict[int, float] = {}
+                for row_id in group_rows:
+                    col_ids, coefs, lower = self._cut_rows[row_id]
+                    # d = lower − Σ_{non-recourse cols} coef·x_t (the lower bound
+                    # this cut imposes on η_r at x_t); the recourse column's own
+                    # term is excluded so cuts are ranked by tightness, not slack.
+                    d = float(lower)
+                    a = abs(float(lower))
+                    for i, c in zip(col_ids, coefs):
+                        if i == recourse_col:
+                            continue
+                        term = c * float(x[i])
+                        d -= term
+                        a += abs(term)
+                    dvals[row_id] = d
+                    if d > best_d:
+                        best_d = d
+                    if a > best_abs:
+                        best_abs = a
+                tol = tol_rel * max(1.0, abs(best_d), best_abs)
+                # Oldest cut (smallest row id, group_rows is sorted) imposing the
+                # tightest bound within tol is the keeper at this trial point.
+                for row_id in group_rows:
+                    if dvals[row_id] >= best_d - tol:
+                        keep_ids.add(row_id)
+                        break
+
+        return [r for r in self._cut_rows if r not in keep_ids]
+
+    def _apply_cut_drops(self, drop_ids: list[int], obj0: float, verify: bool) -> dict:
+        """Delete ``drop_ids`` with the shared verify-restore belt.
+
+        Common tail for both selection policies: snapshot the dropped defs,
+        delete the rows, re-solve, and roll back (re-append every dropped cut
+        verbatim) if the objective drifts past :data:`_COMPACT_VERIFY_TOL`.
+        """
+        n_total = len(self._cut_rows)
         if not drop_ids:
-            # Nothing strictly slack → no-op (leave the LP untouched).
-            return {"kept": len(self._cut_rows), "dropped": 0, "restored": False}
+            # Nothing to drop → no-op (leave the LP untouched).
+            return {"kept": n_total, "dropped": 0, "restored": False}
 
         # Snapshot the dropped cut defs BEFORE mutating, so the verify-restore
         # belt can re-add them verbatim if the deletion moved the optimum.
         dropped_defs = [self._cut_rows[r] for r in drop_ids]
-        kept_before = len(keep_ids)
         dropped_count = len(drop_ids)
+        kept_before = n_total - dropped_count
 
         self._delete_cut_rows(drop_ids)
 
@@ -6668,7 +6807,7 @@ class WarmProblem:
             sol2 = self.solve()
             drift = abs(float(sol2.obj) - obj0) / max(1.0, abs(obj0))
             if drift > _COMPACT_VERIFY_TOL:
-                # Degenerate edge: a "slack" cut was actually supporting the
+                # Degenerate edge: a dropped cut was actually supporting the
                 # optimum.  Roll back — re-append every dropped cut verbatim
                 # and re-solve to restore the certified LP.
                 for col_ids, coefs, lower in dropped_defs:
