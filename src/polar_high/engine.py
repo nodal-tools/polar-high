@@ -6156,6 +6156,15 @@ class Solution:
 #     a future extension can add them on top of the same plumbing.
 
 
+# Relative tolerance for the :meth:`WarmProblem.compact_cuts` verify-restore
+# belt.  Dropping cuts that are strictly slack at the incumbent optimum is
+# LB-neutral by complementary slackness, so the re-solved objective must match
+# the pre-compaction objective to within this (generous) relative band; a
+# larger drift means a supposedly-slack cut was actually supporting (a
+# degenerate numerical edge) and the deletion is rolled back.
+_COMPACT_VERIFY_TOL: float = 1e-6
+
+
 class WarmProblem:
     """Warm-update wrapper around a :class:`Problem`.
 
@@ -6225,6 +6234,20 @@ class WarmProblem:
         # the handle is built the flag is applied immediately and this
         # remembers the last requested value.
         self._output_flag: bool | None = None
+        # -- retained cut rows (cutting-plane compaction) ------------------
+        # Every row appended via :meth:`add_cut_row` is retained here so
+        # :meth:`compact_cuts` can re-classify it against a solution and
+        # (if strictly slack) delete it, bounding the master LP.  Keyed by
+        # the LIVE HiGHS row id (remapped by :meth:`_delete_cut_rows` after a
+        # HiGHS row compaction).  Value = (col_ids, coefs, lower) — the exact
+        # arguments the cut was created with, so a dropped cut can be
+        # re-added verbatim by the verify-restore belt.
+        self._cut_rows: dict[int, tuple[list[int], list[float], float]] = {}
+        # LP row id of the FIRST appended cut row.  Build-time rows occupy
+        # ``[0, _first_cut_row)`` and are NEVER tracked here or deleted — they
+        # back ``constraint_dual`` / named-row reads.  ``None`` until the first
+        # cut is appended.
+        self._first_cut_row: int | None = None
 
     @property
     def problem(self) -> Problem:
@@ -6533,6 +6556,11 @@ class WarmProblem:
         # Mirror the cached name into the live HiGHS model so MPS/name
         # readers (Solution.highs consumers) see the appended row too.
         self._h.passRowName(row_id, name)
+        # Retain the cut so :meth:`compact_cuts` can classify + drop it later.
+        # The first appended cut fixes the build-time / cut row boundary.
+        if self._first_cut_row is None:
+            self._first_cut_row = row_id
+        self._cut_rows[row_id] = (list(col_ids), list(coefs), float(lower))
         return row_id
 
     def add_recourse_col(
@@ -6564,6 +6592,151 @@ class WarmProblem:
             self._col_names.append(name)
         self._h.passColName(col_id, name)
         return col_id
+
+    # -- cut compaction (bound the growing master LP) -------------------
+
+    def compact_cuts(
+        self, solution: Solution, *, tol_rel: float = 1e-7, verify: bool = True
+    ) -> dict:
+        """Drop the retained cut rows that are strictly slack at ``solution``,
+        keeping the binding ones, to bound the active master LP.
+
+        A cutting-plane master (the Benders master) grows one ``>=`` cut row
+        per iteration via :meth:`add_cut_row`; left unpruned its warm
+        re-solve time grows super-linearly.  Removing a cut that is strictly
+        NON-binding (positive primal slack, hence zero dual by complementary
+        slackness) at the current optimum leaves the LP's optimum — and the
+        Benders lower bound it certifies — unchanged, so this is a
+        correctness-preserving compaction, NOT an approximation.
+
+        Classification is purely by PRIMAL slack of the stored cut against
+        ``solution.col_value`` (no domain knowledge, no dual needed): for a
+        cut ``Σ coefs·x >= lower`` the slack is ``Σ coefs·x - lower >= 0``; a
+        cut with ``slack <= tol`` is BINDING (kept), one with ``slack > tol``
+        is strictly slack (dropped).  ``tol`` is a per-cut relative tolerance
+        scaled by the magnitude of ``lower`` and the terms, so it is robust to
+        the cut's units.
+
+        When ``verify`` (default), after deleting the strictly-slack rows the
+        master is re-solved and its objective compared to the incumbent
+        ``solution.obj``.  A drift larger than :data:`_COMPACT_VERIFY_TOL`
+        (relative) means a "slack" cut was in fact supporting the optimum (a
+        degenerate numerical edge complementary slackness can't rule out at
+        finite tolerance) — the deletion is ROLLED BACK by re-appending every
+        dropped cut verbatim and re-solving, and the returned dict reports
+        ``restored=True`` with ``dropped=0``.  On a well-behaved master the
+        belt never fires.
+
+        Returns ``{"kept": int, "dropped": int, "restored": bool}`` — cut
+        counts AFTER the operation (``kept`` == number of retained cut rows
+        that remain, ``dropped`` == number removed; on a restore ``kept`` is
+        the pre-compaction count and ``dropped`` is 0).
+        """
+        self._require_built()
+        x = solution.col_value
+        obj0 = float(solution.obj)
+
+        keep_ids: list[int] = []
+        drop_ids: list[int] = []
+        for row_id, (col_ids, coefs, lower) in self._cut_rows.items():
+            ax = 0.0
+            abs_terms = 0.0
+            for i, c in zip(col_ids, coefs):
+                term = c * float(x[i])
+                ax += term
+                abs_terms += abs(term)
+            slack = ax - lower
+            tol = tol_rel * max(1.0, abs(lower), abs_terms)
+            if slack <= tol:
+                keep_ids.append(row_id)  # binding — keep
+            else:
+                drop_ids.append(row_id)  # strictly slack — drop candidate
+
+        if not drop_ids:
+            # Nothing strictly slack → no-op (leave the LP untouched).
+            return {"kept": len(self._cut_rows), "dropped": 0, "restored": False}
+
+        # Snapshot the dropped cut defs BEFORE mutating, so the verify-restore
+        # belt can re-add them verbatim if the deletion moved the optimum.
+        dropped_defs = [self._cut_rows[r] for r in drop_ids]
+        kept_before = len(keep_ids)
+        dropped_count = len(drop_ids)
+
+        self._delete_cut_rows(drop_ids)
+
+        if verify:
+            sol2 = self.solve()
+            drift = abs(float(sol2.obj) - obj0) / max(1.0, abs(obj0))
+            if drift > _COMPACT_VERIFY_TOL:
+                # Degenerate edge: a "slack" cut was actually supporting the
+                # optimum.  Roll back — re-append every dropped cut verbatim
+                # and re-solve to restore the certified LP.
+                for col_ids, coefs, lower in dropped_defs:
+                    self.add_cut_row(col_ids, coefs, lower)
+                self.solve()
+                return {
+                    "kept": kept_before + dropped_count,
+                    "dropped": 0,
+                    "restored": True,
+                }
+
+        return {"kept": kept_before, "dropped": dropped_count, "restored": False}
+
+    def _delete_cut_rows(self, row_ids) -> None:
+        """Delete the given cut rows from the live LP and repair bookkeeping.
+
+        Deletes ONLY appended cut rows (ids ``>= _first_cut_row``).  HiGHS
+        compacts the remaining rows down after a ``deleteRows``, so every
+        surviving row id above a deleted one shifts down by the count of
+        deleted ids below it; this method remaps ``_cut_rows`` keys and
+        rebuilds ``_row_names`` accordingly, and decrements ``_n_rows``.
+        Build-time rows (``[0, _first_cut_row)``) are guaranteed untouched
+        because every deleted id is ``>= _first_cut_row``, so their positions
+        — and hence ``constraint_dual`` / named-row reads — are preserved.
+        """
+        ids = sorted({int(r) for r in row_ids})
+        if not ids:
+            return
+        # Guard: never delete a build-time row (would corrupt named-row /
+        # constraint_dual reads and the fixed-size autoscale side vectors).
+        assert self._first_cut_row is not None and ids[0] >= self._first_cut_row, (
+            f"_delete_cut_rows: refusing to delete build-time row(s); "
+            f"ids={ids}, first_cut_row={self._first_cut_row}"
+        )
+        # Guard: row deletion invalidates the absolute row-index arrays that
+        # back tracked mutable Params.  The Benders master has none; this only
+        # fires on misuse of the primitive on a param-tracked WarmProblem.
+        if self._mutable_params or self._param_cells:
+            raise RuntimeError(
+                "_delete_cut_rows: cannot delete rows on a WarmProblem with "
+                "tracked mutable Params (_mutable_params / _param_cells "
+                "non-empty) — the stored absolute row indices would be "
+                "corrupted by the HiGHS row compaction."
+            )
+        self._require_built()
+        # deleteRows(num, indices_i32) — verified against the highspy binding.
+        self._h.deleteRows(len(ids), np.asarray(ids, dtype=np.int32))
+        self._n_rows -= len(ids)
+
+        drop_set = set(ids)
+        # Rebuild _row_names index-aligned to the surviving rows (drop the
+        # deleted positions, preserve order).
+        if self._row_names is not None:
+            self._row_names = [nm for i, nm in enumerate(self._row_names) if i not in drop_set]
+
+        # Remap _cut_rows: HiGHS compacts, so a surviving row at old id ``r``
+        # moves to ``r - (#deleted ids < r)``.  Build-time ids (< first_cut)
+        # are unaffected since every deleted id is >= first_cut.
+        def _shift(r: int) -> int:
+            return r - sum(1 for d in ids if d < r)
+
+        self._cut_rows = {
+            _shift(r): defn for r, defn in self._cut_rows.items() if r not in drop_set
+        }
+        # The first-cut boundary is a build-time position and is <= every
+        # surviving cut id after the shift; it does not move (deletions are
+        # all >= it, and _shift on it would subtract 0).  Leave it as-is; if
+        # no cuts remain it still correctly marks where cuts begin.
 
     # -- Param-tracked auto-update --------------------------------------
 
