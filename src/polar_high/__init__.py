@@ -27,6 +27,7 @@ from polar_high.decomposition import (
     InOutStabilizer,
     StallMonitor,
     StallVerdict,
+    TrustRegionStabilizer,
 )
 from polar_high.engine import (
     CstrRecord,
@@ -81,6 +82,7 @@ __all__ = [
     "InOutStabilizer",
     "StallMonitor",
     "StallVerdict",
+    "TrustRegionStabilizer",
     "prewarm_global_scheduler",
     "resolve_worker_count",
     "solve_indexed_parallel",

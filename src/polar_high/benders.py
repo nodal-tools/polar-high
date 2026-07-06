@@ -59,6 +59,24 @@ option, so at the defaults the loop is byte-identical to plain exact Benders:
   register/forced-out-step logic, and the incumbent point overlays each
   subproblem's ``f_sep`` onto ONLY the master columns it owns (ownership =
   its :class:`SubproblemResult.slopes` key set).
+* **Trust-region stabilization** (``trust_region_radius`` set; Ruszczyński
+  1986; Göke et al. 2023) — MUTUALLY EXCLUSIVE with in-out.  A single
+  :class:`~polar_high.decomposition.TrustRegionStabilizer` bounds the master
+  COUPLING STEP directly: each iteration the master is re-solved with its
+  coupling columns BOXED to ``[x̄ − Δ, x̄ + Δ]`` about the incumbent centre
+  ``x̄`` (via the master adapter's OPTIONAL ``apply_coupling_box`` /
+  ``clear_coupling_box``), and the subproblems are queried at that ONE boxed
+  iterate.  Because the master's own primal and the subproblem queries then
+  coincide at a single feasible point, the L-shaped upper bound is valid BY
+  CONSTRUCTION (no separation-point re-evaluation): the boxed iterate is the
+  master's own vertex, so ``native_cost(boxed_iterate)`` is the master native
+  cost AT the query point even for a flow-dependent master.  A standard
+  ratio test (serious/null step) then moves the centre and expands / shrinks
+  Δ.  The LB keeps coming from the UNBOXED master solve (the box only shapes
+  the query/UB iterate, never the bound), so every bound self-check stays
+  valid verbatim.  Where in-out DAMPS an over-proposal (a fixed fraction of a
+  huge master proposal is still huge), the box CAPS it — the missing
+  ingredient for a master whose relaxation can propose wild coupling points.
 * **Stall guard** (:class:`~polar_high.decomposition.StallMonitor`): fed
   ``(LB, best_UB)`` each iteration; its reference scale is the sum of the
   absolute bootstrap subproblem costs plus ``|extra_reference_cost()|``
@@ -83,7 +101,7 @@ from typing import Protocol
 
 import numpy as np
 
-from polar_high.decomposition import InOutStabilizer, StallMonitor
+from polar_high.decomposition import InOutStabilizer, StallMonitor, TrustRegionStabilizer
 from polar_high.engine import Solution, WarmProblem
 from polar_high.parallel import resolve_worker_count, solve_indexed_parallel
 
@@ -390,6 +408,29 @@ class BendersMaster(Protocol):
         """Set the lower bound of every not-yet-relaxed recourse column."""
         ...
 
+    def apply_coupling_box(self, center: dict[int, float], radius: float) -> None:
+        """OPTIONAL member — temporarily BOX the coupling columns to
+        ``[center − radius, center + radius]``, INTERSECTED with each column's
+        original bounds (so the box never *widens* the feasible set).
+
+        Used by the trust-region stabilizer (``trust_region_radius`` set): the
+        coordinator calls this before the boxed ``solve`` and
+        :meth:`clear_coupling_box` after reading the iterate.  Implementations
+        MUST save the columns' pre-box bounds so :meth:`clear_coupling_box`
+        restores them exactly (a save/restore-safe pair, e.g. via
+        ``get_col_bounds`` / ``set_col_bounds``).  A master lacking the pair is
+        rejected at loop setup when the trust region is selected (so a
+        misconfiguration surfaces loudly), and is untouched otherwise."""
+        ...
+
+    def clear_coupling_box(self) -> None:
+        """OPTIONAL member — restore the coupling columns' pre-box bounds saved
+        by the most recent :meth:`apply_coupling_box` (the save/restore
+        counterpart).  Called by the coordinator after the boxed master solve,
+        including on the error path (so a failed boxed solve never leaves the
+        master boxed)."""
+        ...
+
     def compact_cuts(self, sol: Solution, *, policy: str, trial_col_values: list) -> dict:
         """OPTIONAL member — periodic cut-pool compaction (see
         :meth:`polar_high.engine.WarmProblem.compact_cuts`).  Called only
@@ -423,8 +464,29 @@ class BendersLoopOptions:
     tol: float
     #: In-out separation weight λ on the stable interior centre
     #: (``f_sep = λ·centre + (1−λ)·f_out``); ``0.0`` = exact Benders
-    #: (byte-identical off path).  Must be in ``[0, 1)``.
+    #: (byte-identical off path).  Must be in ``[0, 1)``.  MUTUALLY EXCLUSIVE
+    #: with ``trust_region_radius`` (in-out stabilizes the oracle query, the
+    #: trust region stabilizes the master primal — selecting both is rejected).
     in_out_weight: float = 0.0
+    #: Trust-region box half-width Δ₀ in units of ``trust_region_scale``
+    #: (``Δ₀ = trust_region_radius · trust_region_scale``); ``None`` = OFF
+    #: (byte-identical to the pre-trust-region loop).  When set (``> 0``) the
+    #: master is re-solved with its coupling columns BOXED about the incumbent
+    #: centre each iteration and the subproblems are queried at that boxed
+    #: iterate (see the module docstring).  Requires the master adapter to
+    #: implement ``apply_coupling_box`` / ``clear_coupling_box``.  Must be
+    #: ``> 0`` when set.
+    trust_region_radius: float | None = None
+    #: Coupling-variable scale for the trust-region radius (``Δ₀ =
+    #: trust_region_radius · trust_region_scale``), so Δ₀ is expressed relative
+    #: to the coupling variables' own magnitude rather than a hardcoded
+    #: absolute.  Must be ``> 0``.
+    trust_region_scale: float = 1.0
+    #: Trust-region radius EXPANSION factor on a very-successful serious step.
+    #: Must be ``> 1``.
+    trust_region_expand: float = 2.0
+    #: Trust-region radius SHRINK factor on a null step.  Must be in ``(0, 1)``.
+    trust_region_shrink: float = 0.5
     #: Worker-thread count for the subproblem pass; ``None`` auto-resolves
     #: (see :func:`polar_high.parallel.resolve_worker_count`).
     workers: int | None = None
@@ -596,6 +658,51 @@ def _check_cuts_satisfied(
             violation,
             row_scale,
         )
+
+
+# ---------------------------------------------------------------------------
+# Unified upper bound (the L-shaped feasible-point rule, one code path).
+# ---------------------------------------------------------------------------
+
+
+def _upper_bound(
+    master: BendersMaster,
+    sub_costs: dict[str, float],
+    *,
+    msol: Solution,
+    recourse: dict[str, float],
+    query_point: dict[int, float],
+    native_at_query: bool,
+) -> float:
+    """The whole two-stage objective at the ONE point where the subproblems
+    were queried — the single L-shaped upper bound path (Van Slyke & Wets
+    1969).
+
+    For a master-feasible query point ``x̄`` the bound is ``c(x̄) + Σ_r
+    Q_r(x̄)`` with the first-stage cost ``c`` and every recourse ``Q_r``
+    evaluated at the SAME ``x̄``.  ``Σ_r Q_r(x̄) = Σ sub_costs`` is always the
+    recourse at the query point; ``native_at_query`` selects how ``c(x̄)`` is
+    read:
+
+    * ``False`` — the FAST path ``native_cost(msol, recourse)``, valid when the
+      master's OWN primal already sits at the query point (λ=0 exact Benders;
+      the trust-region boxed iterate, whose master vertex IS the query point)
+      OR the master's native cost is flow-INDEPENDENT (so its value at ``x̄``
+      equals its value at ``msol``).  This reproduces the pre-unification UB
+      arithmetic bit-for-bit — ``native_cost(msol, recourse) + Σ sub_costs``.
+    * ``True`` — ``native_cost_at(query_point)``, the master native cost
+      RE-EVALUATED at ``x̄`` for a flow-DEPENDENT master queried AWAY from its
+      own vertex (in-out ON: the master primal sits at the outer vertex while
+      the subproblems were solved at the interior overlay ``x̄``).
+
+    ``query_point`` is consulted only on the ``native_at_query=True`` path
+    (the fast path reads the master's own vertex directly), so the fast path
+    is byte-identical regardless of what ``query_point`` carries.
+    """
+    sub_total = sum(sub_costs.values())
+    if native_at_query:
+        return master.native_cost_at(query_point) + sub_total
+    return master.native_cost(msol, recourse) + sub_total
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +925,29 @@ def solve_benders_loop(
             f"got {options.in_out_weight!r} (>= 1 never queries the master ⇒ "
             "non-convergent; < 0 is meaningless)"
         )
+    tr_on = options.trust_region_radius is not None
+    if tr_on and not (options.trust_region_radius > 0.0):
+        raise ValueError(
+            "solve_benders_loop: trust_region_radius must be > 0 when set (None "
+            f"= off): got {options.trust_region_radius!r}"
+        )
+    if tr_on and options.in_out_weight > 0.0:
+        raise ValueError(
+            "solve_benders_loop: in-out (in_out_weight > 0) and the trust region "
+            "(trust_region_radius set) are MUTUALLY EXCLUSIVE stabilizers — "
+            "select at most one "
+            f"(got in_out_weight={options.in_out_weight!r}, "
+            f"trust_region_radius={options.trust_region_radius!r})"
+        )
+    if tr_on and not (
+        callable(getattr(master, "apply_coupling_box", None))
+        and callable(getattr(master, "clear_coupling_box", None))
+    ):
+        raise ValueError(
+            "solve_benders_loop: trust_region_radius is set but the master "
+            "adapter does not implement apply_coupling_box / clear_coupling_box "
+            "(the coupling-box primitives the trust region needs)"
+        )
     if not subproblems:
         raise ValueError("solve_benders_loop: no subproblems — nothing to decompose")
     names = [s.name for s in subproblems]
@@ -940,6 +1070,28 @@ def solve_benders_loop(
             stab = InOutStabilizer(weight=in_out_weight)
             stab.set_centre(initial_point)
             stabilizers[sub.name] = stab
+
+    # --- Trust-region stabilization (Ruszczyński 1986; Göke et al. 2023) —
+    # MUTUALLY EXCLUSIVE with in-out (validated above).  A single stabilizer
+    # boxes the master coupling point about the incumbent centre; the centre is
+    # seeded with the caller's ``initial_point`` (the natural no-coupling
+    # point), its objective established lazily by the first boxed iterate.
+    # When ``trust_region_radius`` is None every trust-region block below is
+    # skipped and the loop is byte-identical to the pre-trust-region path.
+    trust: TrustRegionStabilizer | None = None
+    if tr_on:
+        trust = TrustRegionStabilizer(
+            radius=float(options.trust_region_radius),
+            scale=options.trust_region_scale,
+            expand=options.trust_region_expand,
+            shrink=options.trust_region_shrink,
+        )
+        trust.set_centre(initial_point)
+        _logger.info(
+            "benders: trust-region stabilization ON (Δ₀=%.3g) over %d subproblem(s)",
+            trust.radius,
+            len(subproblems),
+        )
 
     # ``pending_cuts`` are the cuts for the subproblems solved at the CURRENT
     # point; they are appended at the top of each iteration before the master
@@ -1072,6 +1224,36 @@ def solve_benders_loop(
         point = new_point
         cur_iter[0] = iterations  # label this pass's subproblem-finish events
 
+        # --- TRUST REGION: box the master coupling columns about the incumbent
+        # centre and RE-SOLVE for the stabilized iterate.  The UNBOXED ``msol``
+        # above already supplied the (valid, unstabilized) lower bound and its
+        # bound self-checks; the box shapes ONLY the point where the
+        # subproblems are queried and the UB is scored, so no bound check is
+        # disturbed (the LB path stays byte-identical to the off path).  The
+        # subproblems are pinned at this ONE boxed iterate (in-out is OFF under
+        # the trust region — the two are mutually exclusive), and because the
+        # boxed master's OWN primal sits AT the iterate, the whole-objective UB
+        # scored there is a genuine single feasible point ⇒ valid BY
+        # CONSTRUCTION, with no ``native_cost_at`` re-solve (Göke et al. 2023,
+        # Alg. 2).  With the trust region OFF ``tr_iterate_point`` aliases
+        # ``point`` and every trust-region block is skipped ⇒ byte-identical.
+        tr_iterate_point = point
+        tr_msol = msol
+        tr_recourse = recourse_by_sub
+        if tr_on:
+            assert trust is not None  # tr_on ⇒ constructed above
+            tr_centre, tr_radius = trust.box()
+            master.apply_coupling_box(tr_centre, tr_radius)
+            try:
+                tr_msol = master.solve()
+            finally:
+                master.clear_coupling_box()
+            tr_iterate_point, tr_recourse = master.read_point(tr_msol)
+            # The boxed iterate is a master vertex within solver tolerance —
+            # project it onto the feasible set exactly as the unboxed vertex is
+            # (a gross violation hard-fails inside the adapter).
+            master.project_point(tr_iterate_point, tr_msol, hard_fail=True)
+
         # --- IN-OUT SEPARATION.  With ``λ>0`` each subproblem is solved at
         # its OWN interior separation point ``f_sep = λ·centre + (1−λ)·f_out``
         # (a per-subproblem dict, since a shared master column may carry
@@ -1111,10 +1293,12 @@ def solve_benders_loop(
         # ``next_cuts``.
         slopes_by_sub: dict[str, dict[int, float]] = {}
         t_subs = time.perf_counter()
-        sub_results = _solve_subs(_sub_pin if in_out_on else point)
+        # Non-in-out pin = the boxed trust-region iterate (which aliases
+        # ``point`` when the trust region is OFF ⇒ byte-identical).
+        sub_results = _solve_subs(_sub_pin if in_out_on else tr_iterate_point)
         dt_subs = time.perf_counter() - t_subs
         for sub, res in zip(subproblems, sub_results):
-            gen_point = f_sep_by_sub[sub.name] if in_out_on else point
+            gen_point = f_sep_by_sub[sub.name] if in_out_on else tr_iterate_point
             slopes_by_sub[sub.name] = res.slopes
             sub_costs[sub.name] = res.cost
             next_cuts.append((sub.name, gen_point, res.cost, res.slopes))
@@ -1191,26 +1375,62 @@ def solve_benders_loop(
         # improvement.  The masterfuel master is small and early iterations
         # are cheap, so the direct solve is the correct, provably-safe
         # tradeoff.
+        #   * Under the TRUST REGION the subproblems were queried at the boxed
+        #     iterate ``tr_iterate_point``, and the boxed master's OWN primal
+        #     ``tr_msol`` sits AT that iterate — so ``native_cost(tr_msol)`` is
+        #     already the master native cost at the query point (the FAST path,
+        #     no ``native_cost_at`` re-solve) and the UB is valid BY
+        #     CONSTRUCTION even for a flow-dependent master.
+        #
+        # All three cases route through the ONE helper below, parametrized by
+        # the query point and which native-cost read is valid there.
         native_cost_flow_dependent = getattr(master, "native_cost_flow_dependent", False)
-        if in_out_on and native_cost_flow_dependent:
-            ub = master.native_cost_at(overlay_point) + sum(sub_costs.values())
+        if tr_on:
+            ub = _upper_bound(
+                master,
+                sub_costs,
+                msol=tr_msol,
+                recourse=tr_recourse,
+                query_point=tr_iterate_point,
+                native_at_query=False,
+            )
+        elif in_out_on and native_cost_flow_dependent:
+            ub = _upper_bound(
+                master,
+                sub_costs,
+                msol=msol,
+                recourse=recourse_by_sub,
+                query_point=overlay_point,
+                native_at_query=True,
+            )
         else:
-            ub = master.native_cost(msol, recourse_by_sub) + sum(sub_costs.values())
+            ub = _upper_bound(
+                master,
+                sub_costs,
+                msol=msol,
+                recourse=recourse_by_sub,
+                query_point=point,
+                native_at_query=False,
+            )
         improved = ub < best_ub
         if improved:
             best_ub = ub
             # The incumbent coupling point is the overlay point (in-out ON, a
             # fresh dict rebuilt every iteration so this stored reference is
-            # never mutated later) or a fresh copy of ``point`` (in-out OFF —
-            # ``point`` itself is reassigned next iteration, so copy it).
+            # never mutated later), the boxed iterate (trust region ON — a
+            # fresh dict from ``read_point`` this iteration, never reassigned),
+            # or a fresh copy of ``point`` (both off — ``point`` itself is
+            # reassigned next iteration, so copy it).
             if in_out_on:
                 incumbent_point = overlay_point
+            elif tr_on:
+                incumbent_point = tr_iterate_point
             else:
                 incumbent_point = dict(point)
             payload: object | None = None
             if on_incumbent is not None:
                 payload = on_incumbent(
-                    msol,
+                    tr_msol if tr_on else msol,
                     list(sub_results),
                     {
                         "iteration": iterations,
@@ -1349,6 +1569,22 @@ def solve_benders_loop(
                     incumbent_point=incumbent_for_register,
                     improved=improved,
                 )
+
+        # --- TRUST REGION: ratio test (serious/null step) over this
+        # iteration's boxed iterate.  ``ub`` is the TRUE whole-objective at the
+        # iterate (the UB there) and ``tr_msol.obj`` the boxed master's MODEL
+        # value at it; the stabilizer compares the predicted decrease
+        # (centre_obj − model) against the actual (centre_obj − ub) to accept
+        # the iterate as the new centre + expand Δ (serious) or hold the centre
+        # + shrink Δ (null).  On a null step the cut just recorded in
+        # ``next_cuts`` at the rejected iterate still refines the model.
+        if tr_on:
+            assert trust is not None
+            trust.update(
+                trial_point=tr_iterate_point,
+                trial_obj=ub,
+                model_obj=float(tr_msol.obj),
+            )
 
         pending_cuts = next_cuts
 

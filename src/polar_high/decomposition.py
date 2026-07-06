@@ -40,6 +40,7 @@ mutates the caller's problem — it only *reports*.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 
@@ -47,6 +48,7 @@ __all__ = [
     "InOutStabilizer",
     "StallMonitor",
     "StallVerdict",
+    "TrustRegionStabilizer",
 ]
 
 # Empirical defaults (validated on Benders spatial-decomposition traces up to
@@ -426,3 +428,290 @@ class InOutStabilizer:
         if self.out_step_every > 0 and self._since_out >= self.out_step_every:
             self._force_out = True
             self._since_out = 0
+
+
+# ---------------------------------------------------------------------------
+# Trust-region / boxstep stabilization (Ruszczyński 1986; Marsten-Hogan-
+# Blankenship 1975; Göke, Schmidt & Kendziorski 2023) — generic box trust
+# region on the master coupling point.
+# ---------------------------------------------------------------------------
+
+# A predicted decrease at or below this fraction of the (guarded) incumbent
+# magnitude is treated as ZERO: the cutting-plane model, minimized over the
+# box, offers no more improvement than the incumbent already has, so the box
+# is not shrunk (there is nothing to refine toward) — the loop's own LB/UB
+# sandwich, not the trust region, then certifies optimality. Keyed off the
+# incumbent magnitude (not an absolute) so it is scale-stable.
+_PREDICTED_ZERO_EPS = 1e-12
+
+
+class TrustRegionStabilizer:
+    """Generic box trust-region stabilizer for a Benders-style master.
+
+    Where :class:`InOutStabilizer` stabilizes the subproblem *oracle query*
+    (it interpolates toward a centre but leaves the master's own proposal
+    unbounded), a trust region stabilizes the master *primal*: it constrains
+    the master's coupling point to a box ``[x̄ − Δ, x̄ + Δ]`` (an ∞-norm
+    radius Δ about an incumbent centre ``x̄``) so the coupling STEP is bounded
+    directly, in variable space. That is the decisive difference for a master
+    whose cut model can propose wild points a loose relaxation permits: in-out
+    *damps* such a proposal toward the centre but a fixed fraction of a huge
+    proposal is still huge; the box *caps* it. It is also why the upper bound
+    is valid **by construction** — the master is solved WITH the box, so its
+    own primal and the subproblem queries share ONE feasible iterate; the
+    whole objective scored there is a genuine single-point L-shaped bound with
+    no separate re-evaluation (Göke et al. 2023, Algorithm 2, Step 5; the
+    coordinator's ``native_cost(boxed_iterate)`` fast path).
+
+    This class is domain-free. It manages only a centre point
+    (``{col_id -> value}``), a scalar radius, and the incumbent objective at
+    the centre; it has NO notion of flows, capacities or regions — the caller
+    intersects the box with the columns' original bounds (so the box never
+    *widens* the feasible set) and owns the solves.
+
+    Radius management is the standard trust-region ratio test (Ruszczyński
+    1986; Linderoth & Wright 2003; Göke et al. 2023). Each iteration the
+    caller solves the boxed master, evaluates the true objective at the
+    resulting iterate, and calls :meth:`update` with
+
+    * ``trial_obj``  — the TRUE whole-objective value at the boxed iterate
+      (the L-shaped UB there): ``c(iterate) + Σ_r Q_r(iterate)``;
+    * ``model_obj``  — the boxed master's optimal objective (the cutting-plane
+      MODEL value at the iterate), a lower estimate of ``trial_obj``.
+
+    The **predicted** decrease is ``f(x̄) − model_obj`` (what the model said
+    the step would buy) and the **actual** decrease is ``f(x̄) − trial_obj``
+    (what it truly bought). The ratio ``ρ = actual / predicted`` drives:
+
+    * **serious step** (``ρ ≥ accept_ratio``): the true objective improved
+      enough — accept the iterate as the new centre ``x̄`` and, when the step
+      was very successful (``ρ ≥ expand_ratio``), EXPAND the radius
+      (``Δ ← min(expand·Δ, max_radius)``) so the next step can reach further;
+    * **null step** (``ρ < accept_ratio``): the model over-promised — keep the
+      centre and SHRINK the radius (``Δ ← max(shrink·Δ, min_radius)``). The
+      subproblem solved at the (rejected) iterate still returns a cut, so the
+      model is refined even on a null step; over successive nulls the model
+      becomes accurate near the centre and a serious step resumes.
+
+    Because both ``model_obj`` and ``trial_obj`` are evaluated with the centre
+    inside the box, the model (a valid under-estimate of the true objective)
+    gives ``model_obj ≤ f(x̄)``, so the predicted decrease is ``≥ 0``; a
+    predicted decrease that has collapsed to ~0 means the model has nothing
+    more to offer over the box (near-optimal) — the centre is accepted if the
+    trial improved on it and the radius is held (the loop's LB/UB sandwich, not
+    the trust region, certifies optimality there).
+
+    Default radius policy (documented per CLAUDE-style rationale): Δ₀ is
+    ``radius · scale`` where ``scale`` is the caller's coupling-variable scale
+    (so the initial box is expressed relative to the variables' own magnitude,
+    never a hardcoded problem-specific number); ``expand = 2.0`` /
+    ``shrink = 0.5`` are the classical geometric factors (Ruszczyński 1986;
+    Linderoth & Wright 2003) and ``accept_ratio = 0.1`` / ``expand_ratio =
+    0.5`` the standard sufficient-decrease / very-successful thresholds (Göke
+    et al. 2023 use factors in this range). On a problem whose optimum has
+    near-zero coupling flows the centre barely moves and the trust region's
+    real job is to PREVENT early over-proposals, so an aggressive null-step
+    shrink from a moderate Δ₀ converges quickly.
+
+    Parameters
+    ----------
+    radius
+        Initial box half-width in units of ``scale`` (multiplied by ``scale``
+        to give Δ₀ in the coupling variables' own units). Must be ``> 0``.
+    scale
+        Coupling-variable scale (a caller-supplied "typical coupling
+        magnitude"); ``Δ₀ = radius · scale``. Must be ``> 0`` (``1.0`` leaves
+        ``radius`` as an absolute).
+    expand
+        Radius EXPANSION factor on a very-successful serious step. Must be
+        ``> 1``.
+    shrink
+        Radius SHRINK factor on a null step. Must be in ``(0, 1)``.
+    accept_ratio
+        Sufficient-decrease threshold ``κ``: a serious step needs
+        ``ρ ≥ accept_ratio``. Must be in ``[0, 1)``.
+    expand_ratio
+        Very-successful threshold: expand the radius when ``ρ ≥ expand_ratio``.
+        Must be in ``(accept_ratio, 1]``.
+    min_radius
+        Lower clamp for the shrinking radius (``≥ 0``; the geometric shrink
+        keeps Δ positive, so ``0.0`` is a safe default — the box never
+        degenerates to a hard fix under it). Must be ``≥ 0`` and ``≤ Δ₀``.
+    max_radius
+        Upper clamp for the expanding radius. Must be ``≥ Δ₀`` (``inf`` leaves
+        expansion uncapped).
+    """
+
+    def __init__(
+        self,
+        *,
+        radius: float,
+        scale: float = 1.0,
+        expand: float = 2.0,
+        shrink: float = 0.5,
+        accept_ratio: float = 0.1,
+        expand_ratio: float = 0.5,
+        min_radius: float = 0.0,
+        max_radius: float = math.inf,
+    ) -> None:
+        radius = float(radius)
+        if not (radius > 0.0):
+            raise ValueError(f"TrustRegionStabilizer radius must be > 0: got {radius!r}")
+        scale = float(scale)
+        if not (scale > 0.0):
+            raise ValueError(f"TrustRegionStabilizer scale must be > 0: got {scale!r}")
+        expand = float(expand)
+        if not (expand > 1.0):
+            raise ValueError(f"TrustRegionStabilizer expand must be > 1: got {expand!r}")
+        shrink = float(shrink)
+        if not (0.0 < shrink < 1.0):
+            raise ValueError(f"TrustRegionStabilizer shrink must be in (0, 1): got {shrink!r}")
+        accept_ratio = float(accept_ratio)
+        if not (0.0 <= accept_ratio < 1.0):
+            raise ValueError(
+                f"TrustRegionStabilizer accept_ratio must be in [0, 1): got {accept_ratio!r}"
+            )
+        expand_ratio = float(expand_ratio)
+        if not (accept_ratio < expand_ratio <= 1.0):
+            raise ValueError(
+                "TrustRegionStabilizer expand_ratio must be in (accept_ratio, 1]: "
+                f"got {expand_ratio!r} with accept_ratio {accept_ratio!r}"
+            )
+        radius0 = radius * scale
+        min_radius = float(min_radius)
+        if not (0.0 <= min_radius <= radius0):
+            raise ValueError(
+                "TrustRegionStabilizer min_radius must be in [0, radius·scale]: "
+                f"got {min_radius!r} with radius·scale {radius0!r}"
+            )
+        max_radius = float(max_radius)
+        if not (max_radius >= radius0):
+            raise ValueError(
+                "TrustRegionStabilizer max_radius must be >= radius·scale: "
+                f"got {max_radius!r} with radius·scale {radius0!r}"
+            )
+        self.expand = expand
+        self.shrink = shrink
+        self.accept_ratio = accept_ratio
+        self.expand_ratio = expand_ratio
+        self.min_radius = min_radius
+        self.max_radius = max_radius
+        #: Current box half-width Δ (in the coupling variables' own units).
+        self.radius = radius0
+        #: The last step taken (``"serious"`` | ``"null"`` | ``None`` before
+        #: the first :meth:`update`) — diagnostics only.
+        self.last_step: str | None = None
+        # The incumbent centre (a ``{col_id -> value}`` point) and the TRUE
+        # objective there. ``_centre_obj`` is ``inf`` until the first
+        # :meth:`update` seeds it from the first boxed iterate (the caller
+        # supplies only the centre POINT up front; the objective there needs a
+        # solve the caller has not done yet).
+        self._centre: dict[int, float] | None = None
+        self._centre_obj: float = math.inf
+
+    def set_centre(self, centre: dict[int, float], obj: float = math.inf) -> None:
+        """Seed / replace the incumbent centre (and optionally its objective).
+
+        The caller seeds the centre POINT before the first :meth:`box` (e.g.
+        FlexTool's autarky / no-coupling point). The centre objective is
+        normally left at its ``inf`` default and established lazily by the
+        first :meth:`update` (the first boxed iterate becomes the incumbent);
+        pass ``obj`` only when a genuine objective at ``centre`` is already
+        known. Copies the point so later caller mutation does not alias it.
+        """
+        self._centre = dict(centre)
+        self._centre_obj = float(obj)
+
+    @property
+    def centre(self) -> dict[int, float] | None:
+        """The current incumbent centre point (a copy), or ``None`` if unseeded."""
+        return dict(self._centre) if self._centre is not None else None
+
+    @property
+    def centre_obj(self) -> float:
+        """The true objective at the current centre (``inf`` until seeded)."""
+        return self._centre_obj
+
+    def box(self) -> tuple[dict[int, float], float]:
+        """Return ``(centre, radius)`` — the box the caller intersects with
+        the coupling columns' original bounds before the boxed master solve.
+
+        The centre is a fresh copy (the caller may mutate its own view). The
+        radius is Δ in the coupling variables' own units. Raises if no centre
+        has been seeded (the caller must :meth:`set_centre` first)."""
+        if self._centre is None:
+            raise ValueError(
+                "TrustRegionStabilizer.box called before a centre was seeded "
+                "(call set_centre first)"
+            )
+        return dict(self._centre), self.radius
+
+    def update(
+        self,
+        *,
+        trial_point: dict[int, float],
+        trial_obj: float,
+        model_obj: float,
+    ) -> float:
+        """Record the boxed iterate's outcome; update the centre + radius via
+        the trust-region ratio test; return the NEW radius.
+
+        Parameters
+        ----------
+        trial_point
+            The boxed master iterate (``{col_id -> value}``) — the point the
+            subproblems were queried at.
+        trial_obj
+            The TRUE whole-objective value at ``trial_point`` (the L-shaped UB
+            there): ``c(trial) + Σ_r Q_r(trial)``.
+        model_obj
+            The boxed master's optimal objective at ``trial_point`` (the
+            cutting-plane MODEL value, a lower estimate of ``trial_obj``).
+
+        Returns
+        -------
+        float
+            The updated radius Δ (also stored on :attr:`radius`).
+        """
+        trial_obj = float(trial_obj)
+        model_obj = float(model_obj)
+
+        # First update: no incumbent objective yet — accept the first boxed
+        # iterate as the incumbent centre unconditionally (bootstrap), holding
+        # the radius (no ratio to test against).
+        if not math.isfinite(self._centre_obj):
+            self._centre = dict(trial_point)
+            self._centre_obj = trial_obj
+            self.last_step = "serious"
+            return self.radius
+
+        predicted = self._centre_obj - model_obj
+        actual = self._centre_obj - trial_obj
+
+        # Predicted decrease collapsed to ~0: the model, minimized over the
+        # box, is no better than the incumbent — nothing to refine toward, so
+        # do NOT shrink. Accept the iterate if it genuinely improved (a
+        # tie-or-better move keeps the incumbent current); hold the radius.
+        if predicted <= _PREDICTED_ZERO_EPS * max(1.0, abs(self._centre_obj)):
+            if actual > 0.0:
+                self._centre = dict(trial_point)
+                self._centre_obj = trial_obj
+            self.last_step = "serious"
+            return self.radius
+
+        ratio = actual / predicted
+        if ratio >= self.accept_ratio:
+            # Serious step: accept the iterate as the new centre; expand the
+            # radius on a very-successful step so the next step reaches further.
+            self._centre = dict(trial_point)
+            self._centre_obj = trial_obj
+            self.last_step = "serious"
+            if ratio >= self.expand_ratio:
+                self.radius = min(self.radius * self.expand, self.max_radius)
+        else:
+            # Null step: the model over-promised — hold the centre, shrink the
+            # radius (the cut just added at the rejected iterate refines the
+            # model for the next attempt).
+            self.last_step = "null"
+            self.radius = max(self.radius * self.shrink, self.min_radius)
+        return self.radius

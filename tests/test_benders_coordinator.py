@@ -53,9 +53,11 @@ from polar_high import (
     SubproblemHandle,
     SubproblemNotOptimal,
     SubproblemResult,
+    TrustRegionStabilizer,
     evaluate_at_point,
     solve_benders_loop,
 )
+from polar_high.benders import _upper_bound
 
 # ---------------------------------------------------------------------------
 # The real toy LP: master + subproblem adapters.
@@ -1577,3 +1579,513 @@ def test_flow_independent_ub_byte_identical_under_in_out() -> None:
     f1, f2 = master.f_col["sub1"], master.f_col["sub2"]
     assert result.incumbent_point[f1] == pytest.approx(4.5, abs=1e-7)
     assert result.incumbent_point[f2] == pytest.approx(0.0, abs=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Unified UB helper — the single L-shaped feasible-point code path.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingMaster:
+    """Records which native-cost read the UB helper takes (fast
+    ``native_cost`` vs ``native_cost_at``) and with what arguments."""
+
+    def __init__(self, *, native: float = 7.0, native_at: float = 70.0):
+        self._native = float(native)
+        self._native_at = float(native_at)
+        self.native_calls: list[tuple[object, dict]] = []
+        self.native_at_calls: list[dict] = []
+
+    def native_cost(self, sol, recourse):
+        self.native_calls.append((sol, dict(recourse)))
+        return self._native
+
+    def native_cost_at(self, point):
+        self.native_at_calls.append(dict(point))
+        return self._native_at
+
+
+def test_upper_bound_fast_path_is_native_cost_of_msol() -> None:
+    """The query==msol fast path returns EXACTLY ``native_cost(msol) + Σ`` —
+    the byte-identical arithmetic every λ=0 / flow-independent / trust-region
+    iterate uses — and never consults ``native_cost_at``."""
+    master = _RecordingMaster(native=7.0)
+    msol = _fake_solution(0.0)
+    ub = _upper_bound(
+        master,
+        {"a": 3.0, "b": 5.0},
+        msol=msol,
+        recourse={"a": 0.0, "b": 0.0},
+        query_point={0: 99.0},  # ignored on the fast path
+        native_at_query=False,
+    )
+    assert ub == pytest.approx(7.0 + 8.0, rel=0, abs=0)  # exact float sum
+    assert len(master.native_calls) == 1
+    assert master.native_calls[0][0] is msol
+    assert master.native_at_calls == []  # fast path never re-evaluates
+
+
+def test_upper_bound_at_point_path_uses_native_cost_at() -> None:
+    """The query≠msol path scores the master native cost at the query point via
+    ``native_cost_at`` (the flow-dependent-master in-out case)."""
+    master = _RecordingMaster(native_at=70.0)
+    ub = _upper_bound(
+        master,
+        {"a": 3.0, "b": 5.0},
+        msol=_fake_solution(0.0),
+        recourse={"a": 0.0, "b": 0.0},
+        query_point={0: 4.0, 1: 0.0},
+        native_at_query=True,
+    )
+    assert ub == pytest.approx(70.0 + 8.0, rel=0, abs=0)
+    assert master.native_at_calls == [{0: 4.0, 1: 0.0}]
+    assert master.native_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TrustRegionStabilizer unit behaviour (radius management + validation).
+# ---------------------------------------------------------------------------
+
+
+def test_trust_region_stabilizer_radius_scaling() -> None:
+    tr = TrustRegionStabilizer(radius=2.0, scale=5.0)
+    assert tr.radius == pytest.approx(10.0)  # Δ₀ = radius·scale
+    tr.set_centre({0: 0.0, 1: 0.0})
+    centre, radius = tr.box()
+    assert centre == {0: 0.0, 1: 0.0}
+    assert radius == pytest.approx(10.0)
+
+
+def test_trust_region_stabilizer_serious_null_and_expand() -> None:
+    tr = TrustRegionStabilizer(
+        radius=4.0, expand=2.0, shrink=0.5, accept_ratio=0.1, expand_ratio=0.5
+    )
+    tr.set_centre({0: 0.0})
+    # First update seeds the incumbent unconditionally (no ratio), holding Δ.
+    r = tr.update(trial_point={0: 3.0}, trial_obj=100.0, model_obj=10.0)
+    assert tr.last_step == "serious"
+    assert tr.centre == {0: 3.0}
+    assert tr.centre_obj == pytest.approx(100.0)
+    assert r == pytest.approx(4.0)  # seed does not expand
+    # Very-successful serious step (ratio = actual/predicted = 60/80 = 0.75 ≥
+    # expand_ratio) accepts the trial and EXPANDS Δ 4 -> 8.
+    r = tr.update(trial_point={0: 5.0}, trial_obj=40.0, model_obj=20.0)
+    assert tr.last_step == "serious"
+    assert tr.centre == {0: 5.0}
+    assert tr.centre_obj == pytest.approx(40.0)
+    assert r == pytest.approx(8.0)
+    # Null step (ratio = 2/38 ≈ 0.05 < accept_ratio): hold centre, SHRINK Δ 8
+    # -> 4.
+    r = tr.update(trial_point={0: 9.0}, trial_obj=38.0, model_obj=2.0)
+    assert tr.last_step == "null"
+    assert tr.centre == {0: 5.0}  # unchanged
+    assert tr.centre_obj == pytest.approx(40.0)
+    assert r == pytest.approx(4.0)
+
+
+def test_trust_region_stabilizer_predicted_zero_holds_radius() -> None:
+    """A collapsed predicted decrease (model already at the incumbent) accepts
+    an improving trial but does NOT shrink — the loop's LB/UB sandwich, not the
+    trust region, certifies optimality there."""
+    tr = TrustRegionStabilizer(radius=4.0)
+    tr.set_centre({0: 0.0}, obj=10.0)
+    r = tr.update(trial_point={0: 1.0}, trial_obj=9.0, model_obj=10.0)  # predicted 0
+    assert tr.last_step == "serious"
+    assert tr.centre == {0: 1.0}  # improving trial accepted
+    assert r == pytest.approx(4.0)  # radius held
+
+
+def test_trust_region_stabilizer_validation() -> None:
+    with pytest.raises(ValueError, match="radius must be > 0"):
+        TrustRegionStabilizer(radius=0.0)
+    with pytest.raises(ValueError, match="scale must be > 0"):
+        TrustRegionStabilizer(radius=1.0, scale=0.0)
+    with pytest.raises(ValueError, match="expand must be > 1"):
+        TrustRegionStabilizer(radius=1.0, expand=1.0)
+    with pytest.raises(ValueError, match="shrink must be in"):
+        TrustRegionStabilizer(radius=1.0, shrink=1.0)
+    with pytest.raises(ValueError, match="accept_ratio must be in"):
+        TrustRegionStabilizer(radius=1.0, accept_ratio=1.0)
+    with pytest.raises(ValueError, match="expand_ratio must be in"):
+        TrustRegionStabilizer(radius=1.0, accept_ratio=0.6, expand_ratio=0.5)
+    with pytest.raises(ValueError, match="min_radius must be in"):
+        TrustRegionStabilizer(radius=1.0, scale=1.0, min_radius=2.0)
+    with pytest.raises(ValueError, match="max_radius must be"):
+        TrustRegionStabilizer(radius=1.0, scale=1.0, max_radius=0.5)
+    tr = TrustRegionStabilizer(radius=1.0)
+    with pytest.raises(ValueError, match="before a centre was seeded"):
+        tr.box()
+
+
+# ---------------------------------------------------------------------------
+# Trust-region vs in-out on a flow-dependent master with a BLOW-UP recourse
+# (the masterfuel volume pathology in miniature).
+#
+# Region r has local demand d_loc it can serve with cheap local generation
+# (cost gamma_loc) OR with the imported coupling flow f; import beyond a
+# physical ceiling F_PHYS incurs a VOLL-scale penalty P.  So the recourse is a
+# convex BOWL:
+#   Q(f) = gamma_loc·(d_loc − f)   for f ∈ [0, d_loc]   (slope −gamma_loc)
+#        = 0                        for f ∈ [d_loc, F_PHYS]
+#        = P·(f − F_PHYS)           for f > F_PHYS        (slope +P, the blow-up)
+# The master ``min Σ b·f_r + Σ η_r`` (native cost b·f, flow-DEPENDENT) with a
+# loose big-M coupling bound F_BIG ≫ F_PHYS.  The bootstrap cut at f=0 has the
+# NEGATIVE slope −gamma_loc, so the master relaxation is pulled to propose
+# f = F_BIG — three decades into the blow-up region where Q ≈ 1e12.
+#
+# In-out only DAMPS that proposal (f_sep = (1−λ)·f_out is still ≫ F_PHYS), so
+# the incumbent stays stuck at a blown-up / suboptimal point; a box trust
+# region CAPS the step (f ∈ [centre ± Δ]), so it stays in the physical range
+# and converges to the known optimum.
+#
+# Optimum: per region min b·f + Q(f) → serve local demand by import (gamma_loc
+# > b), f* = d_loc, cost b·d_loc.  With b=1, d_loc=6: 6 per region, 12 total.
+# ---------------------------------------------------------------------------
+
+_BOWL_GAMMA_LOC = 3.0
+_BOWL_D_LOC = 6.0
+_BOWL_F_PHYS = 8.0
+_BOWL_PENALTY = 1.0e6
+_BOWL_F_BIG = 1.0e6
+_BOWL_OPTIMUM = 12.0
+
+
+class _BowlSub:
+    """Region recourse with the convex-bowl / blow-up value function Q(f)
+    above.  ``solve_at`` pins the coupling import f by raw col id and reads the
+    cut slope off its reduced cost."""
+
+    def __init__(self, name: str, master_f_col: int):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f_in = p.add_var("f_in", "i", idx, lower=0.0, upper=_BOWL_F_BIG)
+        g_loc = p.add_var("g_loc", "i", idx, lower=0.0)
+        f_used = p.add_var("f_used", "i", idx, lower=0.0)
+        h = p.add_var("h", "i", idx, lower=0.0)
+        # Serve local demand with local gen or the used import.
+        p.add_cstr(
+            "serve",
+            over=idx,
+            sense=">=",
+            lhs_terms={"g_loc": g_loc, "f_used": f_used},
+            rhs_terms={"d": _scalar_param(_BOWL_D_LOC)},
+        )
+        # Can only use up to the imported flow: f_in − f_used >= 0.
+        p.add_cstr(
+            "use_cap",
+            over=idx,
+            sense=">=",
+            lhs_terms={"f_in": f_in, "neg_used": f_used.to_expr() * -1.0},
+            rhs_terms={"zero": _scalar_param(0.0)},
+        )
+        # Blow-up penalty beyond the physical ceiling: h − f_in >= −F_PHYS.
+        p.add_cstr(
+            "overflow",
+            over=idx,
+            sense=">=",
+            lhs_terms={"h": h, "neg_f": f_in.to_expr() * -1.0},
+            rhs_terms={"neg_phys": _scalar_param(-_BOWL_F_PHYS)},
+        )
+        p.set_objective(
+            g_loc.to_expr() * _BOWL_GAMMA_LOC + h.to_expr() * _BOWL_PENALTY, sense="min"
+        )
+        self.name = name
+        self.warm = fp.WarmProblem(p)
+        self.warm.solve()  # sequential cold build (coordinator precondition)
+        self._local = int(self.warm.col_id_of_var("f_in", (0,)))
+        self._master_col = int(master_f_col)
+
+    def solve_at(self, point: dict[int, float]) -> SubproblemResult:
+        v = point[self._master_col]
+        self.warm.fix_col_ids(np.array([self._local]), np.array([v], dtype=np.float64))
+        sol = self.warm.solve(retry_on_unknown=True)
+        if not sol.optimal:
+            raise SubproblemNotOptimal(self.name)
+        slope = float(sol.col_dual[self._local])
+        return SubproblemResult(
+            cost=float(sol.obj),
+            slopes={self._master_col: slope},
+            payload={"sub": self.name},
+        )
+
+
+class _BowlMaster:
+    """Master ``min Σ b·f_r + Σ η_r`` over f_r ∈ [0, F_BIG] with a loose big-M
+    coupling bound.  Its native cost b·f DEPENDS on the coupling flow, and it
+    implements the trust-region coupling-box primitives (a save/restore-safe
+    intersection with the columns' original bounds — the shape FlexTool's
+    master adapter implements for the real partition)."""
+
+    def __init__(self, *, b: tuple[float, float] = (1.0, 1.0)):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f1 = p.add_var("f1", "i", idx, lower=0.0, upper=_BOWL_F_BIG)
+        f2 = p.add_var("f2", "i", idx, lower=0.0, upper=_BOWL_F_BIG)
+        eta1 = p.add_var("eta1", "i", idx, lower=_PROVISIONAL_FLOOR)
+        eta2 = p.add_var("eta2", "i", idx, lower=_PROVISIONAL_FLOOR)
+        p.set_objective(
+            f1.to_expr() * b[0] + f2.to_expr() * b[1] + eta1.to_expr() + eta2.to_expr(),
+            sense="min",
+        )
+        self.wp = fp.WarmProblem(p)
+        self.wp.solve()
+        self.f_col = {
+            "reg1": int(self.wp.col_id_of_var("f1", (0,))),
+            "reg2": int(self.wp.col_id_of_var("f2", (0,))),
+        }
+        self._eta_col = {
+            "reg1": int(self.wp.col_id_of_var("eta1", (0,))),
+            "reg2": int(self.wp.col_id_of_var("eta2", (0,))),
+        }
+        self._relaxed: set[str] = set()
+        self.floor_set: float | None = None
+        self.native_cost_flow_dependent = True
+        self.native_cost_at_calls = 0
+        self.box_calls = 0
+        self._box_saved: tuple[np.ndarray, np.ndarray] | None = None
+        self._box_cols: np.ndarray | None = None
+
+    # -- BendersMaster protocol -----------------------------------------
+
+    def solve(self) -> fp.Solution:
+        sol = self.wp.solve(retry_on_unknown=True)
+        if not sol.optimal:
+            raise RuntimeError("bowl master did not solve to optimality")
+        return sol
+
+    def read_point(self, sol: fp.Solution) -> tuple[dict[int, float], dict[str, float]]:
+        f = {c: float(sol.col_value[c]) for c in self.f_col.values()}
+        recourse = {name: float(sol.col_value[c]) for name, c in self._eta_col.items()}
+        return f, recourse
+
+    def native_cost(self, sol: fp.Solution, recourse: dict[str, float]) -> float:
+        return float(sol.obj) - sum(recourse.values())
+
+    def native_cost_at(self, point: dict[int, float]) -> float:
+        self.native_cost_at_calls += 1
+        cols = np.array(list(self.f_col.values()), dtype=np.int64)
+        lo, hi = self.wp.get_col_bounds(cols)
+        vals = np.array([float(point[int(c)]) for c in cols], dtype=np.float64)
+        self.wp.fix_col_ids(cols, vals)
+        try:
+            sol = self.wp.solve(retry_on_unknown=True)
+            if not sol.optimal:
+                raise RuntimeError("bowl native_cost_at solve not optimal")
+            eta = sum(float(sol.col_value[c]) for c in self._eta_col.values())
+            return float(sol.obj) - eta
+        finally:
+            self.wp.set_col_bounds(cols, lo, hi)
+
+    def project_point(
+        self, f: dict[int, float], sol: fp.Solution, *, hard_fail: bool = True
+    ) -> float:
+        max_slack = 0.0
+        for c, v in f.items():
+            slack = v - _BOWL_F_BIG
+            if slack > 0.0:
+                f[c] = _BOWL_F_BIG
+                max_slack = max(max_slack, slack)
+        return max_slack
+
+    def apply_coupling_box(self, center: dict[int, float], radius: float) -> None:
+        self.box_calls += 1
+        cols = np.array(list(self.f_col.values()), dtype=np.int64)
+        lo0, hi0 = self.wp.get_col_bounds(cols)
+        self._box_saved = (lo0, hi0)
+        self._box_cols = cols
+        new_lo = np.array(
+            [max(float(lo0[i]), float(center[int(c)]) - radius) for i, c in enumerate(cols)],
+            dtype=np.float64,
+        )
+        new_hi = np.array(
+            [min(float(hi0[i]), float(center[int(c)]) + radius) for i, c in enumerate(cols)],
+            dtype=np.float64,
+        )
+        self.wp.set_col_bounds(cols, new_lo, new_hi)
+
+    def clear_coupling_box(self) -> None:
+        if self._box_saved is None:
+            return
+        lo0, hi0 = self._box_saved
+        self.wp.set_col_bounds(self._box_cols, lo0, hi0)
+        self._box_saved = None
+        self._box_cols = None
+
+    def add_cut(self, sub_name, gen_point, cost, slopes) -> None:
+        col_ids = [self._eta_col[sub_name]]
+        coefs = [1.0]
+        rhs = cost
+        for fcol, g in slopes.items():
+            if g == 0.0:
+                continue
+            col_ids.append(int(fcol))
+            coefs.append(-float(g))
+            rhs -= g * gen_point[fcol]
+        self.wp.add_cut_row(col_ids, coefs, float(rhs))
+
+    def relax_recourse(self, sub_name: str) -> None:
+        if sub_name in self._relaxed:
+            return
+        col = np.array([self._eta_col[sub_name]], dtype=np.int64)
+        self.wp.set_col_bounds(col, np.array([-np.inf]), np.array([np.inf]))
+        self._relaxed.add(sub_name)
+
+    def set_recourse_floor(self, floor: float) -> None:
+        cols = np.array(
+            [c for n, c in self._eta_col.items() if n not in self._relaxed],
+            dtype=np.int64,
+        )
+        if cols.size:
+            self.wp.set_col_bounds(
+                cols, np.full(cols.size, float(floor)), np.full(cols.size, np.inf)
+            )
+        self.floor_set = float(floor)
+
+
+def _build_bowl():
+    master = _BowlMaster()
+    sub1 = _BowlSub("reg1", master.f_col["reg1"])
+    sub2 = _BowlSub("reg2", master.f_col["reg2"])
+    initial = {master.f_col["reg1"]: 0.0, master.f_col["reg2"]: 0.0}
+    return master, [sub1, sub2], initial
+
+
+def test_bowl_recourse_shape() -> None:
+    """Guard the blow-up recourse construction: Q decreases (slope −gamma_loc)
+    up to d_loc, is flat to F_PHYS, then explodes (slope +P)."""
+    _, subs, _ = _build_bowl()
+    col = subs[0]._master_col
+    r_lo = subs[0].solve_at({col: 2.0})  # below demand
+    assert r_lo.cost == pytest.approx(_BOWL_GAMMA_LOC * (_BOWL_D_LOC - 2.0), abs=1e-6)  # 12
+    assert r_lo.slopes[col] == pytest.approx(-_BOWL_GAMMA_LOC, abs=1e-6)
+    r_mid = subs[0].solve_at({col: 7.0})  # between demand and ceiling
+    assert r_mid.cost == pytest.approx(0.0, abs=1e-6)
+    r_hi = subs[0].solve_at({col: 100.0})  # deep in the blow-up region
+    assert r_hi.cost == pytest.approx(_BOWL_PENALTY * (100.0 - _BOWL_F_PHYS), rel=1e-9)
+    assert r_hi.slopes[col] == pytest.approx(_BOWL_PENALTY, rel=1e-9)
+
+
+def test_trust_region_converges_where_in_out_stalls() -> None:
+    """THE crux: on the blow-up-recourse instance a box trust region CONVERGES
+    to the known optimum in a handful of iterations with a valid sandwich,
+    because it BOUNDS the coupling step; in-out on the SAME instance (with the
+    consistent-point UB fix, so it runs cleanly) only DAMPS the step, so within
+    the budget the trust region needs its incumbent is still CATASTROPHICALLY
+    blown up (the volume pathology the box prevents), and it needs many more
+    iterations to crawl out.  This is the step-bounding difference the trust
+    region exists for (Göke et al. 2023 §C: trust-region caps the coupling
+    step; in-out damps but does not bound)."""
+    # --- Trust region: bounds the coupling step, converges fast to 12.
+    tr_master, tr_subs, tr_initial = _build_bowl()
+    tr_result = solve_benders_loop(
+        tr_master,
+        tr_subs,
+        options=BendersLoopOptions(
+            max_iters=40,
+            tol=1e-6,
+            workers=1,
+            trust_region_radius=4.0,
+        ),
+        initial_point=tr_initial,
+    )
+    assert tr_result.converged
+    assert tr_result.iterations <= 6  # a handful of iterations
+    assert tr_master.box_calls >= 1  # the coupling box was actually applied
+    # A genuine feasible-point UB never dips below the optimum, and it CLOSES.
+    assert tr_result.best_upper_bound >= _BOWL_OPTIMUM - 1e-4
+    assert tr_result.best_upper_bound == pytest.approx(_BOWL_OPTIMUM, abs=1e-3)
+    assert tr_result.lower_bound <= _BOWL_OPTIMUM + 1e-4
+    f1, f2 = tr_master.f_col["reg1"], tr_master.f_col["reg2"]
+    assert tr_result.incumbent_point[f1] == pytest.approx(_BOWL_D_LOC, abs=1e-2)
+    assert tr_result.incumbent_point[f2] == pytest.approx(_BOWL_D_LOC, abs=1e-2)
+    tr_iters = tr_result.iterations
+
+    # --- In-out on the SAME instance, given ONLY the budget the trust region
+    # needed: it damped but did not bound the step, so its incumbent is still
+    # orders of magnitude above the optimum (deep in the blow-up region).
+    io_master, io_subs, io_initial = _build_bowl()
+    io_budget = solve_benders_loop(
+        io_master,
+        io_subs,
+        options=BendersLoopOptions(
+            max_iters=max(tr_iters, 5), tol=1e-6, workers=1, in_out_weight=0.5
+        ),
+        initial_point=io_initial,
+    )
+    assert not io_budget.converged
+    # Still catastrophically blown up — the box would have capped this.
+    assert io_budget.best_upper_bound > 100.0 * _BOWL_OPTIMUM
+
+    # --- And with a generous budget in-out DOES eventually converge, but takes
+    # FAR more iterations than the trust region (it must crawl the damped step
+    # back down decade by decade).
+    io2_master, io2_subs, io2_initial = _build_bowl()
+    io_full = solve_benders_loop(
+        io2_master,
+        io2_subs,
+        options=BendersLoopOptions(max_iters=60, tol=1e-6, workers=1, in_out_weight=0.5),
+        initial_point=io2_initial,
+    )
+    assert io_full.converged
+    assert io_full.best_upper_bound == pytest.approx(_BOWL_OPTIMUM, abs=1e-2)
+    assert io_full.iterations >= tr_iters + 5  # far slower than the trust region
+
+
+def test_trust_region_off_is_byte_identical() -> None:
+    """With the trust region OFF the coordinator is byte-identical to before
+    this commit: the λ=0 toy trajectory literals hold verbatim (the UB
+    unification preserves the ``native_cost(msol)+Σ`` fast path exactly)."""
+    master, subs, initial = _build_toy()
+    trajectory: list[tuple] = []
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=20, tol=1e-9, workers=1),
+        initial_point=initial,
+        on_iteration=lambda info: trajectory.append(
+            (info["iter"], info["lower_bound"], info["best_upper_bound"], info["cut_rows"])
+        ),
+    )
+    assert result.converged and result.iterations == 2
+    assert trajectory[0] == (1, pytest.approx(4.0, rel=1e-12), pytest.approx(22.0, rel=1e-12), 2)
+    assert trajectory[1][1] == pytest.approx(16.0, rel=1e-12)
+    assert trajectory[1][2] == pytest.approx(16.0, rel=1e-12)
+    assert result.incumbent_point[master.f_col["sub1"]] == pytest.approx(4.0, rel=1e-12)
+
+
+def test_trust_region_and_in_out_mutually_exclusive() -> None:
+    master, subs, initial = _build_bowl()
+    with pytest.raises(ValueError, match="MUTUALLY EXCLUSIVE"):
+        solve_benders_loop(
+            master,
+            subs,
+            options=BendersLoopOptions(
+                max_iters=5, tol=1e-9, in_out_weight=0.5, trust_region_radius=4.0
+            ),
+            initial_point=initial,
+        )
+
+
+def test_trust_region_requires_coupling_box_primitives() -> None:
+    """A master WITHOUT apply_coupling_box / clear_coupling_box is rejected at
+    setup when the trust region is selected (a loud config error, not a silent
+    un-stabilized run)."""
+    master, subs, initial = _build_toy()  # _ToyMaster has no coupling box
+    with pytest.raises(ValueError, match="apply_coupling_box"):
+        solve_benders_loop(
+            master,
+            subs,
+            options=BendersLoopOptions(max_iters=5, tol=1e-9, trust_region_radius=4.0),
+            initial_point=initial,
+        )
+
+
+def test_trust_region_radius_must_be_positive() -> None:
+    master, subs, initial = _build_bowl()
+    with pytest.raises(ValueError, match="trust_region_radius must be > 0"):
+        solve_benders_loop(
+            master,
+            subs,
+            options=BendersLoopOptions(max_iters=5, tol=1e-9, trust_region_radius=0.0),
+            initial_point=initial,
+        )
