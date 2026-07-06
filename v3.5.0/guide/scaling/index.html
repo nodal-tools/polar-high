@@ -1,0 +1,1835 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Python library for building indexed linear and mixed-integer programs in polars.">
+      
+      
+      
+        <link rel="canonical" href="https://nodal-tools.github.io/polar-high/v3.5.0/guide/scaling/">
+      
+      
+        <link rel="prev" href="../solvers/">
+      
+      
+        <link rel="next" href="../warm-starting/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Scaling - polar-high</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#scaling-polar_highautoscale" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="polar-high" class="md-header__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            polar-high
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Scaling
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="polar-high" class="md-nav__button md-logo" aria-label="polar-high" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    polar-high
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nodal-tools/polar-high" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nodal-tools/polar-high
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/vars-and-params/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vars and Params
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/expressions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Expressions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/problem-and-solve/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Problem and Solve
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/duals-and-bases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duals and Bases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../loading-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Loading data
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../solvers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scaling
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-scaling-layers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The scaling layers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scalingmode-and-scalingconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ScalingMode and ScalingConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#detection-detect_ranges-and-rangereport" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Detection — detect_ranges and RangeReport
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recommendation-recommend_scaling-and-layer3plan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recommendation — recommend_scaling and Layer3Plan
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#apply-wiring-back-onto-the-problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Apply — wiring back onto the Problem
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-the-escape-branch-and-the-min-floor-guard-exist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the escape branch and the min-floor guard exist
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#migration-from-auto_user_bound_scaletrue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration from auto_user_bound_scale=True
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-not-to-use-autoscale" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When not to use autoscale
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warm-starting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warm-starting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decomposition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decomposition
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../env-vars/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compare
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Compare
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../compare/alternatives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Alternatives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../compare/benchmark/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    About
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/about/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    About
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-scaling-layers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The scaling layers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scalingmode-and-scalingconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ScalingMode and ScalingConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#detection-detect_ranges-and-rangereport" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Detection — detect_ranges and RangeReport
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recommendation-recommend_scaling-and-layer3plan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recommendation — recommend_scaling and Layer3Plan
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#apply-wiring-back-onto-the-problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Apply — wiring back onto the Problem
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-the-escape-branch-and-the-min-floor-guard-exist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the escape branch and the min-floor guard exist
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#migration-from-auto_user_bound_scaletrue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration from auto_user_bound_scale=True
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-not-to-use-autoscale" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When not to use autoscale
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="scaling-polar_highautoscale">Scaling — <code>polar_high.autoscale</code><a class="headerlink" href="#scaling-polar_highautoscale" title="Permanent link">&para;</a></h1>
+<p>LP coefficient ranges that span more than six decades make HiGHS' presolve unhappy. Most often it prints a hint like <em>"Consider setting the <code>user_bound_scale</code> option to -6"</em> and solves anyway. Only when a model is <em>badly</em> scaled — coefficients spanning eight or nine decades, with near-zero rows the presolve can mishandle — does it risk coming back falsely infeasible. The <code>polar_high.autoscale</code> package detects the four-range readout, recommends <code>user_bound_scale</code> and <code>user_objective_scale</code> exponents, and (optionally) writes them back onto the <code>Problem</code> for HiGHS to apply at solve time. It's worth reaching for when the automatic settings give you trouble — a scaling warning you can't shake, or a model that solves with presolve off but not on.</p>
+<p>If your LP's coefficients all sit within a few decades of 1.0, you don't need any of this — HiGHS' own <code>simplex_scale_strategy</code> handles it and polar-high changes nothing.</p>
+<h2 id="the-scaling-layers">The scaling layers<a class="headerlink" href="#the-scaling-layers" title="Permanent link">&para;</a></h2>
+<p>polar-high thinks about scaling in three layers, which compose rather than compete. HiGHS' own <code>simplex_scale_strategy</code> (matrix equilibration, Curtis–Reid) sits underneath all of them and is always available; the <code>autoscale</code> package layers on top of it:</p>
+<ul>
+<li><strong>Layer 1 — detection.</strong> Read the four coefficient ranges (matrix <code>A</code>, cost <code>c</code>, variable/row bounds, RHS) off the built LP and decide whether the spread warrants attention. No model changes. This is <code>detect_ranges</code>.</li>
+<li><strong>Layer 2 — semantic rewrites.</strong> Per-quantity column/row factors applied to the matrix <em>before</em> it reaches HiGHS — e.g. expressing power in GW instead of MW so a whole group of coefficients shifts by a known factor. This is domain knowledge the modeller has and the solver doesn't, so it lives in the orchestration layer (FlexTool implements it); the library proper does not, and <code>BASIC</code> mode skips it. When present, Layer 2 runs first and Layers 1/3 see the already-rewritten matrix.</li>
+<li><strong>Layer 3 — HiGHS-native global scaling.</strong> Recommend power-of-two <code>user_bound_scale</code> and <code>user_objective_scale</code> exponents that pull the worst bound/cost magnitudes into HiGHS' comfort zone, plus <code>simplex_scale_strategy</code> for the residual matrix spread. HiGHS applies these internally and unscales on output, so your <code>Solution</code> values come back in the original units. This is <code>recommend_scaling</code> + <code>apply_scaling</code>.</li>
+</ul>
+<p>The three are independent dials: you can run detection alone, hand-tune the Layer 2 units, let Layer 3 recommend the solver exponents, or any combination. The rest of this guide focuses on Layers 1 and 3, the part the library owns.</p>
+<h2 id="quick-example">Quick example<a class="headerlink" href="#quick-example" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">polar_high</span><span class="w"> </span><span class="kn">import</span> <span class="n">Problem</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">polar_high.autoscale</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">ScalingConfig</span><span class="p">,</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">ScalingMode</span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">apply_scaling</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">detect_ranges</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">recommend_scaling</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">)</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="n">p</span> <span class="o">=</span> <span class="n">Problem</span><span class="p">()</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="c1"># … add vars, params, objective, constraints …</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="n">config</span> <span class="o">=</span> <span class="n">ScalingConfig</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">ScalingMode</span><span class="o">.</span><span class="n">BASIC</span><span class="p">)</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="n">ranges</span> <span class="o">=</span> <span class="n">detect_ranges</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>          <span class="c1"># Layer 1: read the four ranges</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="n">plan</span> <span class="o">=</span> <span class="n">recommend_scaling</span><span class="p">(</span><span class="n">ranges</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>   <span class="c1"># Layer 3: pick the exponents</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="n">apply_scaling</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">plan</span><span class="p">)</span>                     <span class="c1"># write them onto p._solver_options</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="n">sol</span> <span class="o">=</span> <span class="n">p</span><span class="o">.</span><span class="n">solve</span><span class="p">()</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="nb">print</span><span class="p">(</span><span class="n">plan</span><span class="o">.</span><span class="n">reasoning</span><span class="p">)</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="c1"># e.g. &quot;auto (N_obj=0, N_bnd=-4, bound_tag=clamp-large)&quot;</span>
+</span></code></pre></div>
+<p><code>apply_scaling</code> is a one-line convenience around <code>Problem.set_solver_options</code> — equivalent to calling <code>p.set_solver_option("user_bound_scale", plan.user_bound_scale)</code> etc., but with the right merge semantics so it doesn't clobber other options the caller already set.</p>
+<p>After <code>solve()</code>, the same <code>detect_ranges</code> works on the returned <code>Solution</code> (it reads <code>Solution.streamed_lp_ranges</code>, populated by every streaming solve at no extra allocation):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">sol</span> <span class="o">=</span> <span class="n">p</span><span class="o">.</span><span class="n">solve</span><span class="p">()</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">ranges_observed</span> <span class="o">=</span> <span class="n">detect_ranges</span><span class="p">(</span><span class="n">sol</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="scalingmode-and-scalingconfig"><code>ScalingMode</code> and <code>ScalingConfig</code><a class="headerlink" href="#scalingmode-and-scalingconfig" title="Permanent link">&para;</a></h2>
+<p><code>ScalingMode</code> is an enum of four named buckets:</p>
+<table>
+<thead>
+<tr>
+<th>mode</th>
+<th>what the default policy enables</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OFF</code></td>
+<td>autoscaler fully disabled; no detection, no options applied</td>
+</tr>
+<tr>
+<td><code>SOLVER_ONLY</code></td>
+<td>leave any solver-native scaling (<code>simplex_scale_strategy</code>) to the caller, skip Layer 1 + Layer 3</td>
+</tr>
+<tr>
+<td><code>BASIC</code></td>
+<td>Layer 1 detection + Layer 3 recommendation</td>
+</tr>
+<tr>
+<td><code>FULL</code></td>
+<td>same as <code>BASIC</code> on the polar-high side; callers can layer their own semantic scaling on top</td>
+</tr>
+</tbody>
+</table>
+<p>The library does <strong>not</strong> consult <code>mode</code> directly — it's there as a named bucket the orchestration layer (e.g. FlexTool) uses to decide whether to run <code>detect_ranges</code> / <code>recommend_scaling</code> at all. Two predicate helpers expose the default mapping if you want it:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">polar_high.autoscale</span><span class="w"> </span><span class="kn">import</span> <span class="n">mode_enables_layer1</span><span class="p">,</span> <span class="n">mode_enables_layer3</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="k">if</span> <span class="n">mode_enables_layer3</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">mode</span><span class="p">):</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">plan</span> <span class="o">=</span> <span class="n">recommend_scaling</span><span class="p">(</span><span class="n">detect_ranges</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">config</span><span class="p">),</span> <span class="n">config</span><span class="p">)</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">apply_scaling</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">plan</span><span class="p">)</span>
+</span></code></pre></div>
+<p><code>ScalingConfig</code> carries the per-run knobs:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">ScalingConfig</span><span class="p">:</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">mode</span><span class="p">:</span> <span class="n">ScalingMode</span> <span class="o">=</span> <span class="n">ScalingMode</span><span class="o">.</span><span class="n">BASIC</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">threshold_decades</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">9.0</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">user_bound_scale</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">user_objective_scale</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">report_yaml_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span></code></pre></div>
+<ul>
+<li><code>threshold_decades</code> controls the <code>trigger</code> boolean on the <code>RangeReport</code> — set to 9 by default, meaning a max/min ratio above <span class="arithmatex">\(10^9\)</span> triggers attention. Lower it (say, 6) if your model is range-sensitive.</li>
+<li><code>user_bound_scale</code> and <code>user_objective_scale</code> are <strong>manual overrides</strong>. When set, the recommender uses your integer verbatim and skips its own computation for that axis.</li>
+<li><code>report_yaml_path</code> is a transport for caller-side reporters — the library doesn't read or write it.</li>
+</ul>
+<h2 id="detection-detect_ranges-and-rangereport">Detection — <code>detect_ranges</code> and <code>RangeReport</code><a class="headerlink" href="#detection-detect_ranges-and-rangereport" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">ranges</span> <span class="o">=</span> <span class="n">detect_ranges</span><span class="p">(</span><span class="n">p_or_sol</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>
+</span></code></pre></div>
+<p>The dispatch is duck-typed:</p>
+<ul>
+<li>If the input carries <code>streamed_lp_ranges</code> (i.e. a <code>Solution</code>), Layer 1 reads it directly. Zero extra LP work.</li>
+<li>Otherwise the input must walk like a <code>Problem</code>: it must have <code>_vars</code>, <code>_cstrs</code>, and <code>_build_lp_arrays</code>. The function then assembles the LP arrays into the four ranges itself. Slower; only useful pre-solve.</li>
+</ul>
+<p>The returned <code>RangeReport</code> is a frozen dataclass:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">RangeReport</span><span class="p">:</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">matrix</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]</span>              <span class="c1"># (|min| nonzero, |max| nonzero) over A</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">cost</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]</span>                <span class="c1"># same over c</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">bound</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]</span>               <span class="c1"># same over finite col_lower/col_upper</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">rhs</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]</span>                 <span class="c1"># same over finite row_lower/row_upper</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="n">cross_group_max_ratio</span><span class="p">:</span> <span class="nb">float</span>             <span class="c1"># max(hi) / min(lo) across the four</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="n">trigger</span><span class="p">:</span> <span class="nb">bool</span>                            <span class="c1"># any group hi/lo &gt; 10**threshold_decades?</span>
+</span></code></pre></div>
+<p>Groups with no finite nonzero entries (e.g. a bound-less LP) come back as <code>(nan, nan)</code> and are excluded from <code>cross_group_max_ratio</code>. A truly empty input gets <code>nan</code> ratio + <code>trigger=False</code>.</p>
+<h2 id="recommendation-recommend_scaling-and-layer3plan">Recommendation — <code>recommend_scaling</code> and <code>Layer3Plan</code><a class="headerlink" href="#recommendation-recommend_scaling-and-layer3plan" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">plan</span> <span class="o">=</span> <span class="n">recommend_scaling</span><span class="p">(</span><span class="n">ranges</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">problem</span><span class="o">=</span><span class="n">p</span><span class="p">)</span>
+</span></code></pre></div>
+<p>The <code>problem=</code> kwarg is optional but matters: when passed, the recommender consults <code>Problem.get_solver_option(...)</code> for <code>user_bound_scale</code> and <code>user_objective_scale</code>, and <strong>skips its own recommendation on that axis</strong> if the caller already set the value explicitly. This is the precedence-respect rule — your <code>set_solver_option</code> always wins.</p>
+<p>Per-axis precedence (independent for objective and bound):</p>
+<ol>
+<li><strong>Caller-set on the Problem</strong> — <code>Problem.get_solver_option("user_bound_scale")</code> returns non-<code>None</code>. The recommender preserves it. <code>Layer3Plan.bound_skipped_external = True</code>.</li>
+<li><strong>Caller-set on the config</strong> — <code>config.user_bound_scale is not None</code>. The recommender uses your value verbatim. Reasoning string mentions <code>"manual override"</code>.</li>
+<li><strong>Severe-overshoot escape</strong> — naive recommendation would crush the small end below HiGHS' <code>kExcessivelySmallBoundValue</code> (<code>1e-4</code>) AND <code>max_b &gt;= 1e9</code>. The recommender pivots to a geometric-centring branch instead of clamping to the comfort zone (see <em>Why</em> below).</li>
+<li><strong>Default auto</strong> — power-of-two exponent that pulls <code>max(|b|)</code> into HiGHS' <code>[1e-4, 1e+6]</code> comfort zone. Outer-rounded <code>log2</code>. Same conservative rule HiGHS' own <code>suggestScaling</code> uses.</li>
+</ol>
+<p>The resulting <code>Layer3Plan</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">Layer3Plan</span><span class="p">:</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>    <span class="n">user_objective_scale</span><span class="p">:</span> <span class="nb">int</span>           <span class="c1"># exponent for user_objective_scale (cost × 2**N)</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>    <span class="n">user_bound_scale</span><span class="p">:</span> <span class="nb">int</span>               <span class="c1"># exponent for user_bound_scale (bounds + RHS × 2**N)</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">simplex_scale_strategy</span><span class="p">:</span> <span class="nb">int</span>         <span class="c1"># HiGHS equilibration strategy (0..5), default 2</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">reasoning</span><span class="p">:</span> <span class="nb">str</span>                      <span class="c1"># one-line audit string for logs</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    <span class="n">objective_skipped_external</span><span class="p">:</span> <span class="nb">bool</span>    <span class="c1"># was the objective axis precedence-respected?</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    <span class="n">bound_skipped_external</span><span class="p">:</span> <span class="nb">bool</span>        <span class="c1"># was the bound axis precedence-respected?</span>
+</span></code></pre></div>
+<p>All exponents are clamped to HiGHS' option-range <code>[-30, 30]</code>.</p>
+<h2 id="apply-wiring-back-onto-the-problem">Apply — wiring back onto the Problem<a class="headerlink" href="#apply-wiring-back-onto-the-problem" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">apply_scaling</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">plan</span><span class="p">)</span>
+</span></code></pre></div>
+<p>This is a thin merge over <code>Problem.set_solver_options</code>:</p>
+<ul>
+<li>writes <code>user_objective_scale</code> only when the auto-recommender chose it (not when <code>objective_skipped_external</code> is True),</li>
+<li>writes <code>user_bound_scale</code> similarly,</li>
+<li>always writes <code>simplex_scale_strategy</code> (Layer 3 owns this value — callers who want a different strategy should call <code>p.set_solver_option("simplex_scale_strategy", N)</code> <em>after</em> <code>apply_scaling</code>).</li>
+</ul>
+<p>If you'd rather not use <code>apply_scaling</code>, the two HiGHS options are plain integers you can pass through any of the usual routes:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1"># equivalent — and useful when you want to record the plan without</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1"># applying it (e.g. dry-run mode):</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">p</span><span class="o">.</span><span class="n">set_solver_option</span><span class="p">(</span><span class="s2">&quot;user_bound_scale&quot;</span><span class="p">,</span> <span class="n">plan</span><span class="o">.</span><span class="n">user_bound_scale</span><span class="p">)</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">p</span><span class="o">.</span><span class="n">set_solver_option</span><span class="p">(</span><span class="s2">&quot;user_objective_scale&quot;</span><span class="p">,</span> <span class="n">plan</span><span class="o">.</span><span class="n">user_objective_scale</span><span class="p">)</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="n">p</span><span class="o">.</span><span class="n">set_solver_option</span><span class="p">(</span><span class="s2">&quot;simplex_scale_strategy&quot;</span><span class="p">,</span> <span class="n">plan</span><span class="o">.</span><span class="n">simplex_scale_strategy</span><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="why-the-escape-branch-and-the-min-floor-guard-exist">Why the escape branch and the min-floor guard exist<a class="headerlink" href="#why-the-escape-branch-and-the-min-floor-guard-exist" title="Permanent link">&para;</a></h2>
+<p>HiGHS' built-in recommendation looks at <code>max(bound_max, rhs_max)</code> and picks a delta that pulls that single value into <code>[1e-4, 1e+6]</code>. On wide-spread LPs the consequence can be brutal:</p>
+<ul>
+<li>
+<p><strong>Example 1 model from FlexTool</strong> has <code>RHS = (1.84e-3, 2.02e+8)</code>. HiGHS' formula picks <code>N=-8</code>, scaled RHS min becomes <code>7.2e-6</code>, which is below <code>_HIGHS_SMALL_BOUND</code> (<code>1e-4</code>). Presolve then mis-handles those near-zero rows and the LP comes back <strong>infeasible</strong> — even though solving with <code>N=0</code> and presolve off finds the optimum cleanly. <strong>Min-floor guard</strong>: when the proposed <code>N</code> would drag the scaled min below <code>1e-4</code>, <code>recommend_scaling</code> refuses to recommend that <code>N</code> and returns the current scale unchanged (reasoning tag <code>"refuse"</code>).</p>
+</li>
+<li>
+<p><strong>Example 2 model from FlexTool</strong> has bounds spanning so many decades that <em>every</em> power-of-two clamp crushes one end. For those — when <code>max_b &gt;= 1e+9</code> (a "severe overshoot") — the recommender pivots to a <strong>geometric-centring escape</strong> (reasoning tag <code>"escape"</code>): pick <code>N</code> such that the geometric mean of the scaled range lands at the geometric mean of HiGHS' comfort band (<code>sqrt(1e-4 × 1e+6) ≈ 31.6</code>). Worse on max, better on min, optimal on neither — but lets the LP solve.</p>
+</li>
+</ul>
+<p>Both behaviours are baked into <code>_recommend_bound_scale</code>. The <code>Layer3Plan.reasoning</code> string surfaces which branch fired:</p>
+<ul>
+<li><code>"in-zone"</code> — already in <code>[1e-4, 1e+6]</code>; recommended <code>N=0</code>.</li>
+<li><code>"clamp-large"</code> — pulled <code>max_b</code> down into the comfort zone.</li>
+<li><code>"clamp-small"</code> — pulled <code>max_b</code> up into the comfort zone.</li>
+<li><code>"escape"</code> — geometric-centring branch fired (severe overshoot).</li>
+<li><code>"refuse"</code> — min-floor guard tripped; recommendation skipped.</li>
+</ul>
+<h2 id="migration-from-auto_user_bound_scaletrue">Migration from <code>auto_user_bound_scale=True</code><a class="headerlink" href="#migration-from-auto_user_bound_scaletrue" title="Permanent link">&para;</a></h2>
+<p>polar-high 1.4.x exposed a constructor flag, retired in 2.0.0:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># 1.4.x — retired</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="n">p</span> <span class="o">=</span> <span class="n">Problem</span><span class="p">(</span><span class="n">auto_user_bound_scale</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="c1"># … build model …</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">sol</span> <span class="o">=</span> <span class="n">p</span><span class="o">.</span><span class="n">solve</span><span class="p">()</span>  <span class="c1"># heuristic ran inside the streaming solve, col-bound only</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="c1"># 2.0.x — equivalent (Layer 1 + Layer 3, all four ranges)</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="kn">from</span><span class="w"> </span><span class="nn">polar_high.autoscale</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    <span class="n">ScalingConfig</span><span class="p">,</span> <span class="n">ScalingMode</span><span class="p">,</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="n">apply_scaling</span><span class="p">,</span> <span class="n">detect_ranges</span><span class="p">,</span> <span class="n">recommend_scaling</span><span class="p">,</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="p">)</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="n">p</span> <span class="o">=</span> <span class="n">Problem</span><span class="p">()</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="c1"># … build model …</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="n">config</span> <span class="o">=</span> <span class="n">ScalingConfig</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">ScalingMode</span><span class="o">.</span><span class="n">BASIC</span><span class="p">)</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="n">ranges</span> <span class="o">=</span> <span class="n">detect_ranges</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>
+</span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="n">plan</span> <span class="o">=</span> <span class="n">recommend_scaling</span><span class="p">(</span><span class="n">ranges</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">problem</span><span class="o">=</span><span class="n">p</span><span class="p">)</span>
+</span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a><span class="n">apply_scaling</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">plan</span><span class="p">)</span>
+</span><span id="__span-10-18"><a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a><span class="n">sol</span> <span class="o">=</span> <span class="n">p</span><span class="o">.</span><span class="n">solve</span><span class="p">()</span>
+</span></code></pre></div>
+<p>The new path differs in three ways from the retired flag:</p>
+<ul>
+<li><strong>All four ranges, not just col bounds.</strong> The retired heuristic considered only <code>col_bound_lo/hi</code>. The new path uses cost + bound + RHS — so the same model can now get a non-trivial <code>user_objective_scale</code> too.</li>
+<li><strong>Precedence-respect is explicit.</strong> Pass <code>problem=p</code> to <code>recommend_scaling</code> to make it consult <code>Problem.get_solver_option</code> for caller-set overrides.</li>
+<li><strong>The plan is inspectable before it's applied.</strong> <code>Layer3Plan.reasoning</code> and the <code>*_skipped_external</code> flags let you log what would happen, dry-run, or guard on the <code>trigger</code> boolean before calling <code>apply_scaling</code>.</li>
+</ul>
+<p>If you don't want the geometric-centring escape branch or the min-floor guard — e.g. you want to reproduce a 1.4.x-shaped recommendation exactly — pass a manual <code>user_bound_scale=N</code> on the <code>ScalingConfig</code> and the recommender will use your integer verbatim.</p>
+<h2 id="when-not-to-use-autoscale">When <em>not</em> to use autoscale<a class="headerlink" href="#when-not-to-use-autoscale" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Coefficients are within a few decades of 1.0.</strong> HiGHS' own <code>simplex_scale_strategy</code> handles this fine; the autoscaler would correctly recommend <code>N=0</code> everywhere and add bookkeeping noise.</li>
+<li><strong>You're tuning HiGHS by hand.</strong> Set <code>user_bound_scale</code> / <code>user_objective_scale</code> via <code>Problem.set_solver_option(...)</code> directly. The autoscaler's precedence check will skip your axes when you ask it for a recommendation.</li>
+<li><strong>You need scaling to survive a temp-MPS roundtrip.</strong> <code>save_memory=True</code> (see <em>Performance</em>) writes the LP via <code>writeModel</code> after scaling options are applied — HiGHS preserves the option settings across the roundtrip, so this just works, but be aware that the scaling exponents have already been baked into HiGHS' internal LP by then. The same applies to <a href="../performance/#writing-mps-without-highs"><code>Problem.write_mps</code></a>, which emits MPS directly from the polars frames after any Layer-2 rewrites have been applied.</li>
+</ul>
+<h2 id="reference">Reference<a class="headerlink" href="#reference" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>symbol</th>
+<th>purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ScalingMode</code></td>
+<td><code>OFF</code> / <code>SOLVER_ONLY</code> / <code>BASIC</code> / <code>FULL</code></td>
+</tr>
+<tr>
+<td><code>ScalingConfig</code></td>
+<td>per-run dataclass: mode, threshold, manual overrides</td>
+</tr>
+<tr>
+<td><code>mode_enables_layer1(mode)</code></td>
+<td>predicate: does default policy run detection for this mode?</td>
+</tr>
+<tr>
+<td><code>mode_enables_layer3(mode)</code></td>
+<td>predicate: does default policy run recommendation?</td>
+</tr>
+<tr>
+<td><code>detect_ranges(p_or_sol, config)</code></td>
+<td>Layer 1 — returns a <code>RangeReport</code></td>
+</tr>
+<tr>
+<td><code>RangeReport</code></td>
+<td>four <code>(abs_min, abs_max)</code> tuples + cross-group ratio + trigger</td>
+</tr>
+<tr>
+<td><code>recommend_scaling(ranges, config, *, problem=None)</code></td>
+<td>Layer 3 — returns a <code>Layer3Plan</code></td>
+</tr>
+<tr>
+<td><code>Layer3Plan</code></td>
+<td>the three HiGHS exponents + reasoning + skipped flags</td>
+</tr>
+<tr>
+<td><code>apply_scaling(p, plan)</code></td>
+<td>merge the plan into <code>p._solver_options</code></td>
+</tr>
+<tr>
+<td><code>has_explicit_option(p, name)</code></td>
+<td>precedence helper — is this option already caller-set?</td>
+</tr>
+<tr>
+<td><code>get_explicit_option(p, name)</code></td>
+<td>precedence helper — what value does the caller have set?</td>
+</tr>
+<tr>
+<td><code>USER_SCALE_CLAMP_LO</code> / <code>_HI</code></td>
+<td><code>±30</code>, HiGHS' option-range bounds</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.indexes", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
