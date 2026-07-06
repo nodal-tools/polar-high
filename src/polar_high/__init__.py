@@ -9,6 +9,18 @@ import os as _os
 
 _os.environ.setdefault("POLARS_MAX_THREADS", "1")
 
+from polar_high.benders import (
+    BendersBoundInvalid,
+    BendersLoopOptions,
+    BendersLoopResult,
+    BendersMaster,
+    BendersStalled,
+    BendersSubproblem,
+    SubproblemHandle,
+    SubproblemNotOptimal,
+    SubproblemResult,
+    solve_benders_loop,
+)
 from polar_high.decomposition import (
     InOutStabilizer,
     StallMonitor,
@@ -42,6 +54,16 @@ from polar_high.solvers import (
 )
 
 __all__ = [
+    "BendersBoundInvalid",
+    "BendersLoopOptions",
+    "BendersLoopResult",
+    "BendersMaster",
+    "BendersStalled",
+    "BendersSubproblem",
+    "SubproblemHandle",
+    "SubproblemNotOptimal",
+    "SubproblemResult",
+    "solve_benders_loop",
     "Var",
     "Param",
     "Expr",

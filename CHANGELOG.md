@@ -11,6 +11,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`polar_high.benders` — generic multicut Benders coordinator (core
+  loop).** `solve_benders_loop(master, subproblems, *, options,
+  initial_point, ...)` owns the loop mechanics of a multicut Benders
+  scheme: the bootstrap subsolve pass at the caller-supplied
+  `initial_point` (whose key set IS the coupling column universe),
+  recourse-floor sizing (`−eta_floor_mult·max|bootstrap cost|`), cut
+  append + recourse relaxation, LB-monotonicity pinning with a gross-drop
+  hard-fail, the always-on LB≤best-UB sandwich guard, an optional
+  test-time monolith-bound guard, per-cut satisfaction re-checks with
+  row-scale tolerances, `read_point` → `project_point(hard_fail=True)`
+  feasibility projection, the deterministic parallel subproblem fan-out
+  (via `solve_indexed_parallel`), and UB/incumbent bookkeeping with an
+  `on_incumbent` payload capture hook. All problem knowledge stays behind
+  two adapter surfaces: `BendersMaster` (solve / read_point / native_cost
+  / project_point / add_cut / relax_recourse / set_recourse_floor, plus
+  an optional `compact_cuts`) and `BendersSubproblem` (`solve_at(point)
+  -> SubproblemResult` owns pin+solve end to end, including any scaling
+  transform and slope aggregation keyed by MASTER col id);
+  `SubproblemHandle` is a plain-data adapter for callers that don't want
+  a class. Structured exceptions: `SubproblemNotOptimal` (raised
+  domain-side, propagates untouched — including through the parallel
+  fan-out) and `BendersBoundInvalid` (kinds `lb_drop` / `sandwich` /
+  `cut_violated` / `cut_nonfinite` / `monolith`, carrying the numeric
+  fields); `BendersStalled` is published now (raised once the stall guard
+  is wired). The coordinator works entirely in the caller's scale.
+  In-out stabilization (`in_out_weight`), the stall guard
+  (`stall_window` / `gap_floor` / `extra_reference_cost`) and periodic
+  cut compaction (`compact_at` / `cut_policy` / `cut_window`) are
+  declared in `BendersLoopOptions` but land in a follow-up commit —
+  behavior-changing non-defaults are rejected with `NotImplementedError`
+  rather than silently ignored.
 - **`WarmProblem.compact_cuts`** — generic cut-pool compaction for
   cutting-plane / Benders masters. `add_cut_row` now retains each appended
   cut row's `(col_ids, coefs, lower)`; `compact_cuts(solution)` classifies
