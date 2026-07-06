@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [Unreleased] — 3.5.0
+
+### Added
+
+- **`WarmProblem.compact_cuts`** — generic cut-pool compaction for
+  cutting-plane / Benders masters. `add_cut_row` now retains each appended
+  cut row's `(col_ids, coefs, lower)`; `compact_cuts(solution)` classifies
+  every retained cut by PRIMAL slack at the given optimum (binding iff
+  `slack <= tol`), deletes the strictly-slack rows (never a build-time row),
+  and — with `verify=True` — re-solves and rolls back if the objective
+  drifted. Removing a strictly-slack (zero-dual) cut is LB-preserving by
+  complementary slackness, so this bounds the active master LP without
+  harming the certified lower bound.
+- **`compact_cuts(policy="dominance")`** — a second, non-default selection
+  policy (de Matos–Philpott–Finardi / Guigues Limited-Memory Level-1) for
+  DEGENERATE masters where almost every cut is primal-binding and slack
+  deletion prunes nothing: cuts are grouped by the recourse column they bound
+  (`add_recourse_col` now registers its ids) and only the cuts active at a
+  caller-supplied window of trial points are kept. Same verify-restore belt
+  as the slack policy.
+- **`WarmProblem.fix_col_ids(col_ids, values)`** — fix columns BY RAW COL ID
+  (`changeColsBounds` with `lo = hi = value`). The fast-path counterpart of
+  `fix_cols` for callers that already hold the ids: skips the per-call
+  dim-tuple → col-id join. Typical consumer: a Benders driver temporarily
+  pinning coupling columns.
+- **`WarmProblem.get_col_bounds(col_ids)` / `set_col_bounds(col_ids, lower,
+  upper)`** — read / write column bounds by raw col id; the save/restore
+  pair for temporary pins (save bounds → `fix_col_ids` → solve → restore).
+  `get_col_bounds` accepts arbitrary order and repeats (HiGHS' `getCols`
+  itself requires an ordered duplicate-free set) and aligns its results
+  positionally; `±inf` bounds round-trip exactly.
+- **`WarmProblem.solve_with_fallback(fallback_options)`** — one-shot
+  option-swap retry: solve, and ONLY if the primary fails to certify
+  `kOptimal`, apply `fallback_options` via `setOptionValue` on the live
+  handle (`solve(options=...)` is honoured on the first solve only), drop
+  the retained solver state with `clearSolver()`, re-run once, and RESTORE
+  the prior option values. Returns `(solution, "primary" | "fallback")`.
+  The belt for drivers whose primary solve runs an aggressive option set
+  (e.g. crossover-free interior point) that can come back non-optimal.
+
 ## [3.4.0] — 2026-07-01
 
 ### Added

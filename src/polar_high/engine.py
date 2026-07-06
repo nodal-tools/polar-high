@@ -6463,6 +6463,83 @@ class WarmProblem:
         cols_i32 = cols.astype(np.int32, copy=False)
         self._h.changeColsBounds(int(cols_i32.size), cols_i32, vals, vals)
 
+    def fix_col_ids(self, col_ids: np.ndarray, values: np.ndarray) -> None:
+        """Fix columns BY RAW COL ID: set lower = upper = value for each
+        ``(col_id, value)`` pair.
+
+        The col-id-level counterpart of :meth:`fix_cols` — the same
+        vectorised ``changeColsBounds(lo=hi=value)`` write, but skipping
+        the per-call dim-tuple → col-id join for callers that already
+        hold the raw ids (resolve once via :meth:`col_id_of_var`, or use
+        ids returned by :meth:`add_recourse_col`).  Typical consumer: a
+        cutting-plane driver temporarily pinning coupling columns.
+        Bounds are written verbatim into the live model — any caller-side
+        scaling must be applied to ``values`` beforehand.
+        """
+        self._require_built()
+        cids = np.asarray(col_ids, dtype=np.int64)
+        vals = np.asarray(values, dtype=np.float64)
+        if vals.size != cids.size:
+            raise ValueError(
+                f"fix_col_ids: values length {vals.size} != col_ids length {cids.size}"
+            )
+        cols_i32 = cids.astype(np.int32, copy=False)
+        self._h.changeColsBounds(int(cols_i32.size), cols_i32, vals, vals)
+
+    def get_col_bounds(self, col_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Read the current ``(lower, upper)`` bounds of the given raw col
+        ids from the live model.
+
+        Returns two float64 arrays aligned POSITIONALLY with ``col_ids``
+        (any order, repeats allowed — HiGHS' ``getCols`` itself requires
+        an ordered duplicate-free index set, so the query goes through
+        the unique sorted set and gathers back to caller order).
+        Save/restore companion of :meth:`set_col_bounds` for temporary
+        pins made with :meth:`fix_col_ids`::
+
+            lo, hi = wp.get_col_bounds(ids)     # save
+            wp.fix_col_ids(ids, values)         # temporary pin
+            ... wp.solve() ...
+            wp.set_col_bounds(ids, lo, hi)      # restore
+        """
+        self._require_built()
+        cids = np.asarray(col_ids, dtype=np.int64)
+        if cids.size == 0:
+            return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+        uniq, inverse = np.unique(cids, return_inverse=True)
+        status, _num, _cost, lower, upper, _nnz = self._h.getCols(
+            int(uniq.size), uniq.astype(np.int32, copy=False)
+        )
+        ok_status = getattr(highspy.HighsStatus, "kOk", None)
+        if ok_status is not None and status != ok_status:
+            raise ValueError(
+                f"get_col_bounds: HiGHS getCols failed (status={status!r}); "
+                f"col ids out of range [0, {self._n_cols})?"
+            )
+        lo = np.asarray(lower, dtype=np.float64)[inverse]
+        hi = np.asarray(upper, dtype=np.float64)[inverse]
+        return lo, hi
+
+    def set_col_bounds(self, col_ids: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> None:
+        """Write ``(lower, upper)`` bounds onto the given raw col ids.
+
+        Restore companion of :meth:`get_col_bounds` (see there for the
+        save/pin/restore pattern).  Vectorised — single
+        ``changeColsBounds`` call; ``±inf`` entries round-trip unchanged
+        (HiGHS' bound sentinel IS the IEEE infinity).
+        """
+        self._require_built()
+        cids = np.asarray(col_ids, dtype=np.int64)
+        lo = np.asarray(lower, dtype=np.float64)
+        hi = np.asarray(upper, dtype=np.float64)
+        if lo.size != cids.size or hi.size != cids.size:
+            raise ValueError(
+                f"set_col_bounds: lower/upper lengths ({lo.size}, {hi.size}) "
+                f"!= col_ids length {cids.size}"
+            )
+        cols_i32 = cids.astype(np.int32, copy=False)
+        self._h.changeColsBounds(int(cols_i32.size), cols_i32, lo, hi)
+
     def _resolve_dim_tuples(self, var_name: str, dim_tuples: list[tuple]) -> np.ndarray:
         """Translate a list of dim-tuples into an int64 array of col_ids
         in the same order.  Shared by ``update_obj_coef_array`` and
@@ -7164,6 +7241,56 @@ class WarmProblem:
             vars=dict(self._p._vars),
             highs=h,
         )
+
+    def solve_with_fallback(self, fallback_options: dict) -> tuple[Solution, str]:
+        """Solve; on a non-optimal primary, retry ONCE under
+        ``fallback_options`` and restore the prior option values.
+
+        Runs :meth:`solve` first.  If it certifies ``kOptimal`` the
+        solution is returned as ``(solution, "primary")`` and the options
+        are never touched.  Otherwise each ``fallback_options`` entry is
+        applied to the live HiGHS handle via ``setOptionValue``
+        (``solve(options=...)`` is honoured on the FIRST solve only — a
+        live-handle write is the only way to change options on a built
+        model), the retained solver state is dropped with
+        ``clearSolver()`` (so options like ``solver`` / ``presolve`` take
+        effect from cold, and no stale basis biases the retry), the model
+        is re-run once, and the prior option values are RESTORED — a
+        later plain :meth:`solve` sees the original configuration.
+        Returns ``(solution, "fallback")`` with the retry's solution,
+        optimal or not: the caller decides what a still-failing fallback
+        means.
+
+        Raises ``ValueError`` on an unknown option name or a rejected
+        option value; any options already changed are restored first.
+        """
+        sol = self.solve()
+        if sol.optimal:
+            return sol, "primary"
+        h = self._h
+        ok_status = getattr(highspy.HighsStatus, "kOk", None)
+        prior: dict = {}
+        try:
+            for key, val in fallback_options.items():
+                status, prev = h.getOptionValue(key)
+                if ok_status is not None and status != ok_status:
+                    raise ValueError(f"solve_with_fallback: unknown HiGHS option {key!r}")
+                prior[key] = prev
+                status = h.setOptionValue(key, val)
+                if ok_status is not None and status != ok_status:
+                    raise ValueError(
+                        f"solve_with_fallback: HiGHS rejected option {key}={val!r} "
+                        f"(status={status!r})"
+                    )
+            h.clearSolver()
+            h.run()
+            return self._build_solution(h), "fallback"
+        finally:
+            # Restore-only-what-was-recorded: a key that failed the
+            # getOptionValue existence check above was never changed and
+            # never recorded, so this cannot write junk back.
+            for key, prev in prior.items():
+                h.setOptionValue(key, prev)
 
     # -- internals -------------------------------------------------------
 
