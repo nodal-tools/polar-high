@@ -1275,3 +1275,305 @@ def test_evaluate_at_point_input_guards() -> None:
     dup = [subs[0], SubproblemHandle(subs[0].name, subs[0].warm, subs[0].solve_at)]
     with pytest.raises(ValueError, match="duplicate subproblem names"):
         evaluate_at_point(master, dup, initial, workers=1)
+
+
+# ---------------------------------------------------------------------------
+# Flow-DEPENDENT master + in-out (masterfuel: the master hosts a balance node
+# served by the coupling flows, so its native cost DEPENDS on the coupling
+# flow).  This is the case the consistent-point UB fix exists for.
+#
+# Model (all coupling columns in (f1, f2)):
+#   Master hosts a demand node served BY the two coupling flows plus a
+#   shortfall slack s:  f1 + f2 + s >= D  (D = 6), s >= 0.  Its native cost is
+#       b1·f1 + b2·f2 + P·s     (b1 = 1, b2 = 5, P = 100)
+#   — a genuine function of the coupling flow (through the shortfall term).
+#   Region r produces its export f_r at cost gamma_r·f_r
+#       (gamma1 = 3, gamma2 = 2), a linear recourse Q_r(f) = gamma_r·f.
+#   Monolith: min (b_r+gamma_r)·f_r + P·s s.t. f1+f2+s >= 6, f in [0, 10].
+#   c1 = b1+gamma1 = 4, c2 = 7, P = 100 -> serve all 6 from region 1:
+#   OPTIMUM = 4·6 = 24 at (f1, f2, s) = (6, 0, 0).
+#
+# Why the OLD mixed UB is invalid here (in-out, lambda=0.5):
+#   Exact linear cuts make the master jump to its own vertex f_out = (6, 0)
+#   at iter 1 (native_cost(msol) = b1·6 = 6, LB = 24).  The subproblems are
+#   solved at the INTERIOR f_sep = (3, 0), where the master would have to eat
+#   a shortfall s = 3 (native_cost_at((3,0)) = b1·3 + P·3 = 303).  The OLD
+#   UB = native_cost(msol=6) + sum Q_r(f_sep) = 6 + 9 = 15 < 24 = LB — an
+#   invalid (under-counting) bound that trips the sandwich guard AT ITER 1.
+#   The fix scores the UB at the consistent overlay point:
+#   native_cost_at((3,0)) + 9 = 312 >= 24 — valid — and the loop converges.
+# ---------------------------------------------------------------------------
+
+
+class _ProdSub:
+    """Region recourse: produce export g >= f_in at cost gamma·g, so
+    Q(f) = gamma·f (cost INCREASING in the coupling flow).  ``solve_at`` pins
+    f_in by raw col id and reads the cut slope (+gamma) off f_in's reduced
+    cost."""
+
+    def __init__(self, name: str, master_f_col: int, gamma: float):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f_in = p.add_var("f_in", "i", idx, lower=0.0, upper=1.0e3)
+        g = p.add_var("g", "i", idx, lower=0.0)
+        # g - f_in >= 0  (produce at least the pinned export).
+        p.add_cstr(
+            "produce",
+            over=idx,
+            sense=">=",
+            lhs_terms={"g": g, "neg_f": f_in.to_expr() * -1.0},
+            rhs_terms={"zero": _scalar_param(0.0)},
+        )
+        p.set_objective(g.to_expr() * gamma, sense="min")
+        self.name = name
+        self.warm = fp.WarmProblem(p)
+        self.warm.solve()  # sequential cold build (coordinator precondition)
+        self._local = int(self.warm.col_id_of_var("f_in", (0,)))
+        self._master_col = int(master_f_col)
+        self.seen_points: list[dict[int, float]] = []
+
+    def solve_at(self, point: dict[int, float]) -> SubproblemResult:
+        self.seen_points.append(dict(point))
+        v = point[self._master_col]
+        self.warm.fix_col_ids(np.array([self._local]), np.array([v], dtype=np.float64))
+        sol = self.warm.solve(retry_on_unknown=True)
+        if not sol.optimal:
+            raise SubproblemNotOptimal(self.name)
+        slope = float(sol.col_dual[self._local])
+        return SubproblemResult(
+            cost=float(sol.obj),
+            slopes={self._master_col: slope},
+            payload={"sub": self.name},
+        )
+
+
+class _FlowDepMaster:
+    """Master hosting a demand node served by the coupling flows f1, f2 plus a
+    shortfall slack s: ``f1 + f2 + s >= D``.  Its native cost
+    ``b1·f1 + b2·f2 + P·s`` DEPENDS on the coupling flow (through s), so it
+    advertises ``native_cost_flow_dependent`` (toggled by the test to simulate
+    the OLD, flow-independent-assuming UB).  ``native_cost_at`` calls are
+    counted so a test can prove which UB path the coordinator took."""
+
+    def __init__(
+        self,
+        *,
+        flow_dependent: bool = True,
+        demand: float = 6.0,
+        b: tuple[float, float] = (1.0, 5.0),
+        penalty: float = 100.0,
+    ):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f1 = p.add_var("f1", "i", idx, lower=0.0, upper=_F_MAX)
+        f2 = p.add_var("f2", "i", idx, lower=0.0, upper=_F_MAX)
+        s = p.add_var("s", "i", idx, lower=0.0)
+        eta1 = p.add_var("eta1", "i", idx, lower=_PROVISIONAL_FLOOR)
+        eta2 = p.add_var("eta2", "i", idx, lower=_PROVISIONAL_FLOOR)
+        # Hosted demand node: f1 + f2 + s >= D  (s is the shortfall slack).
+        p.add_cstr(
+            "demand",
+            over=idx,
+            sense=">=",
+            lhs_terms={"f1": f1, "f2": f2, "s": s},
+            rhs_terms={"d": _scalar_param(demand)},
+        )
+        p.set_objective(
+            f1.to_expr() * b[0]
+            + f2.to_expr() * b[1]
+            + s.to_expr() * penalty
+            + eta1.to_expr()
+            + eta2.to_expr(),
+            sense="min",
+        )
+        self.wp = fp.WarmProblem(p)
+        self.wp.solve()  # cold build (provisional floor keeps it bounded)
+        self.f_col = {
+            "reg1": int(self.wp.col_id_of_var("f1", (0,))),
+            "reg2": int(self.wp.col_id_of_var("f2", (0,))),
+        }
+        self._eta_col = {
+            "reg1": int(self.wp.col_id_of_var("eta1", (0,))),
+            "reg2": int(self.wp.col_id_of_var("eta2", (0,))),
+        }
+        self._relaxed: set[str] = set()
+        self.floor_set: float | None = None
+        self.native_cost_flow_dependent = bool(flow_dependent)
+        self.native_cost_at_calls = 0
+
+    # -- BendersMaster protocol -----------------------------------------
+
+    def solve(self) -> fp.Solution:
+        sol = self.wp.solve(retry_on_unknown=True)
+        if not sol.optimal:
+            raise RuntimeError("flow-dep master did not solve to optimality")
+        return sol
+
+    def read_point(self, sol: fp.Solution) -> tuple[dict[int, float], dict[str, float]]:
+        f = {c: float(sol.col_value[c]) for c in self.f_col.values()}
+        recourse = {name: float(sol.col_value[c]) for name, c in self._eta_col.items()}
+        return f, recourse
+
+    def native_cost(self, sol: fp.Solution, recourse: dict[str, float]) -> float:
+        return float(sol.obj) - sum(recourse.values())
+
+    def native_cost_at(self, point: dict[int, float]) -> float:
+        self.native_cost_at_calls += 1
+        cols = np.array(list(self.f_col.values()), dtype=np.int64)
+        lo, hi = self.wp.get_col_bounds(cols)
+        vals = np.array([float(point[int(c)]) for c in cols], dtype=np.float64)
+        self.wp.fix_col_ids(cols, vals)
+        try:
+            sol = self.wp.solve(retry_on_unknown=True)
+            if not sol.optimal:
+                raise RuntimeError("flow-dep native_cost_at solve not optimal")
+            eta = sum(float(sol.col_value[c]) for c in self._eta_col.values())
+            return float(sol.obj) - eta
+        finally:
+            self.wp.set_col_bounds(cols, lo, hi)
+
+    def project_point(
+        self, f: dict[int, float], sol: fp.Solution, *, hard_fail: bool = True
+    ) -> float:
+        max_slack = 0.0
+        for c, v in f.items():
+            slack = v - _F_MAX
+            if slack > 0.0:
+                f[c] = _F_MAX
+                max_slack = max(max_slack, slack)
+        return max_slack
+
+    def add_cut(
+        self,
+        sub_name: str,
+        gen_point: dict[int, float],
+        cost: float,
+        slopes: dict[int, float],
+    ) -> None:
+        col_ids = [self._eta_col[sub_name]]
+        coefs = [1.0]
+        rhs = cost
+        for fcol, g in slopes.items():
+            if g == 0.0:
+                continue
+            col_ids.append(int(fcol))
+            coefs.append(-float(g))
+            rhs -= g * gen_point[fcol]
+        self.wp.add_cut_row(col_ids, coefs, float(rhs))
+
+    def relax_recourse(self, sub_name: str) -> None:
+        if sub_name in self._relaxed:
+            return
+        col = np.array([self._eta_col[sub_name]], dtype=np.int64)
+        self.wp.set_col_bounds(col, np.array([-np.inf]), np.array([np.inf]))
+        self._relaxed.add(sub_name)
+
+    def set_recourse_floor(self, floor: float) -> None:
+        cols = np.array(
+            [c for n, c in self._eta_col.items() if n not in self._relaxed],
+            dtype=np.int64,
+        )
+        if cols.size:
+            self.wp.set_col_bounds(
+                cols,
+                np.full(cols.size, float(floor)),
+                np.full(cols.size, np.inf),
+            )
+        self.floor_set = float(floor)
+
+
+_FLOWDEP_OPTIMUM = 24.0
+
+
+def _build_flowdep(*, flow_dependent: bool = True):
+    master = _FlowDepMaster(flow_dependent=flow_dependent)
+    sub1 = _ProdSub("reg1", master.f_col["reg1"], gamma=3.0)
+    sub2 = _ProdSub("reg2", master.f_col["reg2"], gamma=2.0)
+    initial = {master.f_col["reg1"]: 0.0, master.f_col["reg2"]: 0.0}
+    return master, [sub1, sub2], initial
+
+
+def test_flow_dependent_master_slopes_are_positive() -> None:
+    """Guard the recourse construction: the region cut slope is +gamma (cost
+    RISES with the export), so the analytic optimum below is well posed."""
+    _, subs, _ = _build_flowdep()
+    res1 = subs[0].solve_at({subs[0]._master_col: 2.0})
+    assert res1.cost == pytest.approx(6.0, abs=1e-9)  # gamma1·2
+    assert res1.slopes[subs[0]._master_col] == pytest.approx(3.0, abs=1e-9)
+
+
+def test_flow_dependent_master_in_out_converges() -> None:
+    """WITH the consistent-point UB fix (native_cost_flow_dependent=True) the
+    in-out loop over a cost-bearing master produces a VALID upper bound
+    (>= optimum), the sandwich guard never fires, and it converges to the
+    known optimum 24.  Proof that the fixed UB took the native_cost_at path:
+    the master recorded at least one such call."""
+    master, subs, initial = _build_flowdep(flow_dependent=True)
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=60, tol=1e-7, workers=1, in_out_weight=0.5),
+        initial_point=initial,
+    )
+    assert result.converged
+    # A genuine feasible-point UB never dips below the true optimum.
+    assert result.best_upper_bound >= _FLOWDEP_OPTIMUM - 1e-6
+    assert result.best_upper_bound == pytest.approx(_FLOWDEP_OPTIMUM, abs=1e-4)
+    assert result.lower_bound <= _FLOWDEP_OPTIMUM + 1e-6
+    # The fixed (flow-dependent) UB path was actually exercised.
+    assert master.native_cost_at_calls >= 1
+    # Incumbent at the optimum: all demand served from region 1.
+    f1, f2 = master.f_col["reg1"], master.f_col["reg2"]
+    assert result.incumbent_point[f1] == pytest.approx(6.0, abs=1e-3)
+    assert result.incumbent_point[f2] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_flow_dependent_master_old_mixed_ub_fails_sandwich() -> None:
+    """WITHOUT the fix (simulated by native_cost_flow_dependent=False, i.e. the
+    coordinator keeps the OLD mixed ``native_cost(msol) + sum Q_r(f_sep)`` UB)
+    the same model manufactures a spurious ``LB > UB`` — the invalid,
+    under-counting bound the fix cures — and the always-on sandwich guard
+    hard-fails.  This is exactly the failure the flow-dependent gate removes."""
+    master, subs, initial = _build_flowdep(flow_dependent=False)
+    with pytest.raises(BendersBoundInvalid) as exc_info:
+        solve_benders_loop(
+            master,
+            subs,
+            options=BendersLoopOptions(max_iters=60, tol=1e-7, workers=1, in_out_weight=0.5),
+            initial_point=initial,
+        )
+    assert exc_info.value.kind == "sandwich"
+    # The OLD path never consulted native_cost_at (the whole point of the bug).
+    assert master.native_cost_at_calls == 0
+
+
+def test_flow_independent_ub_byte_identical_under_in_out() -> None:
+    """A flow-INDEPENDENT master (the current partition) under in-out keeps the
+    exact ``native_cost(msol)`` UB VERBATIM: the coordinator never calls
+    native_cost_at, and the run reproduces the byte-identical in-out toy result
+    (optimum 16 in 2 iterations, incumbent overlay (4.5, 0))."""
+    master, subs, initial = _build_toy()
+    # _ToyMaster has no ``native_cost_flow_dependent`` attribute, so the
+    # coordinator's ``getattr(..., False)`` default applies — the current
+    # partition contract.  Count native_cost_at to prove it is never taken.
+    calls = {"n": 0}
+    original = master.native_cost_at
+
+    def _counting_native_cost_at(point, _orig=original):
+        calls["n"] += 1
+        return _orig(point)
+
+    master.native_cost_at = _counting_native_cost_at  # type: ignore[assignment]
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=20, tol=1e-9, workers=1, in_out_weight=0.5),
+        initial_point=initial,
+    )
+    assert calls["n"] == 0  # flow-independent path: native_cost_at untouched
+    assert result.converged
+    assert result.iterations == 2
+    assert result.best_upper_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
+    f1, f2 = master.f_col["sub1"], master.f_col["sub2"]
+    assert result.incumbent_point[f1] == pytest.approx(4.5, abs=1e-7)
+    assert result.incumbent_point[f2] == pytest.approx(0.0, abs=1e-7)

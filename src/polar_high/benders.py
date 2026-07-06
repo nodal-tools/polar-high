@@ -347,6 +347,19 @@ class BendersMaster(Protocol):
         :func:`evaluate_at_point` (``master_native_cost = None``)."""
         ...
 
+    #: OPTIONAL attribute/property — ``True`` iff the master's native cost
+    #: DEPENDS on the coupling flow columns (a cost-bearing master, e.g. one
+    #: hosting balance/storage nodes whose balances are filled by the coupling
+    #: flows).  Read by :func:`solve_benders_loop` via
+    #: ``getattr(master, "native_cost_flow_dependent", False)``, so a master
+    #: that does not define it defaults to ``False``.  When it is ``True`` AND
+    #: in-out is on, the loop scores the UB at one consistent overlay point via
+    #: :meth:`native_cost_at` instead of the flow-independent
+    #: ``native_cost(msol)`` sum; when it is ``False`` (or absent) the UB keeps
+    #: the exact ``native_cost(msol)`` evaluation verbatim (byte-parity for
+    #: every flow-independent master and every λ=0 run).
+    native_cost_flow_dependent: bool
+
     def project_point(self, f: dict[int, float], sol: Solution, *, hard_fail: bool = True) -> float:
         """Project the coupling point ``f`` onto the master's feasible set
         IN PLACE (e.g. clamp values down to invested capacity) and return the
@@ -1106,31 +1119,92 @@ def solve_benders_loop(
             sub_costs[sub.name] = res.cost
             next_cuts.append((sub.name, gen_point, res.cost, res.slopes))
 
-        # --- UB = master native cost + Σ subproblem costs at the SAME
-        # (pin, master solution) — all terms in the caller's scale.  ``pin``
-        # is ``point`` (OFF) or each subproblem's projected ``f_sep`` (ON);
-        # both are feasible for the master, so the UB is valid either way.
-        ub = master.native_cost(msol, recourse_by_sub) + sum(sub_costs.values())
+        # --- The consistent OVERLAY point (built once, before the UB, when
+        # in-out is on).  With in-out ON each subproblem was solved at its own
+        # interior ``f_sep`` while the master's own primal sits at its OUTER
+        # vertex ``msol``.  The overlay is the single coupling point that
+        # reflects the value ACTUALLY solved for each master column: ``point``
+        # as the base, with each subproblem's ``f_sep`` overlaid onto ONLY the
+        # master columns it owns (ownership = its ``SubproblemResult.slopes``
+        # key set — by protocol it carries a key for every pinned column; a
+        # shared column takes the LAST owner's value, in subproblem order).
+        # This is the one feasible point at which BOTH the master native cost
+        # AND every subproblem cost can be scored (the subproblems delivered
+        # exactly this point), so it is the correct point for the L-shaped
+        # feasible-point UB below and for the incumbent capture.  With in-out
+        # OFF the master and subproblems were both solved at ``point``, so the
+        # overlay is ``point`` itself (aliased — never mutated on this path).
+        if in_out_on:
+            overlay_point = dict(point)
+            for sub, res in zip(subproblems, sub_results):
+                fsr = f_sep_by_sub[sub.name]
+                for mc in res.slopes:
+                    mc = int(mc)
+                    if mc in fsr:
+                        overlay_point[mc] = fsr[mc]
+        else:
+            overlay_point = point
+
+        # --- UB = the WHOLE objective at ONE consistent feasible point.
+        #
+        # The L-shaped upper bound (Van Slyke & Wets 1969) is a
+        # feasible-POINT evaluation: for any master-feasible ``x̄``,
+        # ``c(x̄) + Σ_r Q_r(x̄)`` bounds the optimum — but ONLY when the
+        # first-stage cost ``c`` and every recourse ``Q_r`` are evaluated at
+        # the SAME ``x̄``.  A mixed sum ``c(x_A) + Σ_r Q_r(x_B)`` with
+        # ``x_A ≠ x_B`` is the objective at no single feasible point and is
+        # NOT a valid bound.
+        #
+        # With in-out OFF, ``msol`` and every subproblem share ``point``, so
+        # ``native_cost(msol) + Σ sub_costs`` is already a single-point
+        # evaluation — the exact (λ=0) UB, kept verbatim.
+        #
+        # With in-out ON, ``Σ sub_costs`` is the recourse at ``overlay_point``
+        # but ``native_cost(msol)`` is the master's cost at its OUTER vertex
+        # ``msol`` — a mixed point.  Two cases:
+        #   * The master's native cost is FLOW-INDEPENDENT (the current
+        #     trade-invest partition: ``native_cost`` is the pure invest cost
+        #     of the coupling connections, which does NOT depend on the
+        #     coupling FLOW columns).  Then ``c(msol) == c(overlay_point)`` on
+        #     every coordinate that differs, the mixed sum coincides with a
+        #     genuine single-point evaluation, and we keep the exact line
+        #     below verbatim ⇒ byte-identical to the pre-fix UB.  This is the
+        #     ``native_cost_flow_dependent = False`` (default) path — taken by
+        #     every existing master and by every λ=0 run.
+        #   * The master's native cost DEPENDS on the coupling flows
+        #     (master-hosted balance/storage nodes: the master serves real
+        #     demand THROUGH the coupling flows).  Then ``c(msol)`` and
+        #     ``Σ Q_r(overlay_point)`` are the objective at no single feasible
+        #     primal — the mixed UB UNDER-counts and the sandwich guard
+        #     legitimately fails.  Re-evaluate the master's native cost at the
+        #     SAME ``overlay_point`` the subproblems used, so the whole UB is
+        #     ``c(overlay_point) + Σ Q_r(overlay_point)``: a true
+        #     feasible-point cost ⇒ a valid upper bound.
+        #
+        # Cost containment: the flow-dependent path costs ONE extra master
+        # solve (``native_cost_at`` pins the coupling columns and re-solves)
+        # per in-out iteration.  We do it every iteration rather than behind a
+        # screen: ``native_cost(msol)`` minimizes ``native + Σ η`` (not
+        # ``native`` alone), so it is NOT a lower bound on
+        # ``native_cost_at(overlay_point)`` — there is no cheap valid screen
+        # that could skip the solve without risking a missed real UB
+        # improvement.  The masterfuel master is small and early iterations
+        # are cheap, so the direct solve is the correct, provably-safe
+        # tradeoff.
+        native_cost_flow_dependent = getattr(master, "native_cost_flow_dependent", False)
+        if in_out_on and native_cost_flow_dependent:
+            ub = master.native_cost_at(overlay_point) + sum(sub_costs.values())
+        else:
+            ub = master.native_cost(msol, recourse_by_sub) + sum(sub_costs.values())
         improved = ub < best_ub
         if improved:
             best_ub = ub
-            # The incumbent coupling point.  With in-out OFF it is the single
-            # ``point``; with in-out ON each subproblem was solved at its own
-            # ``f_sep``, so the incumbent value on a master column is the
-            # separation value of the subproblem that OWNS it (ownership =
-            # its ``SubproblemResult.slopes`` key set — by protocol it
-            # carries a key for every pinned column).  We use ``point`` as
-            # the base and overlay each subproblem's own ``f_sep`` so a
-            # column reflects the value actually solved for it (a shared
-            # column takes the LAST owner's value, in subproblem order).
+            # The incumbent coupling point is the overlay point (in-out ON, a
+            # fresh dict rebuilt every iteration so this stored reference is
+            # never mutated later) or a fresh copy of ``point`` (in-out OFF —
+            # ``point`` itself is reassigned next iteration, so copy it).
             if in_out_on:
-                incumbent_point = dict(point)
-                for sub, res in zip(subproblems, sub_results):
-                    fsr = f_sep_by_sub[sub.name]
-                    for mc in res.slopes:
-                        mc = int(mc)
-                        if mc in fsr:
-                            incumbent_point[mc] = fsr[mc]
+                incumbent_point = overlay_point
             else:
                 incumbent_point = dict(point)
             payload: object | None = None
