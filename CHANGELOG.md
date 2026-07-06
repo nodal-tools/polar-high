@@ -34,14 +34,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   domain-side, propagates untouched — including through the parallel
   fan-out) and `BendersBoundInvalid` (kinds `lb_drop` / `sandwich` /
   `cut_violated` / `cut_nonfinite` / `monolith`, carrying the numeric
-  fields); `BendersStalled` is published now (raised once the stall guard
-  is wired). The coordinator works entirely in the caller's scale.
-  In-out stabilization (`in_out_weight`), the stall guard
-  (`stall_window` / `gap_floor` / `extra_reference_cost`) and periodic
-  cut compaction (`compact_at` / `cut_policy` / `cut_window`) are
-  declared in `BendersLoopOptions` but land in a follow-up commit —
-  behavior-changing non-defaults are rejected with `NotImplementedError`
-  rather than silently ignored.
+  fields). The coordinator works entirely in the caller's scale.
+- **`polar_high.benders` — in-out stabilization, stall guard, cut
+  compaction.** The coordinator's non-default extensions, each gated on
+  its option so the default (λ=0, `compact_at=0`) trajectory is
+  byte-identical to the core loop: **in-out stabilization**
+  (`in_out_weight` in `[0, 1)`) runs one `InOutStabilizer` per
+  subproblem, seeded with the `initial_point` centre — each subproblem is
+  solved (and its cut generated) at its own interior separation point
+  `f_sep = λ·centre + (1−λ)·f_out`, re-projected through
+  `project_point(hard_fail=False)` (an interior point built from an old
+  incumbent may legitimately exceed the current feasible set; the main
+  post-master projection stays `hard_fail=True`), with the per-subproblem
+  separation test driving the register/forced-out-step logic and the
+  incumbent point overlaying each subproblem's `f_sep` onto exactly the
+  master columns it owns (ownership = its `SubproblemResult.slopes` key
+  set; a shared column takes the last owner's value); the **stall guard**
+  (`StallMonitor`, `stall_window` / `gap_floor` with the
+  `max(20·tol, 0.02)` derivation) raises the structured `BendersStalled`
+  (iteration / gap / tol / window / reference_scale / per-subproblem
+  current + bootstrap costs) on a frozen-blowup stall, with
+  `extra_reference_cost` called once post-bootstrap and its absolute
+  value folded into the reference scale; **periodic cut compaction**
+  (`compact_at` / `cut_policy` / `cut_window`) invokes the master
+  adapter's optional `compact_cuts` at the end of the iteration body with
+  the raw master vertex and the bounded trailing trial-point window,
+  resetting the tracked row count to the returned `kept` — a master
+  without the member disables compaction with a warning (clean skip).
 - **`WarmProblem.compact_cuts`** — generic cut-pool compaction for
   cutting-plane / Benders masters. `add_cut_row` now retains each appended
   cut row's `(col_ids, coefs, lower)`; `compact_cuts(solution)` classifies

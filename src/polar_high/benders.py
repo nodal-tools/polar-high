@@ -43,27 +43,47 @@ Preconditions the caller owns:
   the tight bootstrap-sized floor via ``set_recourse_floor`` before the first
   master solve.
 
-Not yet wired (lands in the follow-up commit; the corresponding options /
-hooks below are documented inert and REJECTED loudly where they would change
-behavior): in-out stabilization (``in_out_weight > 0``), the stall guard
-(``stall_window`` / ``gap_floor`` / ``extra_reference_cost`` /
-:class:`BendersStalled`), and periodic cut compaction (``compact_at`` /
-``cut_policy`` / ``cut_window`` / ``BendersMaster.compact_cuts``).  At their
-defaults the loop below is the exact (λ=0) Benders path, and the follow-up
-only adds code inside blocks gated on those defaults — the λ=0 trajectory is
-unchanged by it.
+On top of the exact (λ=0) core loop the coordinator wires three optional,
+non-default mechanisms — each lives entirely inside blocks gated on its
+option, so at the defaults the loop is byte-identical to plain exact Benders:
+
+* **In-out stabilization** (``in_out_weight > 0``; Ben-Ameur & Neto 2007):
+  one :class:`~polar_high.decomposition.InOutStabilizer` PER SUBPROBLEM,
+  each seeded with the ``initial_point`` centre.  Every iteration each
+  subproblem is solved at its OWN interior separation point ``f_sep =
+  λ·centre + (1−λ)·f_out`` — re-clamped to the current feasible set via
+  ``project_point(..., hard_fail=False)`` (an interior point built from an
+  OLD incumbent can legitimately exceed the current feasible set; clamping
+  down is routine, not a bug signal) — and its cut is GENERATED at that
+  ``f_sep``.  A per-subproblem separation test then drives the stabilizer's
+  register/forced-out-step logic, and the incumbent point overlays each
+  subproblem's ``f_sep`` onto ONLY the master columns it owns (ownership =
+  its :class:`SubproblemResult.slopes` key set).
+* **Stall guard** (:class:`~polar_high.decomposition.StallMonitor`): fed
+  ``(LB, best_UB)`` each iteration; its reference scale is the sum of the
+  absolute bootstrap subproblem costs plus ``|extra_reference_cost()|``
+  (called ONCE post-bootstrap when provided).  A frozen-blowup stall raises
+  the structured :class:`BendersStalled` — the frozen incumbent is garbage,
+  so returning it would hand the caller a catastrophically wrong plan.
+* **Periodic cut compaction** (``compact_at > 0``): when the accumulated
+  cut-row count reaches ``compact_at``, the master adapter's OPTIONAL
+  ``compact_cuts`` is invoked at the end of the iteration body with the raw
+  master vertex and the trailing ``cut_window`` of master vertices; a master
+  lacking the member disables compaction with a warning (clean skip).
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
 
+from polar_high.decomposition import InOutStabilizer, StallMonitor
 from polar_high.engine import Solution, WarmProblem
 from polar_high.parallel import resolve_worker_count, solve_indexed_parallel
 
@@ -188,10 +208,18 @@ class BendersStalled(RuntimeError):
     """The loop stalled: the incumbent froze far above any sane objective
     magnitude while the gap stayed far from tolerance.
 
-    NOT YET RAISED — the stall guard is wired in the follow-up commit; the
-    type is published now so the exception surface (and callers' ``except``
-    clauses) is stable across that commit.  All numeric fields are in the
-    caller's scale.
+    Raised when the :class:`~polar_high.decomposition.StallMonitor`'s
+    frozen-blowup conjunction fires: the best feasible cost has not improved
+    across the trailing ``window`` iterations, the relative gap is still far
+    from tolerance, AND the incumbent sits far above ``reference_scale``
+    (the bootstrap subproblem costs plus the caller's
+    ``extra_reference_cost``).  The frozen incumbent is garbage in this
+    regime (it can be orders above the true optimum), so the coordinator
+    fails fast instead of silently exhausting the iteration cap.
+    ``sub_costs`` are the stalled iteration's subproblem costs;
+    ``sub_reference_costs`` are the bootstrap (initial-point) costs — the
+    pair lets the caller name the worst offender in its own diagnostics.
+    All numeric fields are in the caller's scale.
     """
 
     def __init__(
@@ -330,10 +358,14 @@ class BendersMaster(Protocol):
 
     def compact_cuts(self, sol: Solution, *, policy: str, trial_col_values: list) -> dict:
         """OPTIONAL member — periodic cut-pool compaction (see
-        :meth:`polar_high.engine.WarmProblem.compact_cuts`).  Not called by
-        the coordinator yet (compaction is wired in the follow-up commit,
-        gated on ``compact_at > 0``); implementations that never enable
-        compaction may omit it."""
+        :meth:`polar_high.engine.WarmProblem.compact_cuts`).  Called only
+        when ``compact_at > 0`` and the accumulated cut-row count reaches
+        it, with the RAW master vertex of the just-finished iteration and
+        the trailing window of master vertices (for the dominance policy).
+        Must return a dict with at least ``{"kept", "dropped",
+        "restored"}``.  Implementations that never enable compaction may
+        omit the member — the coordinator then disables compaction with a
+        warning."""
         ...
 
 
@@ -346,30 +378,35 @@ class BendersMaster(Protocol):
 class BendersLoopOptions:
     """Knobs for :func:`solve_benders_loop`.
 
-    All cost-valued options are in the caller's scale.  Options marked
-    *(inert)* belong to features wired in the follow-up commit; at their
-    defaults they change nothing, and behavior-changing non-defaults are
-    rejected loudly (``NotImplementedError``) rather than silently ignored.
+    All cost-valued options are in the caller's scale.  At the defaults the
+    loop is exact (λ=0) Benders with the stall guard on its library
+    defaults and cut compaction off.
     """
 
     #: Iteration cap.
     max_iters: int
     #: Relative gap tolerance ``(best_UB − LB)/max(1, |best_UB|)``.
     tol: float
-    #: (inert) In-out separation weight λ; ``0.0`` = exact Benders.
+    #: In-out separation weight λ on the stable interior centre
+    #: (``f_sep = λ·centre + (1−λ)·f_out``); ``0.0`` = exact Benders
+    #: (byte-identical off path).  Must be in ``[0, 1)``.
     in_out_weight: float = 0.0
     #: Worker-thread count for the subproblem pass; ``None`` auto-resolves
     #: (see :func:`polar_high.parallel.resolve_worker_count`).
     workers: int | None = None
-    #: (inert) Stall-guard trailing window.
+    #: Stall-guard trailing window ``K`` (iterations the incumbent must be
+    #: frozen before a stall can be declared).
     stall_window: int = 8
-    #: (inert) Stall-guard gap floor; ``None`` derives ``max(20·tol, 0.02)``.
+    #: Stall-guard gap floor; ``None`` derives ``max(20·tol, 0.02)`` so a
+    #: loose ``tol`` never lets the floor fall below the gap it must clear.
     gap_floor: float | None = None
-    #: (inert) Cut-compaction trigger (active cut rows); ``0`` = off.
+    #: Cut-compaction trigger (accumulated active cut rows); ``0`` = off
+    #: (byte-identical to the pre-compaction path).
     compact_at: int = 0
-    #: (inert) Cut-compaction selection policy.
+    #: Cut-compaction selection policy (``"slack"`` | ``"dominance"``).
     cut_policy: str = "slack"
-    #: (inert) Trial-point window length for the dominance policy.
+    #: Trial-point window length for the dominance policy (trailing master
+    #: vertices fed to ``compact_cuts``).
     cut_window: int = 5
     #: Bootstrap recourse-floor multiplier: the post-bootstrap floor is
     #: ``−eta_floor_mult · max(max_s |cost_s^bootstrap|, obj_scale)``.
@@ -431,9 +468,8 @@ def _cut_separates(
     The tolerance is LOAD-BEARING: a bare ``>`` reports spurious
     "separated" on round-off, the forced out-step never fires, and the loop
     livelocks on a degenerate vertex.  All quantities are homogeneous in the
-    caller's scale.  (Consumed by the in-out wiring of the follow-up commit;
-    published alongside :func:`_check_cuts_satisfied` so the two tolerance
-    formulas live and change together.)
+    caller's scale.  (Kept alongside :func:`_check_cuts_satisfied` so the two
+    tolerance formulas live and change together.)
     """
     cut_val = cost + sum(g * (f_out[c] - f_sep[c]) for c, g in slopes.items())
     row_scale = abs(cost) + sum(abs(g) * (abs(f_out[c]) + abs(f_sep[c])) for c, g in slopes.items())
@@ -561,13 +597,14 @@ def solve_benders_loop(
         The bootstrap point over the FULL coupling col-id universe
         (``{master col id -> value}``).  Its key set IS the coupling column
         universe for the whole run: the coordinator uses it for the
-        bootstrap subsolve pass and as the bootstrap cuts' generation point
-        (and, once in-out lands, as the stabilizer centre seed) — it never
-        derives coupling columns from anything else.
+        bootstrap subsolve pass, as the bootstrap cuts' generation point and
+        as the in-out stabilizer centre seed — it never derives coupling
+        columns from anything else.
     extra_reference_cost
-        (inert) Called once post-bootstrap for an additional reference-cost
-        term of the stall guard — wired with the stall guard in the
-        follow-up commit; accepted now so caller signatures are stable.
+        Called ONCE post-bootstrap; its absolute value is added to the
+        stall guard's reference scale (the sum of the absolute bootstrap
+        subproblem costs) — e.g. the master's own stand-alone cost at the
+        no-coupling point.  ``None`` adds nothing.
     on_iteration
         Fired once per outer iteration (after that iteration's master +
         subproblem solves) with ``{"iter", "lower_bound", "upper_bound",
@@ -591,19 +628,15 @@ def solve_benders_loop(
     BendersBoundInvalid
         On a gross bound-sequence inconsistency (see the class docstring for
         the kinds).
-    NotImplementedError
-        When an option belonging to a not-yet-wired feature is set to a
-        behavior-changing value (``in_out_weight > 0``, ``compact_at > 0``).
+    BendersStalled
+        When the stall guard's frozen-blowup conjunction fires (see the
+        class docstring).
     """
-    if options.in_out_weight != 0.0:
-        raise NotImplementedError(
-            "solve_benders_loop: in_out_weight > 0 (in-out stabilization) is "
-            "not wired yet — it lands in the follow-up commit; use 0.0"
-        )
-    if options.compact_at > 0:
-        raise NotImplementedError(
-            "solve_benders_loop: compact_at > 0 (cut compaction) is not wired "
-            "yet — it lands in the follow-up commit; use 0"
+    if not (0.0 <= options.in_out_weight < 1.0):
+        raise ValueError(
+            "solve_benders_loop: in_out_weight must be in [0, 1): "
+            f"got {options.in_out_weight!r} (>= 1 never queries the master ⇒ "
+            "non-convergent; < 0 is meaningless)"
         )
     if not subproblems:
         raise ValueError("solve_benders_loop: no subproblems — nothing to decompose")
@@ -632,15 +665,24 @@ def solve_benders_loop(
     # caller can label each subproblem-finish event (bootstrap = 0).
     cur_iter = [0]
 
-    def _solve_subs(point: dict[int, float]) -> list[SubproblemResult]:
-        """Solve every subproblem at ``point`` and return the results in
-        deterministic subproblem-index order (parallel when
-        ``eff_workers > 1``).  Fires ``on_subsolve`` once per subproblem as
-        it FINISHES (from the worker thread; the callback must be
-        thread-safe)."""
+    def _solve_subs(point_or_fn) -> list[SubproblemResult]:
+        """Solve every subproblem and return the results in deterministic
+        subproblem-index order (parallel when ``eff_workers > 1``).
+
+        ``point_or_fn`` is EITHER a single ``{master col id -> value}`` dict
+        — every subproblem is pinned at the same point (the exact-Benders /
+        bootstrap path) — OR a callable ``i -> point`` returning subproblem
+        ``i``'s OWN pin point (the in-out path, where each subproblem is
+        pinned at its own interior ``f_sep``; a shared master column may
+        carry different per-subproblem interior values, so a per-subproblem
+        callable — not one merged dict — is the correct interface).  Fires
+        ``on_subsolve`` once per subproblem as it FINISHES (from the worker
+        thread; the callback must be thread-safe)."""
+        per_sub = callable(point_or_fn)
 
         def _fn(i: int) -> SubproblemResult:
-            res = subproblems[i].solve_at(point)
+            pin = point_or_fn(i) if per_sub else point_or_fn
+            res = subproblems[i].solve_at(pin)
             if on_subsolve is not None:
                 try:
                     on_subsolve({"iter": cur_iter[0], "sub": subproblems[i].name, "cost": res.cost})
@@ -665,6 +707,24 @@ def solve_benders_loop(
     for sub, res in zip(subproblems, _solve_subs(initial_point)):
         bootstrap_cuts.append((sub.name, bootstrap_gen, res.cost, res.slopes))
     cost_scale = max((abs(c) for _, _, c, _ in bootstrap_cuts), default=1.0)
+    # Per-subproblem STAND-ALONE (initial-point) cost, keyed by name.  Its
+    # absolute sum is a "sane objective magnitude" reference for the stall
+    # guard, and the per-subproblem values ride the BendersStalled exception
+    # so the caller can name the worst offender in its own diagnostics.
+    sub_reference_costs = {name: cost for name, _, cost, _ in bootstrap_cuts}
+    # Optional extra reference term (e.g. the master's own stand-alone cost
+    # at the no-coupling point) — called ONCE, post-bootstrap.
+    extra_ref = abs(float(extra_reference_cost())) if extra_reference_cost is not None else 0.0
+    # Domain-free stall detector.  reference_scale = Σ|bootstrap cost| +
+    # |extra|; the gap floor is raised to max(20·tol, 0.02) when unset so a
+    # loose ``tol`` never lets the floor fall below the gap it must clear.
+    stall_monitor = StallMonitor(
+        sum(abs(c) for c in sub_reference_costs.values()) + extra_ref,
+        window=options.stall_window,
+        gap_floor=(
+            options.gap_floor if options.gap_floor is not None else max(20.0 * options.tol, 0.02)
+        ),
+    )
     # Floor in the caller's scale; ``max(cost_scale, obj_scale)`` keeps it
     # from collapsing to ~0 in the degenerate all-zero-cost case.
     eta_floor = -options.eta_floor_mult * max(cost_scale, options.obj_scale)
@@ -678,16 +738,62 @@ def solve_benders_loop(
     converged = False
     gap = float("inf")
 
+    # --- In-out separation (Ben-Ameur & Neto 2007) — PER-SUBPROBLEM
+    # stabilizer.  ``λ`` is the weight on the stable interior centre in
+    # ``f_sep = λ·centre + (1−λ)·f_out``.  One stabilizer PER SUBPROBLEM (the
+    # correct unit — a global λ lets a well-behaved subproblem mask a
+    # degenerate one), each seeded with the caller's ``initial_point`` centre
+    # (the natural no-coupling point, feasible against any projection, and
+    # matching the loop bootstrap).  When ``λ == 0.0`` every in-out block
+    # below is skipped and the loop is byte-identical to exact Benders.
+    in_out_weight = options.in_out_weight
+    in_out_on = in_out_weight > 0.0
+    if in_out_on:
+        _logger.info(
+            "benders: in-out separation ON (weight λ=%.3f) over %d subproblem(s)",
+            in_out_weight,
+            len(subproblems),
+        )
+    stabilizers: dict[str, InOutStabilizer] = {}
+    if in_out_on:
+        for sub in subproblems:
+            stab = InOutStabilizer(weight=in_out_weight)
+            stab.set_centre(initial_point)
+            stabilizers[sub.name] = stab
+
     # ``pending_cuts`` are the cuts for the subproblems solved at the CURRENT
     # point; they are appended at the top of each iteration before the master
-    # solve.  Iteration 1 uses the bootstrap cuts.
+    # solve.  Iteration 1 uses the bootstrap cuts.  Each entry carries its
+    # own generation point (= the loop point with in-out OFF; = the interior
+    # ``f_sep`` with in-out ON).
     pending_cuts = bootstrap_cuts
     point: dict[int, float] = initial_point
     sub_costs: dict[str, float] = {}
     # DIAGNOSTIC: running total of cut rows appended to the master, surfaced
     # in the per-iteration timing line so the master-solve cost can be read
-    # against the accumulated row count.
+    # against the accumulated row count.  With cut compaction ON it is reset
+    # to the KEPT (binding) count at each compaction.
     cut_rows = 0
+    # Periodic MASTER CUT COMPACTION threshold (0 = OFF = byte-identical to
+    # the pre-compaction path — the whole compaction call at the bottom of
+    # the loop body is guarded by ``compact_at > 0``).  Capability guard: a
+    # master adapter without the OPTIONAL ``compact_cuts`` member disables
+    # compaction with a clear one-time message instead of crashing mid-solve
+    # with an ``AttributeError``; the run then proceeds exactly like the
+    # default (OFF) path.
+    compact_at = options.compact_at
+    if compact_at > 0 and not callable(getattr(master, "compact_cuts", None)):
+        _logger.warning(
+            "benders: cut compaction was requested (compact_at=%d) but the "
+            "master adapter has no compact_cuts member; continuing without "
+            "compaction.",
+            compact_at,
+        )
+        compact_at = 0
+    # Bounded trailing window of recent master vertices (``msol.col_value``,
+    # most-recent last) feeding the ``compact_cuts(policy="dominance")``
+    # selection.  Only consulted when compaction is ON.
+    cut_window: deque = deque(maxlen=max(1, options.cut_window))
 
     for it in range(options.max_iters):
         iterations = it + 1
@@ -705,6 +811,10 @@ def solve_benders_loop(
         t_master = time.perf_counter()
         msol = master.solve()
         dt_master = time.perf_counter() - t_master
+        # Record this master vertex in the dominance-policy trial-point
+        # window (most-recent last; bounded by the deque ``maxlen``).  Only
+        # consulted when compaction is ON.
+        cut_window.append(msol.col_value)
         prev_lb = lb
         lb = float(msol.obj)
         # LB monotone non-decreasing self-check.  In exact arithmetic the
@@ -773,29 +883,89 @@ def solve_benders_loop(
                 solver_feas,
             )
 
-        # --- advance the point to the (projected) master optimum and solve
-        # the subproblems there: (a) this iteration's recourse cost gives a
-        # VALID upper bound (the point is feasible for the master), and (b)
-        # the solves produce the next iteration's cuts.
+        # --- advance the point to the (projected) master optimum ``f_out``
+        # (used for the LB/recourse bookkeeping and, with in-out OFF, the
+        # subproblem pin) and solve the subproblems: (a) this iteration's
+        # recourse cost gives a VALID upper bound (the pin point is feasible
+        # for the master), and (b) the solves produce the next iteration's
+        # cuts.
         point = new_point
         cur_iter[0] = iterations  # label this pass's subproblem-finish events
 
+        # --- IN-OUT SEPARATION.  With ``λ>0`` each subproblem is solved at
+        # its OWN interior separation point ``f_sep = λ·centre + (1−λ)·f_out``
+        # (a per-subproblem dict, since a shared master column may carry
+        # different interior values for its owning subproblems), re-projected
+        # onto the CURRENT feasible set (the centre is an old incumbent point
+        # feasible against a PAST projection, so ``f_sep`` can exceed the
+        # current one — projecting down keeps the UB valid; hence
+        # ``hard_fail=False``: this is routine, not a bug signal).  The cut
+        # is then GENERATED at ``f_sep`` (its generation point), and a
+        # per-subproblem separation test below decides whether the stabilizer
+        # must force an exact-Benders out-step next.  With ``λ == 0.0`` (OFF)
+        # this whole block is skipped and the subproblem pin / gen-point are
+        # ``point`` verbatim ⇒ byte-identical to exact Benders.
+        f_sep_by_sub: dict[str, dict[int, float]] = {}
+        if in_out_on:
+            for sub in subproblems:
+                f_sep_s = stabilizers[sub.name].separation_point(point)
+                if f_sep_s is not point:
+                    # A genuine interior point — re-project a COPY onto the
+                    # current feasible set (leaves ``point`` untouched for
+                    # the verbatim out-step case, where ``separation_point``
+                    # returned it as-is).
+                    f_sep_s = dict(f_sep_s)
+                    master.project_point(f_sep_s, msol, hard_fail=False)
+                f_sep_by_sub[sub.name] = f_sep_s
+
+        def _sub_pin(i: int, _f_sep=f_sep_by_sub) -> dict[int, float]:
+            # Per-subproblem pin point: its own projected ``f_sep`` (in-out
+            # ON; only called on that path).  ``_f_sep`` is bound at
+            # definition so the closure pins THIS iteration's points.
+            return _f_sep[subproblems[i].name]
+
         sub_costs = {}
         next_cuts: list[tuple[str, dict[int, float], float, dict[int, float]]] = []
+        # Per-subproblem slopes recovered this pass (keyed by name), so the
+        # in-out separation test / register below need not re-scan
+        # ``next_cuts``.
+        slopes_by_sub: dict[str, dict[int, float]] = {}
         t_subs = time.perf_counter()
-        sub_results = _solve_subs(point)
+        sub_results = _solve_subs(_sub_pin if in_out_on else point)
         dt_subs = time.perf_counter() - t_subs
         for sub, res in zip(subproblems, sub_results):
+            gen_point = f_sep_by_sub[sub.name] if in_out_on else point
+            slopes_by_sub[sub.name] = res.slopes
             sub_costs[sub.name] = res.cost
-            next_cuts.append((sub.name, point, res.cost, res.slopes))
+            next_cuts.append((sub.name, gen_point, res.cost, res.slopes))
 
         # --- UB = master native cost + Σ subproblem costs at the SAME
-        # (point, master solution) — all terms in the caller's scale.
+        # (pin, master solution) — all terms in the caller's scale.  ``pin``
+        # is ``point`` (OFF) or each subproblem's projected ``f_sep`` (ON);
+        # both are feasible for the master, so the UB is valid either way.
         ub = master.native_cost(msol, recourse_by_sub) + sum(sub_costs.values())
         improved = ub < best_ub
         if improved:
             best_ub = ub
-            incumbent_point = dict(point)
+            # The incumbent coupling point.  With in-out OFF it is the single
+            # ``point``; with in-out ON each subproblem was solved at its own
+            # ``f_sep``, so the incumbent value on a master column is the
+            # separation value of the subproblem that OWNS it (ownership =
+            # its ``SubproblemResult.slopes`` key set — by protocol it
+            # carries a key for every pinned column).  We use ``point`` as
+            # the base and overlay each subproblem's own ``f_sep`` so a
+            # column reflects the value actually solved for it (a shared
+            # column takes the LAST owner's value, in subproblem order).
+            if in_out_on:
+                incumbent_point = dict(point)
+                for sub, res in zip(subproblems, sub_results):
+                    fsr = f_sep_by_sub[sub.name]
+                    for mc in res.slopes:
+                        mc = int(mc)
+                        if mc in fsr:
+                            incumbent_point[mc] = fsr[mc]
+            else:
+                incumbent_point = dict(point)
             payload: object | None = None
             if on_incumbent is not None:
                 payload = on_incumbent(
@@ -886,7 +1056,100 @@ def solve_benders_loop(
             converged = True
             break
 
+        # --- STALL GUARD (fail fast, don't silently exhaust the iter cap).
+        # Feed the domain-free monitor this iteration's (LB, best_UB); it
+        # holds the best_UB window internally and returns a verdict once
+        # ``window`` iterations have been seen.  A stall = incumbent frozen
+        # for the window AND still blown up far above the reference scale
+        # AND gap far from converged — mutually exclusive with the sandwich
+        # break above (which has gap≈0).  On a stall the frozen incumbent is
+        # garbage (best_UB can be orders above the true optimum), so
+        # returning it would hand the caller a catastrophically wrong plan:
+        # HARD-fail with the structured exception (the caller renders its
+        # own domain diagnostics off the carried fields).
+        verdict = stall_monitor.update(lb, best_ub)
+        if verdict.stalled:
+            raise BendersStalled(
+                f"benders: stalled at iteration {iterations}: the best "
+                f"feasible cost has not improved for {stall_monitor.window} "
+                f"iterations, the relative gap is stuck at ~{gap:.2f} (far "
+                f"from the {options.tol} tolerance), and the incumbent "
+                f"{best_ub:.6e} still sits far above the reference cost "
+                f"scale {stall_monitor.reference_scale:.6e}",
+                iteration=iterations,
+                gap=gap,
+                tol=options.tol,
+                window=stall_monitor.window,
+                reference_scale=stall_monitor.reference_scale,
+                sub_costs=dict(sub_costs),
+                sub_reference_costs=dict(sub_reference_costs),
+            )
+
+        # --- IN-OUT: feed each subproblem's outcome back to its stabilizer.
+        # The separation flag is PER-SUBPROBLEM: the MOMENT a subproblem's
+        # cut fails to separate its ``point``, that subproblem's next
+        # ``separation_point`` returns ``point`` VERBATIM (λ=0 → exact
+        # Benders, guaranteed to separate unless already optimal).
+        # ``improved`` (best_UB dropped this iteration) drives the serious
+        # step (centre ← incumbent).
+        if in_out_on:
+            incumbent_for_register = best["point"] if best is not None else point
+            for sub in subproblems:
+                separated = _cut_separates(
+                    sub_costs[sub.name],
+                    slopes_by_sub[sub.name],
+                    point,
+                    f_sep_by_sub[sub.name],
+                    recourse_by_sub[sub.name],
+                )
+                stabilizers[sub.name].register(
+                    master_point=point,
+                    separated=separated,
+                    incumbent_point=incumbent_for_register,
+                    improved=improved,
+                )
+
         pending_cuts = next_cuts
+
+        # --- PERIODIC MASTER CUT COMPACTION.  When the accumulated cut-row
+        # count reaches ``compact_at``, the master adapter's ``compact_cuts``
+        # classifies every retained cut row at the RAW master vertex
+        # ``msol.col_value`` (binding iff slack ≤ tol), deletes the
+        # strictly-slack rows in place, and re-solves + rolls back on any
+        # objective drift (its verify belt — LB-preserving).  The adapter
+        # owns all of that; the coordinator only triggers it and tracks the
+        # kept count.  Guarded by ``compact_at > 0`` so the default (OFF)
+        # path is byte-identical to the pre-compaction loop.
+        #
+        # PLACEMENT + ``msol`` SAFETY.  Called at the VERY END of the loop
+        # body, AFTER ``pending_cuts = next_cuts``, so ``msol`` has already
+        # been FULLY consumed by THIS iteration (``read_point`` / the LB
+        # self-checks / ``_check_cuts_satisfied`` / the UB + sandwich/stall
+        # guards); nothing downstream in the iteration reads it again.
+        # ``msol.col_value`` is the RAW master optimum — the projection above
+        # mutates ``new_point``, NOT ``msol`` — which is the correct
+        # classification point.  Deleting rows here simply shrinks the master
+        # for the NEXT iteration's ``solve()``.
+        #
+        # SELECTION POLICY (``cut_policy``): ``slack`` drops cuts strictly
+        # slack at the current optimum; ``dominance`` groups cuts by recourse
+        # column and, over ``cut_window`` (the last W master vertices), keeps
+        # only the oldest group-max achiever at each trial point.  Both are
+        # LB-safe (verify-restore belt in the adapter).
+        if compact_at > 0 and cut_rows >= compact_at:
+            comp = master.compact_cuts(
+                msol,  # msol = raw pre-projection master vertex (latest trial point)
+                policy=options.cut_policy,
+                trial_col_values=list(cut_window),
+            )
+            cut_rows = comp["kept"]
+            _logger.info(
+                "[benders timing] iter %d: cut compaction kept=%d dropped=%d restored=%s",
+                iterations,
+                comp["kept"],
+                comp["dropped"],
+                comp["restored"],
+            )
 
     # --- assemble the result from the incumbent (fall back to the last
     # iteration's state when no iteration improved — e.g. a zero-iteration
