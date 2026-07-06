@@ -16,9 +16,11 @@ from polar_high.benders import (
     BendersMaster,
     BendersStalled,
     BendersSubproblem,
+    PointEvaluation,
     SubproblemHandle,
     SubproblemNotOptimal,
     SubproblemResult,
+    evaluate_at_point,
     solve_benders_loop,
 )
 from polar_high.decomposition import (
@@ -60,9 +62,11 @@ __all__ = [
     "BendersMaster",
     "BendersStalled",
     "BendersSubproblem",
+    "PointEvaluation",
     "SubproblemHandle",
     "SubproblemNotOptimal",
     "SubproblemResult",
+    "evaluate_at_point",
     "solve_benders_loop",
     "Var",
     "Param",

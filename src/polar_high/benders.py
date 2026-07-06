@@ -94,9 +94,11 @@ __all__ = [
     "BendersMaster",
     "BendersStalled",
     "BendersSubproblem",
+    "PointEvaluation",
     "SubproblemHandle",
     "SubproblemNotOptimal",
     "SubproblemResult",
+    "evaluate_at_point",
     "solve_benders_loop",
 ]
 
@@ -324,6 +326,25 @@ class BendersMaster(Protocol):
     def native_cost(self, sol: Solution, recourse: dict[str, float]) -> float:
         """The master's OWN cost at ``sol`` — its objective minus the
         recourse terms (``obj − Σ recourse``)."""
+        ...
+
+    def native_cost_at(self, point: dict[int, float]) -> float:
+        """OPTIONAL member — the master's OWN cost with its coupling columns
+        PINNED at ``point`` (``{master col id -> value}``): pin the coupling
+        columns to ``point``, solve the master ONCE, and return
+        ``obj − Σ recourse`` at that pinned solution (restoring the pinned
+        columns' bounds afterwards).
+
+        This is the L-shaped "evaluate the first-stage cost at an ARBITRARY
+        feasible coupling point" primitive — the counterpart of
+        :meth:`native_cost`, which reads the cost only at the master's OWN
+        vertex.  It exists so :func:`evaluate_at_point` can score the whole
+        objective ``c(x̄) + Σ_r Q_r(x̄)`` at one common point ``x̄`` even when
+        the master's native cost DEPENDS on the coupling flows (a
+        cost-bearing master, e.g. one hosting balance/storage nodes).  A
+        master whose native cost is flow-independent, or one that simply
+        does not implement this, is reported subproblem-only by
+        :func:`evaluate_at_point` (``master_native_cost = None``)."""
         ...
 
     def project_point(self, f: dict[int, float], sol: Solution, *, hard_fail: bool = True) -> float:
@@ -562,6 +583,152 @@ def _check_cuts_satisfied(
             violation,
             row_scale,
         )
+
+
+# ---------------------------------------------------------------------------
+# Single-point evaluation (the L-shaped feasible-point primitive).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PointEvaluation:
+    """Outcome of :func:`evaluate_at_point` — the whole two-stage objective
+    scored at ONE feasible coupling point.  All costs are in the caller's
+    scale (the same convention as :class:`BendersLoopResult`)."""
+
+    #: Subproblem cost at ``point``, keyed by subproblem name.
+    sub_costs: dict[str, float]
+    #: ``Σ sub_costs`` — the total recourse cost at ``point``.
+    sub_cost_total: float
+    #: The master's native (first-stage) cost AT ``point``
+    #: (``master.native_cost_at(point)``), or ``None`` when the master does
+    #: not implement the optional ``native_cost_at`` member.
+    master_native_cost: float | None
+    #: The whole-objective value at ``point``: ``sub_cost_total +
+    #: master_native_cost`` (or just ``sub_cost_total`` when the master term
+    #: is unavailable).  When the master term is present and ``point`` is
+    #: master-feasible this is a genuine single-point upper bound on the
+    #: two-stage optimum (Van Slyke & Wets 1969).
+    total_cost: float
+    #: Per-subproblem "blew up vs reference" flag: ``True`` iff the
+    #: subproblem's cost at ``point`` exceeds ``blowup_mult · max(1,
+    #: |reference_costs[name]|)``.  Empty when no ``reference_costs`` were
+    #: supplied.
+    blew_up: dict[str, bool]
+    #: The reference costs the blow-up test compared against (echoed for the
+    #: caller's diagnostics), or ``None``.
+    reference_costs: dict[str, float] | None
+    #: The multiplier used for the blow-up test.
+    blowup_mult: float
+
+
+def evaluate_at_point(
+    master: BendersMaster,
+    subproblems: list[BendersSubproblem],
+    point: dict[int, float],
+    *,
+    reference_costs: dict[str, float] | None = None,
+    blowup_mult: float = 100.0,
+    workers: int | None = None,
+) -> PointEvaluation:
+    """Evaluate the whole two-stage objective at ONE feasible coupling
+    ``point`` — the L-shaped feasible-point primitive.
+
+    For a first-stage / coupling decision ``x̄`` the two-stage objective is
+    ``c(x̄) + Σ_r Q_r(x̄)`` where ``Q_r(x̄)`` is subproblem ``r`` solved to
+    optimality at ``x̄`` and ``c`` is the master's own (native) cost.  This
+    helper computes exactly that at ``point``:
+
+    #. solves every subproblem at ``point`` (``solve_at(point)``, fanned out
+       over a thread pool exactly like the loop's recourse pass — each
+       subproblem owns its pin+solve), giving ``Q_r(point)``;
+    #. reads the master's native cost AT ``point`` via the OPTIONAL
+       :meth:`BendersMaster.native_cost_at` (a master lacking it is reported
+       subproblem-only, ``master_native_cost = None``);
+    #. flags, per subproblem, whether its cost at ``point`` "blew up" versus
+       an optional per-subproblem ``reference_costs`` baseline (cost >
+       ``blowup_mult · max(1, |reference|)``).
+
+    Unlike :func:`solve_benders_loop` this runs NO iterations, appends NO
+    cuts, and mutates no bound outside the master's own
+    ``native_cost_at`` save/restore — it is a pure read-out at a single
+    point, the building block a go/no-go pin diagnostic (and later
+    consistent-point UB work) is composed from.  ``point`` must be
+    master-feasible for ``total_cost`` to be a valid upper bound; the caller
+    owns that (e.g. project it first, or supply a known-feasible point such
+    as a monolith optimum).
+
+    Parameters
+    ----------
+    master
+        The :class:`BendersMaster` adapter.  Only its OPTIONAL
+        ``native_cost_at`` is used (never ``solve`` / ``add_cut`` / …), so
+        the master's cut pool and warm state are untouched.
+    subproblems
+        The :class:`BendersSubproblem` adapters, each with a BUILT ``warm``
+        handle (same precondition as the loop).  Names must be unique.
+    point
+        ``{master col id -> value}`` over the coupling column universe every
+        subproblem is pinned on (and every column ``native_cost_at`` pins).
+    reference_costs
+        Optional per-subproblem baseline (e.g. the stand-alone / zero-
+        coupling cost) for the blow-up flag.  ``None`` leaves ``blew_up``
+        empty.
+    blowup_mult
+        Blow-up threshold multiplier (default 100×).
+    workers
+        Worker-thread count for the subproblem pass; ``None`` auto-resolves
+        (see :func:`polar_high.parallel.resolve_worker_count`).
+
+    Returns
+    -------
+    PointEvaluation
+    """
+    if not subproblems:
+        raise ValueError("evaluate_at_point: no subproblems — nothing to evaluate")
+    names = [s.name for s in subproblems]
+    if len(set(names)) != len(names):
+        raise ValueError(f"evaluate_at_point: duplicate subproblem names in {names!r}")
+    if not point:
+        raise ValueError("evaluate_at_point: point is empty — nothing to pin")
+
+    warm_list = [s.warm for s in subproblems]
+    eff_workers = resolve_worker_count(len(subproblems), workers)
+
+    def _fn(i: int) -> SubproblemResult:
+        return subproblems[i].solve_at(point)
+
+    results = solve_indexed_parallel(warm_list, _fn, workers=eff_workers)
+    sub_costs = {sub.name: float(res.cost) for sub, res in zip(subproblems, results)}
+    sub_cost_total = float(sum(sub_costs.values()))
+
+    native_cost_at = getattr(master, "native_cost_at", None)
+    master_native_cost: float | None
+    if callable(native_cost_at):
+        master_native_cost = float(native_cost_at(point))
+    else:
+        master_native_cost = None
+
+    total_cost = sub_cost_total + (master_native_cost or 0.0)
+
+    blew_up: dict[str, bool] = {}
+    if reference_costs is not None:
+        for name, cost in sub_costs.items():
+            ref = reference_costs.get(name)
+            if ref is None:
+                continue
+            threshold = blowup_mult * max(1.0, abs(float(ref)))
+            blew_up[name] = cost > threshold
+
+    return PointEvaluation(
+        sub_costs=sub_costs,
+        sub_cost_total=sub_cost_total,
+        master_native_cost=master_native_cost,
+        total_cost=total_cost,
+        blew_up=blew_up,
+        reference_costs=dict(reference_costs) if reference_costs is not None else None,
+        blowup_mult=float(blowup_mult),
+    )
 
 
 # ---------------------------------------------------------------------------

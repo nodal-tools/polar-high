@@ -49,9 +49,11 @@ from polar_high import (
     BendersBoundInvalid,
     BendersLoopOptions,
     BendersStalled,
+    PointEvaluation,
     SubproblemHandle,
     SubproblemNotOptimal,
     SubproblemResult,
+    evaluate_at_point,
     solve_benders_loop,
 )
 
@@ -120,6 +122,24 @@ class _ToyMaster:
 
     def native_cost(self, sol: fp.Solution, recourse: dict[str, float]) -> float:
         return float(sol.obj) - sum(recourse.values())
+
+    def native_cost_at(self, point: dict[int, float]) -> float:
+        # Pin f1/f2 at ``point`` and read obj − Σ eta (the eta cols float to
+        # their floor and cancel out), so this returns f_costs·(f1, f2) at the
+        # pinned coupling values — the same quantity ``native_cost`` reads at
+        # the master's own vertex, but at an ARBITRARY point.
+        cols = np.array(list(self.f_col.values()), dtype=np.int64)
+        lo, hi = self.wp.get_col_bounds(cols)
+        vals = np.array([float(point[int(c)]) for c in cols], dtype=np.float64)
+        self.wp.fix_col_ids(cols, vals)
+        try:
+            sol = self.wp.solve(retry_on_unknown=True)
+            if not sol.optimal:
+                raise RuntimeError("toy master native_cost_at solve not optimal")
+            eta = sum(float(sol.col_value[c]) for c in self._eta_col.values())
+            return float(sol.obj) - eta
+        finally:
+            self.wp.set_col_bounds(cols, lo, hi)
 
     def project_point(
         self, f: dict[int, float], sol: fp.Solution, *, hard_fail: bool = True
@@ -1152,3 +1172,106 @@ def test_lambda0_trajectory_unchanged_with_wired_features() -> None:
     assert trajectory[1][1] == pytest.approx(16.0, rel=1e-12)
     assert trajectory[1][2] == pytest.approx(16.0, rel=1e-12)
     assert trajectory[1][3] == 4
+
+
+# ---------------------------------------------------------------------------
+# evaluate_at_point — the L-shaped feasible-point primitive.
+#
+# The toy monolith optimum is (f1=4, f2=0) with total 16 (module docstring).
+# At that point:
+#   sub1: demand 4, gen 3, f_in pinned 4 -> g=0  -> cost 0
+#   sub2: demand 6, gen 2, f_in pinned 0 -> g=6  -> cost 12
+#   master native at (4, 0) = 1·4 + 5·0 = 4
+#   total = 0 + 12 + 4 = 16   (= the hand-verified monolith optimum)
+# Stand-alone reference (zero coupling): sub1 = 3·4 = 12, sub2 = 2·6 = 12.
+# ---------------------------------------------------------------------------
+
+
+class _NoNativeMaster:
+    """A master WITHOUT ``native_cost_at`` — to prove ``evaluate_at_point``
+    degrades to subproblem-only (``master_native_cost = None``)."""
+
+    def solve(self) -> fp.Solution:  # pragma: no cover — never called here
+        raise AssertionError("evaluate_at_point must not call master.solve")
+
+
+def test_evaluate_at_point_hand_verified_optimum() -> None:
+    master, subs, initial = _build_toy()
+    mono_point = {master.f_col["sub1"]: 4.0, master.f_col["sub2"]: 0.0}
+    ref = evaluate_at_point(master, subs, initial, workers=1)  # stand-alone
+    assert ref.sub_costs["sub1"] == pytest.approx(12.0, rel=1e-12)
+    assert ref.sub_costs["sub2"] == pytest.approx(12.0, rel=1e-12)
+    assert ref.master_native_cost == pytest.approx(0.0, abs=1e-9)
+
+    res = evaluate_at_point(
+        master,
+        subs,
+        mono_point,
+        reference_costs=ref.sub_costs,
+        blowup_mult=100.0,
+        workers=1,
+    )
+    assert isinstance(res, PointEvaluation)
+    assert res.sub_costs["sub1"] == pytest.approx(0.0, abs=1e-9)
+    assert res.sub_costs["sub2"] == pytest.approx(12.0, rel=1e-12)
+    assert res.sub_cost_total == pytest.approx(12.0, rel=1e-12)
+    assert res.master_native_cost == pytest.approx(4.0, rel=1e-12)
+    assert res.total_cost == pytest.approx(16.0, rel=1e-12)
+    # No subproblem blew up versus its stand-alone reference.
+    assert res.blew_up == {"sub1": False, "sub2": False}
+
+
+def test_evaluate_at_point_master_state_untouched() -> None:
+    # evaluate_at_point pins/solves inside native_cost_at but must restore the
+    # master's coupling-column bounds, so a subsequent loop run is unaffected.
+    master, subs, initial = _build_toy()
+    mono_point = {master.f_col["sub1"]: 4.0, master.f_col["sub2"]: 0.0}
+    lo0, hi0 = master.wp.get_col_bounds(np.array(list(master.f_col.values()), dtype=np.int64))
+    evaluate_at_point(master, subs, mono_point, workers=1)
+    lo1, hi1 = master.wp.get_col_bounds(np.array(list(master.f_col.values()), dtype=np.int64))
+    assert np.array_equal(lo0, lo1) and np.array_equal(hi0, hi1)
+    # And the loop still converges to 16 on the restored master.
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=20, tol=1e-9, workers=1),
+        initial_point=initial,
+    )
+    assert result.converged
+    assert result.best_upper_bound == pytest.approx(16.0, rel=1e-9)
+
+
+def test_evaluate_at_point_blowup_flag() -> None:
+    # A tiny reference makes the stand-alone costs (12, 12) read as blown up.
+    master, subs, initial = _build_toy()
+    res = evaluate_at_point(
+        master,
+        subs,
+        initial,
+        reference_costs={"sub1": 0.1, "sub2": 0.1},
+        blowup_mult=10.0,
+        workers=1,
+    )
+    # threshold = 10 · max(1, 0.1) = 10 ; both stand-alone costs (12) exceed it.
+    assert res.blew_up == {"sub1": True, "sub2": True}
+    assert res.blowup_mult == 10.0
+
+
+def test_evaluate_at_point_no_native_cost_at() -> None:
+    _, subs, initial = _build_toy()
+    res = evaluate_at_point(_NoNativeMaster(), subs, initial, workers=1)
+    assert res.master_native_cost is None
+    # total falls back to the subproblem sum only.
+    assert res.total_cost == pytest.approx(res.sub_cost_total, rel=1e-12)
+    assert res.sub_cost_total == pytest.approx(24.0, rel=1e-12)
+
+
+def test_evaluate_at_point_input_guards() -> None:
+    master, subs, initial = _build_toy()
+    with pytest.raises(ValueError, match="no subproblems"):
+        evaluate_at_point(master, [], initial, workers=1)
+    with pytest.raises(ValueError, match="point is empty"):
+        evaluate_at_point(master, subs, {}, workers=1)
+    dup = [subs[0], SubproblemHandle(subs[0].name, subs[0].warm, subs[0].solve_at)]
+    with pytest.raises(ValueError, match="duplicate subproblem names"):
+        evaluate_at_point(master, dup, initial, workers=1)
