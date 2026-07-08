@@ -487,18 +487,6 @@ class BendersLoopOptions:
     trust_region_expand: float = 2.0
     #: Trust-region radius SHRINK factor on a null step.  Must be in ``(0, 1)``.
     trust_region_shrink: float = 0.5
-    #: EXPERIMENTAL level-method stabilizer weight ``κ`` (Lemaréchal-Nemirovski-
-    #: Nesterov 1995).  ``None`` = OFF (byte-identical to the pre-level loop).
-    #: When set (``0 < κ < 1``), once a finite incumbent ``x̄``/``best_UB``
-    #: exists the subproblems are queried at the projection ``x⁺ =
-    #: argmin ‖x − x̄‖_∞ s.t. model(x) ≤ LB + κ(best_UB − LB)`` (an ∞-norm LP;
-    #: the master stays an LP).  Requires the master adapter to implement
-    #: ``solve_level_projection(centre, level)``.  MUTUALLY EXCLUSIVE with
-    #: ``in_out_weight`` and ``trust_region_radius`` (all three shape the query
-    #: point; only one may own it).  This is a de-risking SPIKE knob for the
-    #: frozen-lower-bound pathology (specs/benders_step5_cut_selection_design.md
-    #: §C.6 commit 1); productionizing is a later commit.
-    level_kappa: float | None = None
     #: Worker-thread count for the subproblem pass; ``None`` auto-resolves
     #: (see :func:`polar_high.parallel.resolve_worker_count`).
     workers: int | None = None
@@ -960,27 +948,6 @@ def solve_benders_loop(
             "adapter does not implement apply_coupling_box / clear_coupling_box "
             "(the coupling-box primitives the trust region needs)"
         )
-    level_on = options.level_kappa is not None
-    if level_on and not (0.0 < options.level_kappa < 1.0):
-        raise ValueError(
-            "solve_benders_loop: level_kappa must be in (0, 1) when set (None "
-            f"= off): got {options.level_kappa!r}"
-        )
-    if level_on and (tr_on or options.in_out_weight > 0.0):
-        raise ValueError(
-            "solve_benders_loop: the level method (level_kappa set), in-out "
-            "(in_out_weight > 0) and the trust region (trust_region_radius set) "
-            "are MUTUALLY EXCLUSIVE master stabilizers — select at most one "
-            f"(got level_kappa={options.level_kappa!r}, "
-            f"in_out_weight={options.in_out_weight!r}, "
-            f"trust_region_radius={options.trust_region_radius!r})"
-        )
-    if level_on and not callable(getattr(master, "solve_level_projection", None)):
-        raise ValueError(
-            "solve_benders_loop: level_kappa is set but the master adapter does "
-            "not implement solve_level_projection (the level-set projection "
-            "query the level method needs)"
-        )
     if not subproblems:
         raise ValueError("solve_benders_loop: no subproblems — nothing to decompose")
     names = [s.name for s in subproblems]
@@ -1123,23 +1090,6 @@ def solve_benders_loop(
         _logger.info(
             "benders: trust-region stabilization ON (Δ₀=%.3g) over %d subproblem(s)",
             trust.radius,
-            len(subproblems),
-        )
-
-    # --- Level-method stabilization (EXPERIMENTAL spike; Lemaréchal-Nemirovski-
-    # Nesterov 1995) — MUTUALLY EXCLUSIVE with in-out and the trust region
-    # (validated above).  Unlike the trust region (which decouples the query
-    # from the LB), the level method queries the projection of the incumbent
-    # onto the level set ``model(x) ≤ LB + κ(best_UB − LB)``, coupling the query
-    # to the LB so the generated cuts lift the LB-defining corner.  It only
-    # activates once a finite incumbent/best_UB exists (see the loop body);
-    # until then, and whenever ``level_kappa`` is None, every level block is
-    # skipped and the loop is byte-identical to the pre-level path.
-    if level_on:
-        _logger.info(
-            "benders: level-method stabilization ON (κ=%.3g, EXPERIMENTAL) over "
-            "%d subproblem(s)",
-            float(options.level_kappa),
             len(subproblems),
         )
 
@@ -1304,33 +1254,6 @@ def solve_benders_loop(
             # (a gross violation hard-fails inside the adapter).
             master.project_point(tr_iterate_point, tr_msol, hard_fail=True)
 
-        # --- LEVEL METHOD (EXPERIMENTAL spike): query the projection of the
-        # incumbent ``x̄`` onto the level set ``model(x) ≤ LB + κ(best_UB − LB)``.
-        # Only ACTIVE once a finite incumbent/best_UB exists — until then the
-        # honest-caveat degeneracy (§C.1: huge best_UB ⇒ huge level ⇒ level set
-        # contains the incumbent ⇒ x⁺ ≈ x̄) makes the projection a no-op, so we
-        # fall back to the plain master optimum ``point`` (identical to exact
-        # Benders on those early iterations).  ``query_iterate_point`` is the
-        # single coupling point the subproblems are queried + the UB scored at;
-        # it aliases ``tr_iterate_point`` (= ``point`` with the trust region OFF)
-        # on every non-level iteration ⇒ byte-identical when level_kappa is None.
-        query_iterate_point = tr_iterate_point
-        level_active = (
-            level_on and best is not None and np.isfinite(best_ub) and best_ub > lb
-        )
-        if level_active:
-            level = lb + float(options.level_kappa) * (best_ub - lb)
-            # ``best["point"]`` is the incumbent x̄ (a stored dict never mutated
-            # later).  The adapter returns x⁺ over the coupling columns and
-            # stashes the projection's own invested capacity for project_point.
-            lvl_point = master.solve_level_projection(best["point"], level)
-            # x⁺ is a vertex of the projection LP (which retains every master
-            # constraint incl. capacity), so it is master-feasible; clamp DOWN
-            # to the projection's capacity WITHOUT hard-failing (like the in-out
-            # interior points — a benign numerical clamp, not a bug signal).
-            master.project_point(lvl_point, msol, hard_fail=False)
-            query_iterate_point = lvl_point
-
         # --- IN-OUT SEPARATION.  With ``λ>0`` each subproblem is solved at
         # its OWN interior separation point ``f_sep = λ·centre + (1−λ)·f_out``
         # (a per-subproblem dict, since a shared master column may carry
@@ -1370,13 +1293,12 @@ def solve_benders_loop(
         # ``next_cuts``.
         slopes_by_sub: dict[str, dict[int, float]] = {}
         t_subs = time.perf_counter()
-        # Non-in-out pin = the level projection / boxed trust-region iterate
-        # (``query_iterate_point`` aliases ``point`` when both stabilizers are
-        # OFF ⇒ byte-identical).
-        sub_results = _solve_subs(_sub_pin if in_out_on else query_iterate_point)
+        # Non-in-out pin = the boxed trust-region iterate (which aliases
+        # ``point`` when the trust region is OFF ⇒ byte-identical).
+        sub_results = _solve_subs(_sub_pin if in_out_on else tr_iterate_point)
         dt_subs = time.perf_counter() - t_subs
         for sub, res in zip(subproblems, sub_results):
-            gen_point = f_sep_by_sub[sub.name] if in_out_on else query_iterate_point
+            gen_point = f_sep_by_sub[sub.name] if in_out_on else tr_iterate_point
             slopes_by_sub[sub.name] = res.slopes
             sub_costs[sub.name] = res.cost
             next_cuts.append((sub.name, gen_point, res.cost, res.slopes))
@@ -1472,22 +1394,6 @@ def solve_benders_loop(
                 query_point=tr_iterate_point,
                 native_at_query=False,
             )
-        elif level_active:
-            # The subproblems were queried at the level projection point x⁺,
-            # which is NOT the master's own (unboxed) vertex ``msol`` — so the
-            # master native cost must be RE-EVALUATED at x⁺ (``native_cost_at``)
-            # for the whole-objective UB ``c(x⁺) + Σ Q_r(x⁺)`` to be a genuine
-            # single-feasible-point bound (valid for a flow-dependent master
-            # too; for a flow-independent one it coincides with the vertex
-            # native cost).
-            ub = _upper_bound(
-                master,
-                sub_costs,
-                msol=msol,
-                recourse=recourse_by_sub,
-                query_point=query_iterate_point,
-                native_at_query=True,
-            )
         elif in_out_on and native_cost_flow_dependent:
             ub = _upper_bound(
                 master,
@@ -1519,10 +1425,6 @@ def solve_benders_loop(
                 incumbent_point = overlay_point
             elif tr_on:
                 incumbent_point = tr_iterate_point
-            elif level_active:
-                # x⁺ is a fresh dict from ``solve_level_projection`` this
-                # iteration, never reassigned ⇒ safe to store by reference.
-                incumbent_point = query_iterate_point
             else:
                 incumbent_point = dict(point)
             payload: object | None = None
