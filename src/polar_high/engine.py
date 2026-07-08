@@ -3347,6 +3347,29 @@ class Problem:
         self._warm_basis = nb
         self._warm_basis_policy = policy
 
+    def basis_name_fingerprint(self) -> str | None:
+        """Structural fingerprint of THIS model's LP name-set (spec §4.5).
+
+        A cheap, side-effect-free accessor the orchestrator uses as the
+        cache key for a captured :class:`NamedBasis`: it is the
+        :func:`polar_high._warm_basis.basis_fingerprint` of this model's
+        rendered column + constraint-row names, so a basis captured off one
+        build and re-injected into an identically-shaped build key on the
+        same string.  It mirrors what :meth:`write_mps` stashes as
+        ``_last_mps_fingerprint`` (same ``basis_fingerprint(col_names,
+        m.row_names)`` inputs) but is callable without writing an MPS.
+
+        Uses the canonical matrix's names (``m = self.canonicalise()``);
+        ``canonicalise`` is memoized, and LP names are Layer-2-invariant, so
+        the value is valid pre- or post-scaling and stable across repeated
+        calls.  Returns ``None`` when the problem has been released or has no
+        columns (no meaningful key).
+        """
+        if getattr(self, "_released", False) or self._next_col == 0:
+            return None
+        m = self.canonicalise()
+        return basis_fingerprint(m.col_names, m.row_names)
+
     def seed_primal(
         self,
         values: dict[str, float],
@@ -6668,6 +6691,22 @@ class WarmProblem:
         # ``col_ids ∩ _recourse_cols``; :meth:`compact_cuts` groups cuts by that
         # member for the dominance policy.
         self._recourse_cols: set[int] = set()
+        # -- warm-start basis injection (Phase 4 Step 4a) ------------------
+        # A carrier recorded via :meth:`set_named_basis` to inject once, on
+        # the fresh ``_initial_build`` before the first solve — the
+        # in-process default-path equivalent of the streaming basis hook.
+        # ``None`` (never set) ⇒ the inject block is skipped entirely and
+        # this WarmProblem is behaviorally identical to today (the
+        # byte-identical-when-unused guarantee the Benders master relies on;
+        # Benders never calls :meth:`set_named_basis`).
+        self._warm_basis: NamedBasis | None = None
+        self._warm_basis_policy: str | None = None
+        # Set in ``_initial_build`` to the fingerprint of the fresh build's
+        # name-set (the orchestrator keys the post-solve capture on it).
+        # Stays ``None`` when no carrier was recorded — on the capture-only
+        # path the orchestrator computes the key itself via
+        # :meth:`Problem.basis_name_fingerprint`.
+        self._last_basis_fingerprint: str | None = None
 
     @property
     def problem(self) -> Problem:
@@ -6680,6 +6719,31 @@ class WarmProblem:
         extra cost).
         """
         return self._p
+
+    def set_named_basis(self, nb: NamedBasis, *, policy: str = "exact") -> None:
+        """Record a warm-start basis to inject on the fresh build (spec §4.1).
+
+        RECORDS INTENT only — stores the carrier on ``self._warm_basis`` and
+        the policy on ``self._warm_basis_policy``; it does NOT build or
+        inject anything here.  The actual ``h.setBasis`` fires exactly once,
+        in :meth:`_initial_build`, immediately before the first solve's
+        ``h.run()``.  This is the in-process default-path equivalent of the
+        streaming basis hook in :meth:`Problem._solve_streaming`.
+
+        ``policy="exact"`` transfers 1:1 by name and requires the carrier's
+        fingerprint to match this model's; a mismatch under ``"exact"`` is
+        detected in ``_initial_build`` and safely falls back to a cold solve.
+        ``policy="alien"`` maps shared names and lets HiGHS repair the rest.
+
+        The inject fires only on the fresh build — ``_initial_build`` runs
+        once per WarmProblem lifetime (``solve`` calls it only while
+        ``self._h is None``), so a subsequent height-match reuse re-run never
+        re-injects.
+        """
+        if policy not in ("exact", "alien"):
+            raise ValueError(f"policy must be 'exact' or 'alien', got {policy!r}")
+        self._warm_basis = nb
+        self._warm_basis_policy = policy
 
     # -- public update API -----------------------------------------------
 
@@ -8413,6 +8477,93 @@ class WarmProblem:
         self._n_rows = int(n_rows)
         self._col_names = col_names
         self._row_names = row_names
+
+        # ------------------------------------------------------------------
+        # Warm-start basis injection (spec §4.1, in-process default-path arm).
+        #
+        # Fires ONLY when a carrier was recorded via ``set_named_basis`` and
+        # ONLY here — on the fresh build, once per WarmProblem lifetime,
+        # before the first ``h.run()`` (which lives in ``solve``).  When no
+        # carrier was set (``self._warm_basis is None``, the Benders case) the
+        # whole block is skipped after one ``is not None`` check and nothing
+        # is computed or stashed, so the build is byte-identical to today.
+        #
+        # A warm-start must NEVER break a solve: a fingerprint mismatch (under
+        # ``exact``), a rejected ``setBasis`` status, or any exception during
+        # basis construction falls back safely to a cold solve (``h.run()`` is
+        # correct after a rejected / absent ``setBasis``).  Mirrors the
+        # streaming hook in :meth:`Problem._solve_streaming`.
+        if self._warm_basis is not None:
+            # Names exactly as HiGHS received them: the ``passRowName`` loop
+            # above renders an empty/None name as the synthetic ``row_<i>``,
+            # so the fingerprint and the basis-build see the same name-set.
+            warm_row_names = [n if n else f"row_{i}" for i, n in enumerate(row_names)]
+            try:
+                target_fp = basis_fingerprint(col_names, warm_row_names)
+                self._last_basis_fingerprint = target_fp
+                policy = self._warm_basis_policy or "exact"
+                if policy == "exact" and target_fp != self._warm_basis.fingerprint:
+                    _logger.info(
+                        "warm-basis fingerprint mismatch (target=%s carrier=%s) "
+                        "under policy 'exact' → solving cold",
+                        target_fp,
+                        self._warm_basis.fingerprint,
+                    )
+                else:
+                    # REAL ±inf column bounds (m.col_lb / m.col_ub) — NOT the
+                    # sentinel-translated col_lb_h / col_ub_h — so the
+                    # bound-finiteness sanitation in build_highs_basis reads
+                    # correctly.
+                    basis, stats = build_highs_basis(
+                        self._warm_basis,
+                        policy,
+                        col_names=col_names,
+                        row_names=warm_row_names,
+                        col_lb=m.col_lb,
+                        col_ub=m.col_ub,
+                        HighsBasis=highspy.HighsBasis,
+                        HighsBasisStatus=highspy.HighsBasisStatus,
+                    )
+                    basis.valid = True
+                    status = h.setBasis(basis)
+                    _ok = getattr(highspy.HighsStatus, "kOk", None)
+                    _warn = getattr(highspy.HighsStatus, "kWarning", None)
+                    if _ok is not None and status == _ok:
+                        _logger.info(
+                            "warm-basis injected (policy=%s alien=%s): cols "
+                            "matched=%d defaulted=%d, rows matched=%d "
+                            "defaulted=%d, sanitized=%d",
+                            stats["policy"],
+                            stats["alien"],
+                            stats["n_cols_matched"],
+                            stats["n_cols_defaulted"],
+                            stats["n_rows_matched"],
+                            stats["n_rows_defaulted"],
+                            stats["n_sanitized"],
+                        )
+                    elif _warn is not None and status == _warn:
+                        # HiGHS accepted the basis but flagged it; the solve
+                        # is still correct — note it and continue.
+                        _logger.warning(
+                            "warm-basis setBasis returned kWarning (policy=%s "
+                            "stats=%s); proceeding with the injected basis",
+                            policy,
+                            stats,
+                        )
+                    else:
+                        _logger.warning(
+                            "warm-basis setBasis rejected (status=%r policy=%s "
+                            "stats=%s) → solving cold",
+                            status,
+                            policy,
+                            stats,
+                        )
+            except Exception as exc:  # never let a warm-start break a solve
+                _logger.warning(
+                    "warm-basis injection failed (%s: %s) → solving cold",
+                    type(exc).__name__,
+                    exc,
+                )
 
         # (output_flag preference is applied earlier — before the log routing —
         # so it suppresses the version banner, not just the solve log.)
