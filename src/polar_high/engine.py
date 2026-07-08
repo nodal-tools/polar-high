@@ -3131,6 +3131,15 @@ class Problem:
         # and call ``h.setBasis``.  ``None`` (default) ⇒ cold start.
         self._warm_basis: NamedBasis | None = None
         self._warm_basis_policy: str | None = None
+        # Structural basis-fingerprint of the most recent named-name MPS
+        # emitted by :meth:`write_mps`.  Stashed there (only when
+        # ``emit_names=True`` — generic ``C``/``R`` names are useless as a
+        # cross-run key) so a downstream ``save_memory`` subprocess
+        # warm-start arm can key a basis-cache file by the exact name-set
+        # it just wrote, BEFORE ``release`` drops ``_cstrs``.  ``None``
+        # until the first named ``write_mps`` (and reset to ``None`` by a
+        # subsequent ``emit_names=False`` write).
+        self._last_mps_fingerprint: str | None = None
 
     def declare_dense_axes(self, axes: tuple[str, ...] | None) -> None:
         """Declare the dense trailing axes for block-COO (see __init__ contract).
@@ -4608,6 +4617,12 @@ class Problem:
           polars sort to put the COLUMNS section into column-major
           order.  Streaming-engine fallback to disk activates
           automatically for triple counts that don't fit in RAM.
+        - Stashes ``self._last_mps_fingerprint`` — a structural
+          basis-fingerprint (:func:`polar_high._warm_basis.basis_fingerprint`)
+          over the emitted column/constraint-row name-set — computed before
+          any ``release``.  ``None`` unless ``emit_names`` is True (generic
+          names are useless as a cross-run key).  Consumed by the
+          ``save_memory`` subprocess warm-start arm to key a basis-cache file.
         """
         import warnings
 
@@ -4753,6 +4768,18 @@ class Problem:
             # rows are R0000002, R0000003, ... so the generic numbering
             # gives 1-indexed sequential row ids that match how a user
             # would count rows in the file.
+
+        # ---- Structural basis-fingerprint of the emitted name-set.  Only
+        # meaningful with real names (generic C/R names are positional, so
+        # useless as a cross-run cache key); reset to None otherwise.  Keyed
+        # off the CONSTRAINT rows (``m.row_names``, NOT the "cost"-prefixed
+        # ``row_names``) so it matches the set the ``.bas`` / cache file keys
+        # on.  Computed here, while ``m`` / ``_cstrs`` are still alive, i.e.
+        # before the optional ``release`` below drops the row source.
+        if emit_names:
+            self._last_mps_fingerprint = basis_fingerprint(col_names, m.row_names)
+        else:
+            self._last_mps_fingerprint = None
 
         # ---- Integer-col set from m.col_int (1 bit per column).
         integer_cols: set[int] = set(int(c) for c in np.nonzero(m.col_int)[0].tolist())
