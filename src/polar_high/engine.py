@@ -24,6 +24,7 @@ to ``over=`` at ``add_cstr`` time.
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 import os
 import sys
@@ -36,6 +37,14 @@ import numpy as np
 import polars as pl
 
 from ._log_routing import route_highs_log_to_stdout
+from ._warm_basis import (
+    NamedBasis,
+    basis_fingerprint,
+    build_highs_basis,
+    is_synthetic_row,
+)
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Stream-time LP-range helpers
@@ -3115,6 +3124,13 @@ class Problem:
         # orchestrator decision D8.
         self._matrix: _CanonicalMatrix | None = None
         self._canonical_dirty: bool = True
+        # Warm-start / basis-injection intent recorded by
+        # :meth:`set_named_basis`.  The solve-time hook (added separately;
+        # streaming path, just before ``h.run()``) reads these to build a
+        # HiGHS basis via :func:`polar_high._warm_basis.build_highs_basis`
+        # and call ``h.setBasis``.  ``None`` (default) ⇒ cold start.
+        self._warm_basis: NamedBasis | None = None
+        self._warm_basis_policy: str | None = None
 
     def declare_dense_axes(self, axes: tuple[str, ...] | None) -> None:
         """Declare the dense trailing axes for block-COO (see __init__ contract).
@@ -3285,6 +3301,28 @@ class Problem:
             for n, proto, over in self._cstrs
             if n.startswith(prefix)
         ]
+
+    def set_named_basis(self, nb: NamedBasis, *, policy: str = "exact") -> None:
+        """Record a warm-start basis to inject at the next ``solve`` (spec §4.1).
+
+        This is the in-process (non-``save_memory``) primitive: it only
+        RECORDS INTENT — it stores the carrier on ``self._warm_basis`` and
+        the policy on ``self._warm_basis_policy``.  It does NOT build or
+        inject anything.  The solve-time hook (streaming path, just before
+        ``h.run()``) constructs the sized HiGHS basis via
+        :func:`polar_high._warm_basis.build_highs_basis` and calls
+        ``h.setBasis``.
+
+        ``policy="exact"`` transfers 1:1 by name and requires the carrier's
+        fingerprint to match this model's; a mismatch under ``"exact"`` is
+        expected to be caught by the hook, which then falls back safely to
+        a cold solve.  ``policy="alien"`` maps shared names and lets HiGHS
+        repair the remainder.
+        """
+        if policy not in ("exact", "alien"):
+            raise ValueError(f"policy must be 'exact' or 'alien', got {policy!r}")
+        self._warm_basis = nb
+        self._warm_basis_policy = policy
 
     def cstr_row_count(self, name: str) -> int:
         """Total LP-row count across all constraint families matching
@@ -5183,6 +5221,20 @@ class Problem:
         # down accordingly.  Done now (rather than at the end of solve)
         # because we no longer hold these arrays on the outer caller
         # frame — the column build moved inside this method.
+        # Retain the pre-sentinel-translation column bounds (with real
+        # ``±inf`` for unbounded, so ``math.isfinite`` reads correctly in
+        # the basis-legality sanitation) ONLY when a warm-start basis is
+        # pending on the in-process path.  These get consumed by the
+        # ``h.setBasis`` injection just before ``h.run()`` below; the
+        # ``del`` unbinds the loop-local names but the arrays survive via
+        # these references.  Zero cost on the cold path (guard short-
+        # circuits) and on ``save_memory`` (warm-start is skipped there).
+        _warm_col_lb = None
+        _warm_col_ub = None
+        if self._warm_basis is not None and not save_memory:
+            _warm_col_lb = col_lb
+            _warm_col_ub = col_ub
+
         del col_lb_h, col_ub_h, col_obj_h
         del col_lb, col_ub, col_obj, col_int
 
@@ -5928,6 +5980,101 @@ class Problem:
         if _sp_on:
             _sp_emit("before_highs_run", n_rows=n_rows, n_cols=n_cols)
 
+        # ------------------------------------------------------------------
+        # Warm-start basis injection (spec §4.1, streaming in-process arm).
+        #
+        # Runs ONLY when a carrier was recorded via ``set_named_basis`` and
+        # this is the in-process path (``not save_memory``).  Under
+        # ``save_memory`` the LP has been round-tripped through an MPS file
+        # into a freshly-constructed ``h`` (see the block above), which
+        # discards any basis set on the original handle and may sanitize
+        # names — so warm-start there is deferred to Phase 2's subprocess
+        # arm; we log the skip and proceed cold.
+        #
+        # A warm-start must NEVER break a solve: any fingerprint mismatch
+        # (under ``exact``), rejected ``setBasis`` status, or exception
+        # during basis construction falls back safely to a cold solve
+        # (``h.run()`` is correct after a rejected/absent ``setBasis``).
+        if self._warm_basis is not None and save_memory:
+            _logger.info(
+                "warm-basis set but save_memory streaming path is active; "
+                "skipping in-process basis injection (Phase 2 subprocess arm) "
+                "— solving cold"
+            )
+        elif self._warm_basis is not None:
+            try:
+                warm_row_names = [
+                    nm if nm is not None else f"row_{i}" for i, nm in enumerate(row_names)
+                ]
+                target_fp = basis_fingerprint(col_names, warm_row_names)
+                policy = self._warm_basis_policy or "exact"
+                if policy == "exact" and target_fp != self._warm_basis.fingerprint:
+                    _logger.info(
+                        "warm-basis fingerprint mismatch (target=%s carrier=%s) "
+                        "under policy 'exact' → solving cold",
+                        target_fp,
+                        self._warm_basis.fingerprint,
+                    )
+                else:
+                    basis, stats = build_highs_basis(
+                        self._warm_basis,
+                        policy,
+                        col_names=col_names,
+                        row_names=warm_row_names,
+                        col_lb=_warm_col_lb,
+                        col_ub=_warm_col_ub,
+                        HighsBasis=highspy.HighsBasis,
+                        HighsBasisStatus=highspy.HighsBasisStatus,
+                    )
+                    basis.valid = True
+                    status = h.setBasis(basis)
+                    _ok = getattr(highspy.HighsStatus, "kOk", None)
+                    _warn = getattr(highspy.HighsStatus, "kWarning", None)
+                    if _ok is not None and status == _ok:
+                        _logger.info(
+                            "warm-basis injected (policy=%s alien=%s): cols "
+                            "matched=%d defaulted=%d, rows matched=%d "
+                            "defaulted=%d, sanitized=%d",
+                            stats["policy"],
+                            stats["alien"],
+                            stats["n_cols_matched"],
+                            stats["n_cols_defaulted"],
+                            stats["n_rows_matched"],
+                            stats["n_rows_defaulted"],
+                            stats["n_sanitized"],
+                        )
+                        if _sp_on:
+                            _sp_emit("warm_basis", injected=1, **stats)
+                    elif _warn is not None and status == _warn:
+                        # HiGHS accepted the basis but flagged it; the
+                        # solve is still correct — note it and continue.
+                        _logger.warning(
+                            "warm-basis setBasis returned kWarning (policy=%s "
+                            "stats=%s); proceeding with the injected basis",
+                            policy,
+                            stats,
+                        )
+                        if _sp_on:
+                            _sp_emit("warm_basis", injected=1, warning=1, **stats)
+                    else:
+                        _logger.warning(
+                            "warm-basis setBasis rejected (status=%r policy=%s "
+                            "stats=%s) → solving cold",
+                            status,
+                            policy,
+                            stats,
+                        )
+                        if _sp_on:
+                            _sp_emit("warm_basis", injected=0, **stats)
+            except Exception as exc:  # never let a warm-start break a solve
+                _logger.warning(
+                    "warm-basis injection failed (%s: %s) → solving cold",
+                    type(exc).__name__,
+                    exc,
+                )
+                if _sp_on:
+                    _sp_emit("warm_basis", injected=0, error=type(exc).__name__)
+
         h.run()
 
         if _sp_on:
@@ -6115,6 +6262,53 @@ class Solution:
         # them in if needed; otherwise emit a single ``key`` string column)
         keys = [self.row_names[i][len(prefix) : -1] for i in idx]
         return pl.DataFrame({"key": keys, "dual": duals})
+
+    def get_named_basis(self) -> NamedBasis:
+        """Extract the optimal basis as a name-keyed carrier (spec §4.1, §4.5).
+
+        Zips the live HiGHS basis (``getBasis().col_status`` /
+        ``row_status``) against this solution's rendered ``col_names`` /
+        ``row_names``, storing each status as its *integer* enum value so
+        the carrier is portable across processes.
+
+        Synthetic ``row_<i>`` names are EXCLUDED from ``row_status`` — they
+        are positional, not stable across models (§4.5) — and from the
+        fingerprint, consistent with what the set-side computes.
+
+        Requires the solve to have retained the live HiGHS handle
+        (``keep_solver=True``, or a :class:`WarmProblem` solve); raises
+        :class:`RuntimeError` otherwise.  Raises :class:`ValueError` if a
+        column name — or a non-synthetic row name — repeats (a duplicate
+        would silently overwrite its status in the dict).
+        """
+        if self.highs is None:
+            raise RuntimeError(
+                "get_named_basis requires the live HiGHS handle; run the solve with "
+                "keep_solver=True (or via WarmProblem) so the solver is retained for "
+                "basis extraction"
+            )
+
+        seen_cols: set[str] = set()
+        for name in self.col_names:
+            if name in seen_cols:
+                raise ValueError(f"duplicate column name in solution: {name!r}")
+            seen_cols.add(name)
+
+        basis = self.highs.getBasis()
+        col_status = {name: int(status) for name, status in zip(self.col_names, basis.col_status)}
+
+        row_status: dict[str, int] = {}
+        seen_rows: set[str] = set()
+        for name, status in zip(self.row_names, basis.row_status):
+            if is_synthetic_row(name):
+                continue
+            if name in seen_rows:
+                raise ValueError(f"duplicate row name in solution: {name!r}")
+            seen_rows.add(name)
+            row_status[name] = int(status)
+
+        fingerprint = basis_fingerprint(self.col_names, self.row_names)
+        return NamedBasis(col_status=col_status, row_status=row_status, fingerprint=fingerprint)
 
 
 # ---------------------------------------------------------------------------

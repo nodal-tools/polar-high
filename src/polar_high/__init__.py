@@ -9,6 +9,10 @@ import os as _os
 
 _os.environ.setdefault("POLARS_MAX_THREADS", "1")
 
+from polar_high._warm_basis import (
+    NamedBasis,
+    basis_fingerprint,
+)
 from polar_high.benders import (
     BendersBoundInvalid,
     BendersLoopOptions,
@@ -78,6 +82,8 @@ __all__ = [
     "Problem",
     "WarmProblem",
     "Solution",
+    "NamedBasis",
+    "basis_fingerprint",
     "CstrRecord",
     "InOutStabilizer",
     "StallMonitor",
