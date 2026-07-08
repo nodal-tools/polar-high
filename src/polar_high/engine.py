@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, replace
+from typing import Literal
 
 import highspy
 import numpy as np
@@ -3131,6 +3132,19 @@ class Problem:
         # and call ``h.setBasis``.  ``None`` (default) ⇒ cold start.
         self._warm_basis: NamedBasis | None = None
         self._warm_basis_policy: str | None = None
+        # Partial primal-seed intent recorded by :meth:`seed_primal`
+        # (Phase 3 Step 3a).  The solve-time hook (streaming path, just
+        # before ``h.run()``, right after the basis block) reads these to
+        # build a HiGHS partial solution and call ``h.setSolution``.
+        # ``_primal_seed`` maps column *name* → value; ``_primal_seed_frame``
+        # is ``"user"`` (converted to scaled space via
+        # ``_layer2_col_factor``) or ``"scaled"`` (used as-is).  ``None``
+        # (default) ⇒ no seed.  MUTUALLY EXCLUSIVE with ``_warm_basis``:
+        # ``setSolution`` and ``setBasis`` clobber each other on the same
+        # handle, so when a basis is pending the seed is skipped (basis
+        # wins for an LP).
+        self._primal_seed: dict[str, float] | None = None
+        self._primal_seed_frame: str | None = None
         # Structural basis-fingerprint of the most recent named-name MPS
         # emitted by :meth:`write_mps`.  Stashed there (only when
         # ``emit_names=True`` — generic ``C``/``R`` names are useless as a
@@ -3332,6 +3346,62 @@ class Problem:
             raise ValueError(f"policy must be 'exact' or 'alien', got {policy!r}")
         self._warm_basis = nb
         self._warm_basis_policy = policy
+
+    def seed_primal(
+        self,
+        values: dict[str, float],
+        *,
+        frame: Literal["user", "scaled"],
+        missing: str = "skip",
+    ) -> None:
+        """Record a partial primal seed to inject at the next ``solve``.
+
+        Phase 3 Step 3a primitive.  Like :meth:`set_named_basis` this only
+        RECORDS INTENT — it stores the seed on ``self._primal_seed`` and the
+        frame on ``self._primal_seed_frame``.  It does NOT build or inject
+        anything: the solve-time hook (streaming path, just before
+        ``h.run()``, immediately after the basis block) resolves each name to
+        a column index, converts + sanitises the value, and calls
+        ``h.setSolution``.
+
+        ``values`` maps column *name* (rendered exactly as
+        ``Solution.col_names`` — ``"name[d0,d1,...]"`` for indexed vars, the
+        bare ``name`` for scalars) to a numeric value.  A **partial** seed is
+        legal and expected: names present in the model are seeded, names
+        absent are silently skipped (the subset behaviour, ``missing="skip"``).
+
+        ``frame`` is REQUIRED and has NO default (a silent default frame is a
+        corruption vector).  ``frame="scaled"`` uses each value as-is in the
+        solver's post-Layer-2 scaled space.  ``frame="user"`` converts with
+        the model's own Layer-2 side-vector
+        (``x_scaled = x_user / _layer2_col_factor[col_id]``; identity when
+        Layer 2 was not applied), so callers can seed in natural units.
+
+        Feasibility-safety: a primal seed is only a *starting point* for the
+        solver — it never binds the optimum.  A non-optimal (or even
+        infeasible-looking) seed cannot change the objective HiGHS returns,
+        with presolve on or off.
+
+        MUTUALLY EXCLUSIVE with a warm basis.  ``setSolution`` and
+        ``setBasis`` clobber each other on the same handle (last writer wins;
+        ``setSolution`` invalidates a previously-set basis).  For an LP a
+        basis dominates a partial seed, so the hook enforces the rule "if a
+        basis is set, it wins": when ``self._warm_basis`` is also set the seed
+        is skipped.
+
+        In-process (streaming) ONLY — there is no subprocess / MPS channel
+        for a primal seed; a ``save_memory`` solve ignores the seed.
+
+        A seed over integer columns is a MIP-start.  (Noted for a future
+        UC5; not implemented or specialised here — integer columns are seeded
+        the same way and HiGHS treats them as a MIP-start.)
+        """
+        if frame not in ("user", "scaled"):
+            raise ValueError(f"frame must be 'user' or 'scaled', got {frame!r}")
+        if missing != "skip":
+            raise ValueError(f"missing must be 'skip' (only value supported), got {missing!r}")
+        self._primal_seed = dict(values)
+        self._primal_seed_frame = frame
 
     def cstr_row_count(self, name: str) -> int:
         """Total LP-row count across all constraint families matching
@@ -5261,6 +5331,17 @@ class Problem:
         if self._warm_basis is not None and not save_memory:
             _warm_col_lb = col_lb
             _warm_col_ub = col_ub
+        # Same retention for the partial-primal-seed hook (Phase 3 Step 3a):
+        # the seed clamps each scaled value to the target column's scaled
+        # ``[lb, ub]`` so ``setSolution`` never trips its atomic
+        # out-of-bounds reject.  Only needed when a seed is pending, no
+        # basis is set (mutual exclusion — the basis wins), and we are on
+        # the in-process path.  Zero cost otherwise (guard short-circuits).
+        _seed_col_lb = None
+        _seed_col_ub = None
+        if self._primal_seed is not None and self._warm_basis is None and not save_memory:
+            _seed_col_lb = col_lb
+            _seed_col_ub = col_ub
 
         del col_lb_h, col_ub_h, col_obj_h
         del col_lb, col_ub, col_obj, col_int
@@ -6101,6 +6182,118 @@ class Problem:
                 )
                 if _sp_on:
                     _sp_emit("warm_basis", injected=0, error=type(exc).__name__)
+
+        # ------------------------------------------------------------------
+        # Partial primal-seed injection (Phase 3 Step 3a, streaming arm).
+        #
+        # Fires ONLY when a seed was recorded via ``seed_primal`` AND no warm
+        # basis is pending AND this is the in-process path.  MUTUAL
+        # EXCLUSION (critique A1): ``setSolution`` and ``setBasis`` clobber
+        # each other on the same handle, so if a basis is set it wins and we
+        # skip the seed (a basis dominates a partial seed for an LP).  Under
+        # ``save_memory`` the LP is round-tripped through MPS into a fresh
+        # handle and ``col_names`` is dropped — no in-process seed channel —
+        # so we skip there too.
+        #
+        # A seed must NEVER break a solve: any resolution / conversion /
+        # setSolution error falls back safely to a cold solve (``h.run()`` is
+        # correct with no solution set).
+        if self._primal_seed is not None and self._warm_basis is not None:
+            _logger.info("primal seed skipped: a warm basis is set (basis wins)")
+        elif self._primal_seed is not None and save_memory:
+            _logger.info(
+                "primal seed set but save_memory streaming path is active; "
+                "skipping in-process seed injection — solving cold"
+            )
+        elif self._primal_seed is not None:
+            try:
+                # name → col_id map from THIS model's rendered column names
+                # (same source the basis hook uses).  Names not in the model
+                # are silently skipped (subset behaviour, missing="skip").
+                name_to_col = {nm: i for i, nm in enumerate(col_names) if nm is not None}
+                frame = self._primal_seed_frame
+                _cf_seed = self._layer2_col_factor
+                idx_list: list[int] = []
+                val_list: list[float] = []
+                n_clamped = 0
+                n_dropped = 0
+                for name, raw in self._primal_seed.items():
+                    col_id = name_to_col.get(name)
+                    if col_id is None:
+                        continue  # name not in model → skip
+                    x = float(raw)
+                    # user → scaled conversion (identity when Layer 2 is off).
+                    # Forward transform: x_scaled = x_user / _layer2_col_factor
+                    # (the LHS/cost coefficient is multiplied by that factor,
+                    # so the variable value divides by it to stay invariant).
+                    if frame == "user" and _cf_seed is not None:
+                        f = float(_cf_seed[col_id])
+                        x = x / f
+                    if not math.isfinite(x):
+                        n_dropped += 1
+                        continue  # non-finite → drop (cannot seed)
+                    # Sanitise (critique A2): clamp to the target column's
+                    # scaled [lb, ub] so a single out-of-bounds value cannot
+                    # trigger setSolution's ATOMIC reject (which would drop
+                    # the whole seed).  Skip clamping against infinite bounds.
+                    lo = _seed_col_lb[col_id] if _seed_col_lb is not None else -np.inf
+                    hi = _seed_col_ub[col_id] if _seed_col_ub is not None else np.inf
+                    x_clamped = x
+                    if math.isfinite(lo) and x_clamped < lo:
+                        x_clamped = lo
+                    if math.isfinite(hi) and x_clamped > hi:
+                        x_clamped = hi
+                    if x_clamped != x:
+                        n_clamped += 1
+                    idx_list.append(col_id)
+                    val_list.append(x_clamped)
+                if idx_list:
+                    idx_arr = np.asarray(idx_list, dtype=np.int32)
+                    val_arr = np.asarray(val_list, dtype=np.float64)
+                    status = h.setSolution(int(idx_arr.size), idx_arr, val_arr)
+                    _ok = getattr(highspy.HighsStatus, "kOk", None)
+                    if _ok is not None and status == _ok:
+                        _logger.info(
+                            "primal seed injected: %d columns seeded "
+                            "(%d clamped, %d dropped, frame=%s)",
+                            idx_arr.size,
+                            n_clamped,
+                            n_dropped,
+                            frame,
+                        )
+                        if _sp_on:
+                            _sp_emit(
+                                "primal_seed",
+                                injected=1,
+                                n_seeded=int(idx_arr.size),
+                                n_clamped=n_clamped,
+                                n_dropped=n_dropped,
+                            )
+                    else:
+                        _logger.warning(
+                            "primal seed setSolution returned status=%r (frame=%s) → solving cold",
+                            status,
+                            frame,
+                        )
+                        if _sp_on:
+                            _sp_emit("primal_seed", injected=0, n_seeded=int(idx_arr.size))
+                else:
+                    _logger.info(
+                        "primal seed had no in-model columns to set "
+                        "(%d dropped, frame=%s) → solving cold",
+                        n_dropped,
+                        frame,
+                    )
+                    if _sp_on:
+                        _sp_emit("primal_seed", injected=0, n_seeded=0)
+            except Exception as exc:  # never let a primal seed break a solve
+                _logger.warning(
+                    "primal seed injection failed (%s: %s) → solving cold",
+                    type(exc).__name__,
+                    exc,
+                )
+                if _sp_on:
+                    _sp_emit("primal_seed", injected=0, error=type(exc).__name__)
 
         h.run()
 
