@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.6.0] — 2026-07-09
+
+### Added
+
+- **Warm-start basis primitives (name-keyed, opt-in).** New building blocks
+  for warm-starting a solve from a related run's basis or partial primal.
+  All record intent only and are byte-identical to before when unused:
+  - `NamedBasis` carrier + `basis_fingerprint(col_names, row_names)`
+    (exported from `polar_high`) — a structural fingerprint of a model's
+    name-set so a stored basis can be matched to a compatible model.
+  - `engine.get_named_basis()` / `set_named_basis(nb, *, policy="exact")` —
+    extract the in-process HiGHS basis keyed by column/row *name*, and inject
+    a stored basis back (name-matched, `"exact"` or alien-tolerant policy).
+    A solve-time streaming hook builds and applies the HiGHS basis just before
+    `run()`, so injection works on the streaming (save-memory) path too.
+  - `Problem.basis_name_fingerprint()` and `WarmProblem.set_named_basis(...)`
+    so the retained-handle `WarmProblem` path can also seed a basis.
+  - `seed_primal(values, *, frame=...)` — partial primal-seed primitive
+    (`setSolution`); mutually exclusive with a named basis ("if a basis is
+    set, it wins").
+  - `write_mps(...)` now stashes `_last_mps_fingerprint` (the structural
+    `basis_fingerprint` of the emitted name-set) so a subprocess `.bas` file
+    can be matched to the MPS it was produced from.
+- **Trust-region master stabilizer** (`TrustRegionStabilizer`;
+  `BendersLoopOptions.trust_region_radius`/`trust_region_scale`). A generic
+  box (∞-norm) trust region on the master's coupling point: the master is
+  solved WITH the box, so its own primal and the subproblem queries share one
+  feasible iterate and the whole-objective upper bound is valid **by
+  construction** (no separate re-evaluation). Mutually exclusive with in-out.
+  `None` ⇒ off ⇒ byte-identical to the prior loop.
+- **`native_cost_at` / `evaluate_at_point` single-point objective
+  primitive.** The coordinator can evaluate the whole objective —
+  `master.native_cost_at(point) + Σ subproblem cost at that point` — at one
+  feasible coupling point, for a valid single-point L-shaped upper bound.
+
+### Fixed
+
+- **Consistent-point upper bound for flow-dependent masters.** When the
+  master's native cost depends on the coupling flows (a cost-bearing master),
+  the previous mixed-point UB (`native_cost(outer) + Σ cost(separation)`) is
+  not a single feasible point and is invalid. The coordinator now evaluates
+  the master native cost at the SAME point the subproblems used, so in-out
+  stabilization is valid — and re-enabled — for such masters. Flow-independent
+  masters are byte-identical to before.
+
 ## [3.5.0] — 2026-07-06
 
 ### Added
