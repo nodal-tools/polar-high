@@ -92,16 +92,40 @@ def _running_finite_nonzero_min_max(
     return (lo, hi)
 
 
-def _floor_small_coefs(arr: np.ndarray, threshold: float) -> np.ndarray:
-    """Return ``arr`` with every entry whose ``abs`` is strictly below
-    ``threshold`` replaced by exactly ``0.0``.
+def _floor_small_coefs(
+    arr: np.ndarray,
+    threshold: float,
+    unscale: np.ndarray | float | None = None,
+) -> np.ndarray:
+    """Return ``arr`` with every entry whose **user-space** ``abs`` is
+    strictly below ``threshold`` replaced by exactly ``0.0``.
 
     The cutoff is information-preserving on the small end only: values
-    with ``abs(value) == threshold`` are kept, and large values are
-    untouched.  ``threshold <= 0.0`` is a no-op (returns ``arr``
-    unchanged, no copy).  ``±inf`` and ``NaN`` are never floored —
-    ``abs(inf) < threshold`` and ``abs(nan) < threshold`` are both
+    with user-space ``abs(value) == threshold`` are kept, and large
+    values are untouched.  ``threshold <= 0.0`` is a no-op (returns
+    ``arr`` unchanged, no copy).  ``±inf`` and ``NaN`` are never floored
+    — ``abs(inf) < threshold`` and ``abs(nan) < threshold`` are both
     ``False`` — so one-sided row-bound sentinels survive verbatim.
+
+    ``unscale`` maps ``arr`` back to its user-space magnitude so the
+    cutoff is **scale-invariant** under Layer-2 autoscaling: the floor
+    decision is made on ``abs(arr) * unscale`` (the coefficient's
+    magnitude in the ORIGINAL, un-scaled problem), but the surviving
+    entry keeps its scaled value.  ``None`` (default) means ``arr`` is
+    already in user space (no Layer-2 factors) — the exact pre-Layer-2
+    behaviour, byte-identical.  For a Layer-2-scaled matrix entry
+    ``scaled = user * row_factor * col_factor``, pass
+    ``unscale = 1/(row_factor*col_factor)`` (see
+    :func:`_layer2_matrix_unscale`); for a row-bound/RHS scaled by
+    ``row_factor`` pass ``unscale = 1/row_factor``.
+
+    Rationale: Layer 2 is a lossless power-of-two conditioning
+    transform, so "is this coefficient negligible" must be judged on the
+    model's TRUE coefficient — not on the numerical-conditioning
+    artifact.  Flooring a scaled magnitude with a user-space threshold
+    silently drops structurally-essential coefficients that only *look*
+    small after scaling (e.g. a ``1`` scaled to ``2**-14``), corrupting
+    the LP.
 
     The replacement keeps array shape/length intact (it sets cells to
     ``0.0`` rather than dropping them), so downstream COO/CSC structure
@@ -109,8 +133,35 @@ def _floor_small_coefs(arr: np.ndarray, threshold: float) -> np.ndarray:
     """
     if threshold <= 0.0 or arr.size == 0:
         return arr
-    out = np.where(np.abs(arr) < threshold, 0.0, arr)
+    mag = np.abs(arr) if unscale is None else np.abs(arr) * unscale
+    out = np.where(mag < threshold, 0.0, arr)
     return out.astype(np.float64, copy=False)
+
+
+def _layer2_matrix_unscale(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    row_factor: np.ndarray | None,
+    col_factor: np.ndarray | None,
+) -> np.ndarray | None:
+    """Per-entry user-space unscale multiplier ``1/(rf[row]*cf[col])``
+    for a matrix given in ``(rows, cols)`` COO/CSC order, for use with
+    :func:`_floor_small_coefs`'s ``unscale`` argument.
+
+    ``rows`` / ``cols`` are the ABSOLUTE row / column ids of each entry
+    (same length as the value array).  ``row_factor`` / ``col_factor``
+    are the Layer-2 side vectors (``None`` when inactive).  Returns
+    ``None`` when neither factor is active, so the caller floors on the
+    raw (already user-space) magnitude with zero overhead.
+    """
+    if row_factor is None and col_factor is None:
+        return None
+    uns = np.ones(rows.shape[0], dtype=np.float64)
+    if row_factor is not None:
+        uns = uns / row_factor[rows]
+    if col_factor is not None:
+        uns = uns / col_factor[cols]
+    return uns
 
 
 # ---------------------------------------------------------------------------
@@ -4580,9 +4631,17 @@ class Problem:
         # ±inf row-bound sentinels survive (abs(inf) < thr is False).
         _coef_zero_thr = float(getattr(self, "coef_zero_threshold", 0.0) or 0.0)
         if _coef_zero_thr > 0.0:
-            sorted_v = _floor_small_coefs(sorted_v, _coef_zero_thr)
-            row_lb = _floor_small_coefs(row_lb, _coef_zero_thr)
-            row_ub = _floor_small_coefs(row_ub, _coef_zero_thr)
+            # Scale-invariant cutoff: judge negligibility on the USER-space
+            # magnitude so Layer 2's power-of-two conditioning never floors
+            # a structurally-essential coefficient that only looks small
+            # after scaling (see _floor_small_coefs / _layer2_matrix_unscale).
+            _m_uns = _layer2_matrix_unscale(sorted_r, sorted_c, _rf, _cf)
+            sorted_v = _floor_small_coefs(sorted_v, _coef_zero_thr, _m_uns)
+            # Row bounds (RHS) carry ``* row_factor`` (baked above); unscale
+            # by ``1/row_factor`` per row (aligned: row i ↔ _rf[i]).
+            _rb_uns = None if _rf is None else 1.0 / _rf
+            row_lb = _floor_small_coefs(row_lb, _coef_zero_thr, _rb_uns)
+            row_ub = _floor_small_coefs(row_ub, _coef_zero_thr, _rb_uns)
 
         if _profile:
             _cm_emit(
@@ -5505,9 +5564,13 @@ class Problem:
 
             # Small-coefficient cutoff on the RHS (row bounds).  Floors
             # finite |bound| < threshold to 0.0; ±inf sentinels survive.
+            # Scale-invariant: judge on the USER-space RHS by unscaling the
+            # ``* row_factor`` bake (see _floor_small_coefs).
             if _coef_zero_thr > 0.0:
-                row_lb = _floor_small_coefs(row_lb, _coef_zero_thr)
-                row_ub = _floor_small_coefs(row_ub, _coef_zero_thr)
+                _srf = self._layer2_row_factor
+                _rb_uns = None if _srf is None else 1.0 / _srf[base_row : base_row + row_count]
+                row_lb = _floor_small_coefs(row_lb, _coef_zero_thr, _rb_uns)
+                row_ub = _floor_small_coefs(row_ub, _coef_zero_thr, _rb_uns)
 
             if _sp_on:
                 _sp_emit(
@@ -5858,9 +5921,17 @@ class Problem:
                 val64 = fv[order]
                 # Small-coefficient cutoff on the LHS matrix coefficients.
                 # Replaces |coef| < threshold with 0.0; keeps the entry
-                # (structure/determinism preserved).
+                # (structure/determinism preserved).  Scale-invariant:
+                # ``sorted_r`` is the family-local row, so the absolute row
+                # is ``base_row + sorted_r``; ``idx32`` is the absolute col.
                 if _coef_zero_thr > 0.0:
-                    val64 = _floor_small_coefs(val64, _coef_zero_thr)
+                    _sm_uns = _layer2_matrix_unscale(
+                        (base_row + sorted_r),
+                        idx32,
+                        self._layer2_row_factor,
+                        self._layer2_col_factor,
+                    )
+                    val64 = _floor_small_coefs(val64, _coef_zero_thr, _sm_uns)
                 starts = np.zeros(row_count + 1, dtype=np.int32)
                 # bincount of row indices → counts per row, then cumsum
                 counts = np.bincount(sorted_r.astype(np.int64), minlength=row_count)
