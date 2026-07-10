@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.6.1] — 2026-07-10
+
+### Fixed
+
+- **Scale-invariant small-coefficient cutoff.** The `coef_zero_threshold`
+  floor was applied to Layer-2-*scaled* matrix and row-bound values with a
+  *user-space* absolute threshold. Because Layer 2 is a lossless
+  power-of-two conditioning transform, a structurally-essential coefficient
+  (e.g. a `1.0`) whose column/row factors shrank it below the threshold
+  (e.g. to `2**-14`) was floored to `0.0`, silently corrupting the LP: HiGHS
+  then solved a genuinely different problem to a real optimum that
+  un-scaled to a wrong point (reported `Optimal`). On a commodity-ladder
+  trade model this collapsed the `commodity_ladder_balance` to `0 == flow`,
+  forcing the priced supply to 0 and all demand onto slack — a ~10,000x
+  objective error under `full` autoscaling.
+
+  The floor now judges negligibility on the **user-space** magnitude
+  (`|scaled| / (row_factor * col_factor)`), so Layer-2 conditioning never
+  drops a coefficient that is significant in the original problem.
+  `_floor_small_coefs` gains an optional per-entry `unscale` multiplier and
+  a new `_layer2_matrix_unscale` helper builds it for COO/CSC matrices;
+  applied at every cold floor site (non-streaming `_build_canonical_matrix`
+  matrix + row bounds, and the streaming `_solve_streaming` RHS + matrix).
+  `unscale=None` (no Layer-2 factors) is the exact pre-change path, so
+  `ScalingMode.OFF` / `BASIC` / `SOLVER_ONLY` are byte-identical; only
+  `FULL` changes, and only for entries scaling pushed across the threshold.
+  New regression: `tests/test_layer2_floor_scale_invariant.py`.
+
 ## [3.6.0] — 2026-07-09
 
 ### Added
