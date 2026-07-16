@@ -6433,6 +6433,35 @@ class Problem:
 # Solution
 
 
+@dataclass(frozen=True)
+class SolveDiagnostics:
+    """Normalised snapshot of a solve's HiGHS status + info counters.
+
+    Read once from a live ``highspy.Highs`` (a single ``getInfo()`` call
+    plus ``getModelStatus()``), so the numbers are a consistent atomic
+    view of one solve.  Consumers use this to decide whether a solve that
+    HiGHS could NOT certify as ``kOptimal`` (e.g. an interior-point solve
+    run without crossover, whose post-solve dual objective is slightly
+    inconsistent) is nonetheless usable in practice — the primal solution
+    is feasible and the primal--dual objective gap is small.
+
+    This is a pure fact carrier: it holds no policy and no thresholds.
+    The accept/reject decision (and any tolerance) lives with the caller.
+    """
+
+    model_status: highspy.HighsModelStatus
+    model_status_name: str
+    primal_feasible: bool
+    dual_feasible: bool
+    num_primal_infeasibilities: int
+    num_dual_infeasibilities: int
+    max_primal_infeasibility: float
+    max_relative_primal_infeasibility: float
+    max_dual_infeasibility: float
+    primal_dual_objective_error: float
+    objective_value: float
+
+
 class Solution:
     """Read-only view of the solved LP.  Look up variable values by
     name; values come back as a polars frame ``(*dims, value)``."""
@@ -6503,6 +6532,43 @@ class Solution:
             return 0.0
         _status, val = self.highs.getOptionValue("primal_feasibility_tolerance")
         return float(val)
+
+    def solve_diagnostics(self) -> SolveDiagnostics | None:
+        """Snapshot the solve's HiGHS status + feasibility/optimality counters.
+
+        Returns a :class:`SolveDiagnostics` read from the live solver, or
+        ``None`` when no queryable HiGHS handle is attached — i.e. a
+        synthesised :class:`Solution` (``highs is None``) OR a read-only
+        shim that reconstructs a solution from a solver ``.sol`` file
+        (the subprocess / commercial path) and does not implement
+        ``getInfo`` / ``getModelStatus``.  ``None`` means "cannot
+        diagnose", which callers must treat as un-verifiable — never as
+        an implicit pass.
+
+        Follows the ``highs is None → neutral`` guard of
+        :attr:`max_primal_infeasibility`, but extends it to the shim case
+        via ``hasattr`` so no ``AttributeError`` can leak from the
+        subprocess path.
+        """
+        h = self.highs
+        if h is None or not hasattr(h, "getInfo") or not hasattr(h, "getModelStatus"):
+            return None
+        info = h.getInfo()
+        status = h.getModelStatus()
+        feasible = highspy.kSolutionStatusFeasible
+        return SolveDiagnostics(
+            model_status=status,
+            model_status_name=status.name,
+            primal_feasible=info.primal_solution_status == feasible,
+            dual_feasible=info.dual_solution_status == feasible,
+            num_primal_infeasibilities=int(info.num_primal_infeasibilities),
+            num_dual_infeasibilities=int(info.num_dual_infeasibilities),
+            max_primal_infeasibility=float(info.max_primal_infeasibility),
+            max_relative_primal_infeasibility=float(info.max_relative_primal_infeasibility),
+            max_dual_infeasibility=float(info.max_dual_infeasibility),
+            primal_dual_objective_error=float(info.primal_dual_objective_error),
+            objective_value=float(info.objective_function_value),
+        )
 
     def value(self, var_name: str) -> pl.DataFrame:
         """Long-form per-variable solution: ``(*dims, value)``."""
