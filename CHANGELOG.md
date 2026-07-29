@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.7.0] — 2026-07-29
+
+### Added
+
+- **`Solution.solve_diagnostics()` — status/feasibility snapshot.** A new
+  frozen `SolveDiagnostics` carrier and `Solution.solve_diagnostics()`
+  method expose a policy-free snapshot of `getModelStatus()` + `getInfo()`:
+  primal/dual solution status, primal/dual infeasibility counts, absolute
+  and relative max infeasibilities, `primal_dual_objective_error`, and the
+  objective value. It reads the live solver handle in a single `getInfo()`
+  call and returns `None` when no queryable handle is attached (a
+  synthesised `Solution`, or a read-only subprocess/commercial shim without
+  `getInfo`/`getModelStatus`). No policy or thresholds live here and
+  `self.optimal` is untouched, so existing consumers are unaffected. This
+  lets a downstream caller decide whether a solve HiGHS could not certify as
+  optimal — e.g. an interior-point solve run without crossover whose
+  post-solve dual objective is slightly inconsistent — is nonetheless usable
+  (feasible primal, small primal-dual gap).
+
 ## [3.6.1] — 2026-07-10
 
 ### Fixed
