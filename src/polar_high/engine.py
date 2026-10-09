@@ -3555,7 +3555,13 @@ class Problem:
 
         n = index.height
         col_ids = np.arange(self._next_col, self._next_col + n, dtype=np.int64)
-        frame = index.select(*dims).with_columns(col_id=pl.Series(col_ids))
+        if dims:
+            frame = index.select(*dims).with_columns(col_id=pl.Series(col_ids))
+        else:
+            # Dimless family: ``index.select()`` is a 0x0 frame, and
+            # polars >= 2.0 refuses to add a length-n column to a
+            # zero-height frame — build the one-column frame directly.
+            frame = pl.DataFrame({"col_id": pl.Series(col_ids)})
         # Resolve bounds BEFORE committing the column ids so a rejected
         # bound leaves the Problem untouched.
         lower_arg, upper_arg = lower, upper
