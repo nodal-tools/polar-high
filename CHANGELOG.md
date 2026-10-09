@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [Unreleased]
+## [3.8.0] — 2026-10-09
 
 ### Added
 
@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was silently dropped from `write_mps`, so the exported model differed
   from the solved one), and `TypeError` for a `bool` bound. All valid
   scalar bounds behave exactly as before.
+
+### Fixed
+
+- polars 2.0 compatibility: `Problem.add_var` with `dims=()` (a dimless
+  variable) failed under polars >= 2.0 ("Series col_id, length 1 doesn't
+  match the DataFrame height of 0"). The one-column frame is now built
+  directly; output is unchanged under polars 1.x.
 
 ## [3.7.0] — 2026-07-29
 
