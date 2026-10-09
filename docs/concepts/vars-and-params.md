@@ -28,9 +28,35 @@ v.frame
 
 - `dims` is just the list of frame columns to treat as index axes.
 - `index` is a polars DataFrame whose rows enumerate the index set.
-- `lower` / `upper` are scalar bounds applied to every column. For
-  per-cell bounds, encode them as a constraint or with `fix_cols` on
-  a `WarmProblem`.
+- `lower` / `upper` are either scalar bounds applied to every column,
+  or a `Param` giving per-element bounds (see below).
+
+### Per-element bounds
+
+Pass a `Param` as `lower` and/or `upper` to bound each column
+individually:
+
+```python
+cap = Param(("i",), pl.DataFrame({"i": [1], "value": [5.0]}))
+v = p.add_var("v", ("i", "j"), index, upper=cap)
+# columns (1,a) and (1,b) get upper 5.0; (2,a) keeps the default +inf
+```
+
+- The Param's dims must be a subset of the variable's dims (otherwise
+  `ValueError`). Rows are aligned by joining on the Param's dims, so a
+  lower-dim Param broadcasts over the remaining variable dims.
+- Variable elements with **no matching Param row** get the default
+  bound (`lower` 0.0, `upper` +inf) — a sparse bound Param only
+  tightens where it has rows.
+- `null` / `NaN` values also mean "default"; `+inf` / `-inf` are
+  allowed (e.g. `lower=-inf` frees an element).
+- Duplicate Param rows on its dims raise `ValueError`.
+- The bound is resolved when `add_var` is called and stored on
+  `Var.lower` / `Var.upper` as a float64 array aligned with
+  `Var.frame` rows. Scalar bounds stay scalars (identical LP for
+  existing callers). Read scatter-ready values with `Var.col_lower()` /
+  `Var.col_upper()`; rescale finite bounds of either form with
+  `Var.scale_bounds(factor)`.
 
 ## Param
 

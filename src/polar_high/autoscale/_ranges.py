@@ -758,9 +758,22 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             if a > rhs_hi:
                 rhs_hi = a
 
-    # Bounds — pure Python; one float per var family × 2.
+    # Bounds — pure Python; one float per scalar-bound var family × 2.
+    # Per-element (array) bounds (see ``Problem.add_var``) reduce over
+    # their finite, non-zero entries — the same filter applied per value.
     for v in problem._vars.values():
         for b in (v.lower, v.upper):
+            if isinstance(b, np.ndarray):
+                fin = b[np.isfinite(b) & (b != 0)]
+                if fin.size:
+                    a_arr = np.abs(fin)
+                    a_lo = float(a_arr.min())
+                    a_hi = float(a_arr.max())
+                    if a_lo < bound_lo:
+                        bound_lo = a_lo
+                    if a_hi > bound_hi:
+                        bound_hi = a_hi
+                continue
             if _math.isfinite(b) and b != 0:
                 a = abs(float(b))
                 if a < bound_lo:

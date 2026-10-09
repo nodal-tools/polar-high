@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [Unreleased]
+
+### Added
+
+- **Per-element variable bounds.** `Problem.add_var(lower=..., upper=...)`
+  now also accepts a `Param` whose dims are a subset of the variable's
+  dims; it is joined onto the variable's index (broadcasting over the
+  remaining dims). Elements without a matching row, and `null`/`NaN`
+  values, keep the default bound (lower 0, upper +inf); `±inf` allowed.
+  The per-column values flow through the streaming and `passModel`
+  solves, `LpView` (all solver adapters), `write_mps`, `WarmProblem`
+  and autoscale range detection. New `Var.col_lower()` /
+  `Var.col_upper()` / `Var.scale_bounds()` / `Var.has_elementwise_bounds`
+  helpers. Scalar bounds are unchanged (byte-identical LP).
+
 ## [3.7.0] — 2026-07-29
 
 ### Added

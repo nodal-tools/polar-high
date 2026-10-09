@@ -215,8 +215,8 @@ def _build_and_get_warm_handles(problem: fp.Problem):
 
     for v in problem._vars.values():
         ids = v.frame["col_id"].to_numpy()
-        col_lb[ids] = float(v.lower)
-        col_ub[ids] = float(v.upper)
+        col_lb[ids] = v.col_lower()
+        col_ub[ids] = v.col_upper()
 
     for t in problem._obj_terms:
         tf = t.frame

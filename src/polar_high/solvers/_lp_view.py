@@ -83,8 +83,8 @@ class LpView:
 
         for v in problem._vars.values():
             ids = v.frame["col_id"].to_numpy()
-            col_lb[ids] = float(v.lower)
-            col_ub[ids] = float(v.upper)
+            col_lb[ids] = v.col_lower()
+            col_ub[ids] = v.col_upper()
             if v.integer:
                 col_int[ids] = 1
             if v.dims:

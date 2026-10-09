@@ -2108,6 +2108,121 @@ def _merge_param_sources(
     return out
 
 
+def _scale_finite_bound(b, f: float):
+    """Scale the finite entries of a scalar-or-array variable bound by
+    ``f`` (see :meth:`Var.scale_bounds`)."""
+    if isinstance(b, np.ndarray):
+        out = b.copy()
+        fin = np.isfinite(out)
+        out[fin] = out[fin] * f
+        return out
+    if math.isfinite(b):
+        return float(b) * f
+    return b
+
+
+def _resolve_var_bound(
+    bound,
+    *,
+    which: str,
+    default: float,
+    var_name: str,
+    var_dims: tuple[str, ...],
+    var_frame: pl.DataFrame,
+):
+    """Normalise an ``add_var`` ``lower`` / ``upper`` argument.
+
+    * Scalar (``int`` / ``float`` / numpy scalar, not ``bool``): returned
+      UNCHANGED — the scalar fast path, byte-identical to the historical
+      behaviour.
+    * :class:`Param`: its dims must be a subset of ``var_dims``.  It is
+      left-joined onto the variable's index rows on its dims (so a
+      lower-dim Param broadcasts over the remaining var dims) and
+      returned as a float64 ``np.ndarray`` aligned positionally with
+      ``var_frame`` rows.  Variable elements with no matching Param row,
+      and Param rows whose value is null / NaN, get ``default``
+      (``0.0`` for lower, ``+inf`` for upper) — a sparse bound Param
+      only tightens where it has rows.  ``±inf`` values pass through.
+      A zero-dim Param (``Param.scalar``) collapses to a scalar bound.
+      Duplicate Param rows on its dims raise (the bound would be
+      ambiguous).
+    """
+    if isinstance(bound, Param):
+        pdims = tuple(bound.dims)
+        extra = [d for d in pdims if d not in var_dims]
+        if extra:
+            raise ValueError(
+                f"add_var({var_name!r}): {which} bound Param has dims "
+                f"{list(extra)} that are not dims of the variable "
+                f"{list(var_dims)}; a bound Param's dims must be a subset "
+                f"of the variable's dims"
+            )
+        bf = bound.frame
+        if not pdims:
+            if bf.height != 1:
+                raise ValueError(
+                    f"add_var({var_name!r}): zero-dim {which} bound Param "
+                    f"must have exactly one row, got {bf.height}"
+                )
+            val = bf["value"].cast(pl.Float64)[0]
+            if val is None or math.isnan(val):
+                return default
+            return float(val)
+        if bf.height and bf.select(pl.struct(list(pdims)).is_duplicated().any()).item():
+            raise ValueError(
+                f"add_var({var_name!r}): {which} bound Param has duplicate "
+                f"rows on its dims {list(pdims)}; each variable element "
+                f"must map to at most one bound value"
+            )
+        n = var_frame.height
+        if n == 0:
+            return np.zeros(0, dtype=np.float64)
+        on = list(pdims)
+        left = var_frame.select(on).with_row_index("__bnd_rid")
+        right = bf.select(*on, pl.col("value").cast(pl.Float64).alias("__bnd_val"))
+        left, right = _align_enum_join_keys(left, right, on)
+        joined = left.join(right, on=on, how="left").sort("__bnd_rid")
+        if joined.height != n:
+            raise RuntimeError(
+                f"add_var({var_name!r}): {which} bound alignment produced "
+                f"{joined.height} rows for {n} variable elements"
+            )
+        vals = joined["__bnd_val"].fill_nan(None).fill_null(default)
+        return vals.to_numpy().astype(np.float64, copy=True)
+    if not isinstance(bound, (int, float, np.integer, np.floating)):
+        raise TypeError(
+            f"add_var({var_name!r}): {which} bound must be a number or a "
+            f"Param, got {type(bound).__name__}"
+        )
+    return bound
+
+
+def _mps_col_bound_lines(nm: str, lo: float, hi: float, fmt) -> str:
+    """BOUNDS-section lines for ONE column with bounds ``[lo, hi]``.
+
+    The same bound-shape ladder :meth:`Problem.write_mps` applies per
+    scalar-bound family, evaluated for a single column (used for
+    families with per-element bounds).  Returns ``""`` for the MPS
+    default ``[0, +inf]``.
+    """
+    if math.isfinite(lo) and lo == 0.0 and math.isinf(hi) and hi > 0:
+        return ""
+    if math.isinf(lo) and lo < 0 and math.isinf(hi) and hi > 0:
+        return f" FR bnd  {nm}\n"
+    if math.isinf(lo) and lo < 0 and math.isfinite(hi):
+        return f" MI bnd  {nm}\n UP bnd  {nm}  {fmt(hi)}\n"
+    if math.isfinite(lo) and math.isinf(hi) and hi > 0:
+        return f" LO bnd  {nm}  {fmt(lo)}\n"
+    if math.isfinite(lo) and math.isfinite(hi):
+        return f" LO bnd  {nm}  {fmt(lo)}\n UP bnd  {nm}  {fmt(hi)}\n"
+    out = ""
+    if math.isfinite(lo):
+        out += f" LO bnd  {nm}  {fmt(lo)}\n"
+    if math.isfinite(hi):
+        out += f" UP bnd  {nm}  {fmt(hi)}\n"
+    return out
+
+
 class Var:
     """A variable family.  ``frame`` carries columns ``*dims, col_id``.
 
@@ -2115,7 +2230,17 @@ class Var:
     per LP column), produced once in :meth:`Problem.add_var`, and
     consumed by both flextool integration (``v.frame["col_id"].unique()``)
     and ``Problem.solve`` (col_id → bound/name lookups).  Algebra ops on
-    Var lazify on the fly so the resulting ``_Term`` is lazy."""
+    Var lazify on the fly so the resulting ``_Term`` is lazy.
+
+    ``lower`` / ``upper`` are each EITHER a scalar (one bound shared by
+    every column of the family — the historical form, kept verbatim so
+    existing callers emit a byte-identical LP) OR a float64
+    ``np.ndarray`` of length ``frame.height`` holding one bound per
+    column, positionally aligned with ``frame`` rows (i.e. with
+    ``frame["col_id"]``).  :meth:`Problem.add_var` produces the array
+    form when a :class:`Param` bound is given.  Bound consumers read
+    them through :meth:`col_lower` / :meth:`col_upper` (scatter-ready
+    values) and rescale them through :meth:`scale_bounds`."""
 
     __slots__ = ("name", "dims", "frame", "lower", "upper", "integer")
 
@@ -2137,6 +2262,39 @@ class Var:
         self.lower = lower
         self.upper = upper
         self.integer = integer
+
+    @property
+    def has_elementwise_bounds(self) -> bool:
+        """True when ``lower`` or ``upper`` is a per-column array."""
+        return isinstance(self.lower, np.ndarray) or isinstance(self.upper, np.ndarray)
+
+    def col_lower(self) -> float | np.ndarray:
+        """Lower bound in scatter-ready form: ``float`` for a scalar bound
+        (identical to the historical ``float(v.lower)``), else the
+        per-column float64 array aligned with ``frame`` rows.  Use as
+        ``col_lb[v.frame["col_id"].to_numpy()] = v.col_lower()``."""
+        b = self.lower
+        return b if isinstance(b, np.ndarray) else float(b)
+
+    def col_upper(self) -> float | np.ndarray:
+        """Upper-bound counterpart of :meth:`col_lower`."""
+        b = self.upper
+        return b if isinstance(b, np.ndarray) else float(b)
+
+    def scale_bounds(self, factor: float) -> None:
+        """Multiply every FINITE bound value by ``factor`` in place.
+
+        Column-scaling hook (e.g. an autoscale Layer 2 column factor
+        ``f`` maps ``x = f * x_scaled`` ⇒ bounds scale by ``1/f`` — the
+        caller passes the factor it wants applied).  Infinite bounds are
+        left untouched.  Scalar bounds stay scalars (``float(b) * f``,
+        the exact historical arithmetic); per-column arrays are scaled
+        element-wise with the same per-entry arithmetic, so each column
+        is scaled exactly as a scalar bound with that value would be.
+        """
+        f = float(factor)
+        self.lower = _scale_finite_bound(self.lower, f)
+        self.upper = _scale_finite_bound(self.upper, f)
 
     def to_expr(self) -> Expr:
         f = self.frame.lazy().with_columns(coef=pl.lit(1.0)).select(*self.dims, "col_id", "coef")
@@ -3263,10 +3421,32 @@ class Problem:
         name: str,
         dims: tuple[str, ...] | str,
         index: pl.DataFrame,
-        lower: float = 0.0,
-        upper: float = float("inf"),
+        lower: float | Param = 0.0,
+        upper: float | Param = float("inf"),
         integer: bool = False,
     ) -> Var:
+        """Declare a variable family with one column per ``index`` row.
+
+        ``lower`` / ``upper`` are either scalars (one bound for every
+        column — the historical form, emitted byte-identically) or a
+        :class:`Param` giving per-element bounds:
+
+        * The Param's dims must be a SUBSET of ``dims`` (``ValueError``
+          otherwise).  Its rows are aligned to the variable's index rows
+          by joining on the Param's dims, so a lower-dim Param broadcasts
+          over the remaining variable dims.
+        * Variable elements with NO matching Param row get the default
+          bound (``lower`` 0.0, ``upper`` +inf): a sparse bound Param only
+          tightens the elements it has rows for.
+        * ``null`` / ``NaN`` Param values likewise mean "default".
+          ``+inf`` / ``-inf`` are allowed (e.g. ``lower=-inf`` frees an
+          element).
+        * Duplicate Param rows on its dims raise ``ValueError``.
+
+        Param bounds are resolved eagerly here into a per-column float64
+        array stored on :attr:`Var.lower` / :attr:`Var.upper`; column
+        order and ids are unaffected by the bound form.
+        """
         if self._layer2_locked:
             raise RuntimeError(
                 "Problem.add_var called after apply_layer2 — adding "
@@ -3284,8 +3464,21 @@ class Problem:
 
         n = index.height
         col_ids = np.arange(self._next_col, self._next_col + n, dtype=np.int64)
-        self._next_col += n
         frame = index.select(*dims).with_columns(col_id=pl.Series(col_ids))
+        # Resolve bounds BEFORE committing the column ids so a rejected
+        # bound leaves the Problem untouched.
+        lower = _resolve_var_bound(
+            lower, which="lower", default=0.0, var_name=name, var_dims=dims, var_frame=frame
+        )
+        upper = _resolve_var_bound(
+            upper,
+            which="upper",
+            default=float("inf"),
+            var_name=name,
+            var_dims=dims,
+            var_frame=frame,
+        )
+        self._next_col += n
         v = Var(name, dims, frame, lower, upper, integer)
         self._vars[name] = v
         self._canonical_dirty = True
@@ -4591,8 +4784,8 @@ class Problem:
         col_names: list[str] = [""] * n_cols
         for v in self._vars.values():
             ids = v.frame["col_id"].to_numpy()
-            col_lb[ids] = float(v.lower)
-            col_ub[ids] = float(v.upper)
+            col_lb[ids] = v.col_lower()
+            col_ub[ids] = v.col_upper()
             if v.integer:
                 col_int[ids] = 1
             if v.dims:
@@ -5033,8 +5226,23 @@ class Problem:
             # ``m.col_ub`` are built from those same values (see
             # _build_canonical_matrix pass 5), so the BOUNDS section is
             # bit-for-bit identical to the pre-B1 output.
+            #
+            # Families with per-element (array) bounds — see
+            # :meth:`Problem.add_var` — cannot share one classification,
+            # so they take the per-column branch below, which applies
+            # the SAME bound-shape ladder column by column (a column
+            # whose bounds equal a scalar family's gets the identical
+            # lines).  Scalar families keep the per-family fast path.
             f.write("BOUNDS\n")
             for v in self._vars.values():
+                if v.has_elementwise_bounds:
+                    ids = v.frame["col_id"].to_numpy()
+                    n_v = ids.size
+                    lo_arr = np.broadcast_to(np.asarray(v.col_lower(), dtype=np.float64), (n_v,))
+                    hi_arr = np.broadcast_to(np.asarray(v.col_upper(), dtype=np.float64), (n_v,))
+                    for cid, lo, hi in zip(ids.tolist(), lo_arr.tolist(), hi_arr.tolist()):
+                        f.write(_mps_col_bound_lines(col_names[int(cid)], lo, hi, _fmt))
+                    continue
                 lo = float(v.lower)
                 hi = float(v.upper)
                 if math.isfinite(lo) and lo == 0.0 and math.isinf(hi) and hi > 0:
@@ -5191,8 +5399,8 @@ class Problem:
 
         for v in self._vars.values():
             ids = v.frame["col_id"].to_numpy()
-            col_lb[ids] = float(v.lower)
-            col_ub[ids] = float(v.upper)
+            col_lb[ids] = v.col_lower()
+            col_ub[ids] = v.col_upper()
             if v.integer:
                 col_int[ids] = 1
             if v.dims:
