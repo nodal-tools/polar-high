@@ -15,12 +15,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now also accepts a `Param` whose dims are a subset of the variable's
   dims; it is joined onto the variable's index (broadcasting over the
   remaining dims). Elements without a matching row, and `null`/`NaN`
-  values, keep the default bound (lower 0, upper +inf); `±inf` allowed.
+  values, keep the default bound (lower 0, upper +inf); `-inf` lower /
+  `+inf` upper allowed. Param rows that match no variable row are
+  ignored (sparse tighten), including keys outside the variable's
+  `pl.Enum` vocabulary; null keys never match (element keeps the
+  default). `Enum` vs `Utf8` key mismatches are aligned automatically;
+  `Enum` keys with disjoint category sets raise `ValueError`; `Utf8` vs
+  integer keys raise. Duplicate Param rows or dims outside the
+  variable's raise `ValueError`. An element with lower > upper is
+  accepted and makes the LP infeasible, as for scalar bounds.
   The per-column values flow through the streaming and `passModel`
   solves, `LpView` (all solver adapters), `write_mps`, `WarmProblem`
   and autoscale range detection. New `Var.col_lower()` /
   `Var.col_upper()` / `Var.scale_bounds()` / `Var.has_elementwise_bounds`
-  helpers. Scalar bounds are unchanged (byte-identical LP).
+  / `Var.bound_param_names` helpers. Scalar bounds are unchanged
+  (byte-identical LP); scalar bounds still accept any `numbers.Real` or
+  0-d numeric numpy array.
+- Bound Params are resolved at `add_var` and **not tracked**:
+  `WarmProblem.declare_mutable` / `update_param` raise `ValueError` for
+  the name of a Param used as a bound — use `WarmProblem.set_col_bounds`.
+
+### Changed
+
+- `Problem.add_var` now raises `ValueError` for a `+inf` lower bound or
+  a `-inf` upper bound (scalar or per-element; previously such a bound
+  was silently dropped from `write_mps`, so the exported model differed
+  from the solved one), and `TypeError` for a `bool` bound. All valid
+  scalar bounds behave exactly as before.
 
 ## [3.7.0] — 2026-07-29
 

@@ -48,15 +48,36 @@ v = p.add_var("v", ("i", "j"), index, upper=cap)
 - Variable elements with **no matching Param row** get the default
   bound (`lower` 0.0, `upper` +inf) — a sparse bound Param only
   tightens where it has rows.
-- `null` / `NaN` values also mean "default"; `+inf` / `-inf` are
-  allowed (e.g. `lower=-inf` frees an element).
+- `null` / `NaN` values also mean "default". `-inf` lower / `+inf`
+  upper are allowed (e.g. `lower=-inf` frees an element); a `+inf`
+  **lower** or `-inf` **upper** raises `ValueError` (never feasible,
+  and not expressible in MPS). The same check applies to scalar
+  bounds.
+- An element whose lower exceeds its upper is accepted at `add_var`
+  and makes the LP infeasible at solve time — exactly like a scalar
+  `lower > upper`.
+- Param rows that match **no** variable row are ignored (sparse
+  tighten). That includes rows whose key lies outside the variable's
+  `pl.Enum` vocabulary. Null keys never match, so those elements keep
+  the default.
+- Key dtypes: a `pl.Enum` vs `pl.Utf8` mismatch is aligned
+  automatically; two `pl.Enum` keys whose category sets are disjoint
+  (neither a subset of the other) raise `ValueError`; other mismatches
+  such as `Utf8` vs `Int64` raise polars' join error.
 - Duplicate Param rows on its dims raise `ValueError`.
 - The bound is resolved when `add_var` is called and stored on
   `Var.lower` / `Var.upper` as a float64 array aligned with
   `Var.frame` rows. Scalar bounds stay scalars (identical LP for
-  existing callers). Read scatter-ready values with `Var.col_lower()` /
-  `Var.col_upper()`; rescale finite bounds of either form with
-  `Var.scale_bounds(factor)`.
+  existing callers); any `numbers.Real` or 0-d numeric numpy array is
+  accepted, `bool` is rejected. Read scatter-ready values with
+  `Var.col_lower()` / `Var.col_upper()`; rescale finite bounds of
+  either form with `Var.scale_bounds(factor)`.
+- **Bound Params are not tracked.** Because the values are resolved at
+  `add_var`, a later change to the Param does not reach the LP. The
+  names of named bound Params are recorded on `Var.bound_param_names`,
+  and `WarmProblem.declare_mutable` / `WarmProblem.update_param` raise
+  `ValueError` for them. To change bounds on a built problem use
+  `WarmProblem.set_col_bounds` (or `fix_cols`).
 
 ## Param
 

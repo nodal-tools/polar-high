@@ -26,6 +26,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import math
+import numbers
 import os
 import sys
 import tempfile
@@ -2121,6 +2122,29 @@ def _scale_finite_bound(b, f: float):
     return b
 
 
+def _check_bound_direction(vals, *, which: str, var_name: str, where: str) -> None:
+    """Reject a ``+inf`` lower bound or a ``-inf`` upper bound.
+
+    Such a bound makes the column infeasible on its own, and the MPS
+    BOUNDS ladder cannot express it (it would silently drop the bound,
+    so an exported model would differ from the solved one).  ``vals`` is
+    a float or a float64 array.
+    """
+    bad_sign = 1.0 if which == "lower" else -1.0
+    arr = np.asarray(vals, dtype=np.float64)
+    bad = np.isinf(arr) & (np.sign(arr) == bad_sign)
+    if bad.any():
+        word = "+inf" if which == "lower" else "-inf"
+        if arr.ndim:
+            where = f"{where} ({int(np.count_nonzero(bad))} of {arr.size} elements)"
+        raise ValueError(
+            f"add_var({var_name!r}): {which} bound is {word} in {where}; a "
+            f"{which} bound of {word} is never feasible and cannot be "
+            f"written to MPS (use {'-inf' if which == 'lower' else '+inf'} "
+            f"for an unbounded side)"
+        )
+
+
 def _resolve_var_bound(
     bound,
     *,
@@ -2132,9 +2156,14 @@ def _resolve_var_bound(
 ):
     """Normalise an ``add_var`` ``lower`` / ``upper`` argument.
 
-    * Scalar (``int`` / ``float`` / numpy scalar, not ``bool``): returned
-      UNCHANGED — the scalar fast path, byte-identical to the historical
-      behaviour.
+    * Scalar: anything ``numbers.Real`` (``int`` / ``float`` / numpy
+      scalars / ``fractions.Fraction`` ...) is returned UNCHANGED — the
+      scalar fast path, byte-identical to the historical behaviour
+      (consumers apply ``float()`` themselves).  A 0-d numpy array is
+      converted with ``float()`` (stored as a plain float so it is never
+      mistaken for a per-column array).  ``bool`` / ``np.bool_`` are
+      rejected (``TypeError``) — ``upper=True`` is almost certainly a
+      mistake, not a bound of 1.
     * :class:`Param`: its dims must be a subset of ``var_dims``.  It is
       left-joined onto the variable's index rows on its dims (so a
       lower-dim Param broadcasts over the remaining var dims) and
@@ -2142,10 +2171,22 @@ def _resolve_var_bound(
       ``var_frame`` rows.  Variable elements with no matching Param row,
       and Param rows whose value is null / NaN, get ``default``
       (``0.0`` for lower, ``+inf`` for upper) — a sparse bound Param
-      only tightens where it has rows.  ``±inf`` values pass through.
-      A zero-dim Param (``Param.scalar``) collapses to a scalar bound.
-      Duplicate Param rows on its dims raise (the bound would be
-      ambiguous).
+      only tightens where it has rows.  Param rows that match no
+      variable row are ignored; that includes rows whose key is outside
+      the variable's ``pl.Enum`` vocabulary (they cast to null) and rows
+      with a null key (null never matches).  A ``pl.Enum`` vs
+      ``pl.Utf8`` key mismatch is aligned automatically; two ``pl.Enum``
+      keys whose category sets are disjoint / non-nested raise
+      ``ValueError``, and other dtype mismatches (e.g. ``Utf8`` vs
+      ``Int64``) raise polars' join error.  A zero-dim Param
+      (``Param.scalar``) collapses to a scalar bound.  Duplicate Param
+      rows on its dims raise (the bound would be ambiguous).
+
+    Both forms reject a ``+inf`` lower or a ``-inf`` upper bound
+    (``ValueError``); ``-inf`` lower / ``+inf`` upper pass through.  An
+    element whose lower bound exceeds its upper bound is NOT rejected
+    here — exactly like a scalar ``lower > upper``, it makes the LP
+    infeasible at solve time.
     """
     if isinstance(bound, Param):
         pdims = tuple(bound.dims)
@@ -2167,6 +2208,9 @@ def _resolve_var_bound(
             val = bf["value"].cast(pl.Float64)[0]
             if val is None or math.isnan(val):
                 return default
+            _check_bound_direction(
+                val, which=which, var_name=var_name, where="the zero-dim bound Param"
+            )
             return float(val)
         if bf.height and bf.select(pl.struct(list(pdims)).is_duplicated().any()).item():
             raise ValueError(
@@ -2178,22 +2222,40 @@ def _resolve_var_bound(
         if n == 0:
             return np.zeros(0, dtype=np.float64)
         on = list(pdims)
-        left = var_frame.select(on).with_row_index("__bnd_rid")
+        left = var_frame.select(on)
         right = bf.select(*on, pl.col("value").cast(pl.Float64).alias("__bnd_val"))
         left, right = _align_enum_join_keys(left, right, on)
-        joined = left.join(right, on=on, how="left").sort("__bnd_rid")
+        # Param keys are unique (checked above), so a left join keeps
+        # exactly one output row per variable row, in variable-row order.
+        joined = left.join(right, on=on, how="left", maintain_order="left")
         if joined.height != n:
             raise RuntimeError(
                 f"add_var({var_name!r}): {which} bound alignment produced "
                 f"{joined.height} rows for {n} variable elements"
             )
         vals = joined["__bnd_val"].fill_nan(None).fill_null(default)
-        return vals.to_numpy().astype(np.float64, copy=True)
-    if not isinstance(bound, (int, float, np.integer, np.floating)):
+        out = vals.to_numpy().astype(np.float64, copy=True)
+        _check_bound_direction(out, which=which, var_name=var_name, where="the bound Param")
+        return out
+    if isinstance(bound, (bool, np.bool_)):
         raise TypeError(
             f"add_var({var_name!r}): {which} bound must be a number or a "
             f"Param, got {type(bound).__name__}"
         )
+    if isinstance(bound, np.ndarray):
+        if bound.ndim != 0 or bound.dtype.kind not in "iuf":
+            raise TypeError(
+                f"add_var({var_name!r}): {which} bound array must be a 0-d "
+                f"numeric numpy array (use a Param for per-element bounds), "
+                f"got shape {bound.shape} dtype {bound.dtype}"
+            )
+        bound = float(bound)
+    elif not isinstance(bound, numbers.Real):
+        raise TypeError(
+            f"add_var({var_name!r}): {which} bound must be a number or a "
+            f"Param, got {type(bound).__name__}"
+        )
+    _check_bound_direction(float(bound), which=which, var_name=var_name, where="the scalar bound")
     return bound
 
 
@@ -2240,9 +2302,16 @@ class Var:
     ``frame["col_id"]``).  :meth:`Problem.add_var` produces the array
     form when a :class:`Param` bound is given.  Bound consumers read
     them through :meth:`col_lower` / :meth:`col_upper` (scatter-ready
-    values) and rescale them through :meth:`scale_bounds`."""
+    values) and rescale them through :meth:`scale_bounds`.
 
-    __slots__ = ("name", "dims", "frame", "lower", "upper", "integer")
+    ``bound_param_names`` records the ``.name`` of every named
+    :class:`Param` passed as a ``lower`` / ``upper`` bound.  Bound Params
+    are resolved to numbers at :meth:`Problem.add_var` time and are NOT
+    tracked afterwards, so :meth:`WarmProblem.declare_mutable` /
+    :meth:`WarmProblem.update_param` refuse these names (change such
+    bounds with :meth:`WarmProblem.set_col_bounds` instead)."""
+
+    __slots__ = ("name", "dims", "frame", "lower", "upper", "integer", "bound_param_names")
 
     def __init__(
         self,
@@ -2262,6 +2331,7 @@ class Var:
         self.lower = lower
         self.upper = upper
         self.integer = integer
+        self.bound_param_names: tuple[str, ...] = ()
 
     @property
     def has_elementwise_bounds(self) -> bool:
@@ -3443,9 +3513,30 @@ class Problem:
           element).
         * Duplicate Param rows on its dims raise ``ValueError``.
 
+        * Param rows matching no variable row are ignored (sparse
+          tighten) — including rows whose key lies outside the variable's
+          ``pl.Enum`` vocabulary.  Null keys never match, so such
+          elements keep the default.  An ``Enum`` vs ``Utf8`` key dtype
+          mismatch is aligned automatically; ``Enum`` keys with disjoint
+          (non-nested) category sets raise ``ValueError``; other dtype
+          mismatches (e.g. ``Utf8`` vs ``Int64``) raise polars' join
+          error.
+        * A ``+inf`` lower or ``-inf`` upper bound raises ``ValueError``
+          (Param element or scalar alike).  An element with
+          ``lower > upper`` is accepted here and makes the LP infeasible
+          at solve time, exactly as a scalar ``lower > upper`` does.
+
+        Scalars may be any ``numbers.Real`` (``int`` / ``float`` / numpy
+        scalar ...) or a 0-d numeric numpy array; ``bool`` is rejected.
+
         Param bounds are resolved eagerly here into a per-column float64
         array stored on :attr:`Var.lower` / :attr:`Var.upper`; column
-        order and ids are unaffected by the bound form.
+        order and ids are unaffected by the bound form.  The values are
+        NOT tracked afterwards: the names of named bound Params are
+        recorded on :attr:`Var.bound_param_names` and
+        :meth:`WarmProblem.declare_mutable` / :meth:`WarmProblem.update_param`
+        raise for them — change bounds on a built problem with
+        :meth:`WarmProblem.set_col_bounds`.
         """
         if self._layer2_locked:
             raise RuntimeError(
@@ -3467,6 +3558,7 @@ class Problem:
         frame = index.select(*dims).with_columns(col_id=pl.Series(col_ids))
         # Resolve bounds BEFORE committing the column ids so a rejected
         # bound leaves the Problem untouched.
+        lower_arg, upper_arg = lower, upper
         lower = _resolve_var_bound(
             lower, which="lower", default=0.0, var_name=name, var_dims=dims, var_frame=frame
         )
@@ -3478,8 +3570,12 @@ class Problem:
             var_dims=dims,
             var_frame=frame,
         )
+        bound_param_names = tuple(
+            dict.fromkeys(b.name for b in (lower_arg, upper_arg) if isinstance(b, Param) and b.name)
+        )
         self._next_col += n
         v = Var(name, dims, frame, lower, upper, integer)
+        v.bound_param_names = bound_param_names
         self._vars[name] = v
         self._canonical_dirty = True
         return v
@@ -7790,6 +7886,11 @@ class WarmProblem:
         Pass the same names that the Params carry on their ``.name``
         field — typically the FlexData attribute name (``"p_inflow"``,
         ``"p_penalty_up"`` etc.).
+
+        Raises ``ValueError`` for the name of a Param used as an
+        ``add_var`` ``lower`` / ``upper`` bound: bound Params are
+        resolved at ``add_var`` and not tracked (a later update would
+        leave the bounds stale) — use :meth:`set_col_bounds` instead.
         """
         if self._h is not None:
             raise RuntimeError(
@@ -7801,7 +7902,25 @@ class WarmProblem:
                 raise TypeError(
                     f"declare_mutable: param names must be strings, got {type(n).__name__}"
                 )
+            self._reject_bound_param("declare_mutable", n)
             self._mutable_params.add(n)
+
+    def _reject_bound_param(self, caller: str, param_name: str) -> None:
+        """Raise when ``param_name`` was used as an ``add_var`` bound.
+
+        Bound Params are resolved to per-column numbers at
+        :meth:`Problem.add_var` time and are not tracked into the LP, so
+        updating one through the Param auto-update path would silently
+        leave the column bounds stale.
+        """
+        users = [v.name for v in self._p._vars.values() if param_name in v.bound_param_names]
+        if users:
+            raise ValueError(
+                f"{caller}({param_name!r}): Param {param_name!r} is used as a "
+                f"variable bound (add_var lower/upper of {users}); bound Params "
+                f"are resolved at add_var and not tracked; use set_col_bounds "
+                f"to change column bounds on a built problem"
+            )
 
     def set_output_flag(self, enabled: bool) -> None:
         """Enable or disable HiGHS' native solve log for this problem.
@@ -7832,9 +7951,13 @@ class WarmProblem:
         signature recorded for that Param at build time.
 
         Raises if ``param_name`` was not in :meth:`declare_mutable`'s
-        list (silent corruption is worse than a hard error).
+        list (silent corruption is worse than a hard error), or if it
+        names a Param used as an ``add_var`` bound (bound Params are
+        resolved at ``add_var`` and not tracked; use
+        :meth:`set_col_bounds`).
         """
         self._require_built()
+        self._reject_bound_param("update_param", param_name)
         if param_name not in self._mutable_params:
             raise ValueError(
                 f"update_param({param_name!r}): not declared mutable; "

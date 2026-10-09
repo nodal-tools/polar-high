@@ -11,6 +11,7 @@ detector (both pre-solve paths) and :meth:`Var.scale_bounds`.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import highspy
 import numpy as np
@@ -376,3 +377,341 @@ def test_solver_adapter_dispatch_via_lp_view():
     result = solve(pb, solver_name="highs")
     assert result.status == SolverStatus.OPTIMAL
     assert result.objective == pytest.approx(obj)
+
+
+# ---------------------------------------------------------------------------
+# Infeasible-direction infinities are rejected (scalar and per-element)
+
+
+def test_param_lower_plus_inf_raises():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1, 2]})
+    with pytest.raises(ValueError, match=r"lower bound is \+inf .*1 of 3 elements"):
+        pb.add_var("x", "i", idx, lower=_p(("i",), i=[1], value=[INF]))
+    assert "x" not in pb._vars
+
+
+def test_param_upper_minus_inf_raises():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1, 2]})
+    with pytest.raises(ValueError, match=r"upper bound is -inf .*2 of 3 elements"):
+        pb.add_var("x", "i", idx, upper=_p(("i",), i=[0, 2], value=[-INF, -INF]))
+    # Nothing consumed: the next family starts at col 0.
+    assert pb.add_var("y", "i", idx).frame["col_id"].to_list() == [0, 1, 2]
+
+
+def test_zero_dim_param_wrong_direction_inf_raises():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    with pytest.raises(ValueError, match=r"lower bound is \+inf"):
+        pb.add_var("x", "i", idx, lower=fp.Param.scalar(INF))
+    with pytest.raises(ValueError, match=r"upper bound is -inf"):
+        pb.add_var("x", "i", idx, upper=fp.Param.scalar(-INF))
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"lower": INF},
+        {"lower": np.float64(INF)},
+        {"upper": -INF},
+        {"upper": np.float32(-INF)},
+    ],
+)
+def test_scalar_wrong_direction_inf_raises(kw):
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    with pytest.raises(ValueError, match=r"(lower bound is \+inf|upper bound is -inf)"):
+        pb.add_var("x", "i", idx, **kw)
+    assert "x" not in pb._vars
+
+
+def test_scalar_valid_infinities_still_accepted():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    x = pb.add_var("x", "i", idx, lower=-INF, upper=INF)
+    assert x.lower == -INF and x.upper == INF
+
+
+def test_elementwise_lower_above_upper_is_infeasible_not_rejected():
+    """Documented: lower > upper per element is accepted at add_var and
+    surfaces as an infeasible solve, exactly as the scalar case does."""
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    x = pb.add_var(
+        "x",
+        "i",
+        idx,
+        lower=_p(("i",), i=[1], value=[5.0]),
+        upper=_p(("i",), i=[1], value=[2.0]),
+    )
+    pb.set_objective(1.0 * x, sense="min")
+    np.testing.assert_array_equal(x.lower, [0.0, 5.0])
+    np.testing.assert_array_equal(x.upper, [INF, 2.0])
+    assert not pb.solve().optimal
+
+
+# ---------------------------------------------------------------------------
+# Scalar bound type acceptance (backward compatible with float() consumers)
+
+
+@pytest.mark.parametrize(
+    "lo,hi",
+    [
+        (np.float64(-1.5), np.float64(6.0)),
+        (np.float32(-1.5), np.int32(6)),
+        (np.int64(-2), np.uint8(6)),
+        (Fraction(-3, 2), Fraction(6, 1)),
+        (-1.5, 6),
+    ],
+)
+def test_numbers_real_scalars_stored_verbatim(lo, hi):
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    x = pb.add_var("x", "i", idx, lower=lo, upper=hi)
+    assert x.lower is lo and x.upper is hi
+    assert not x.has_elementwise_bounds
+    assert x.col_lower() == float(lo) and type(x.col_lower()) is float
+    assert x.col_upper() == float(hi) and type(x.col_upper()) is float
+
+
+def test_zero_d_numpy_array_scalar_accepted_as_float():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    x = pb.add_var("x", "i", idx, lower=np.array(-1.5), upper=np.array(6))
+    assert type(x.lower) is float and x.lower == -1.5
+    assert type(x.upper) is float and x.upper == 6.0
+    assert not x.has_elementwise_bounds
+
+
+@pytest.mark.parametrize("bad", [True, False, np.bool_(True), np.array(True)])
+def test_bool_bound_rejected(bad):
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    with pytest.raises(TypeError):
+        pb.add_var("x", "i", idx, upper=bad)
+
+
+def test_non_scalar_numpy_array_bound_rejected():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    with pytest.raises(TypeError, match="0-d numeric numpy array"):
+        pb.add_var("x", "i", idx, upper=np.array([1.0, 2.0]))
+
+
+def _scalar_mps(tmp_path, tag: str, lo, hi) -> str:
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1, 2]})
+    x = pb.add_var("x", "i", idx, lower=lo, upper=hi)
+    pb.add_cstr("c", over=idx, sense=">=", lhs_terms={"x": x}, rhs_terms={"k": 1.0})
+    pb.set_objective(2.0 * x, sense="min")
+    path = tmp_path / f"{tag}.mps"
+    pb.write_mps(path)
+    return path.read_text()
+
+
+def test_scalar_bound_types_emit_identical_mps(tmp_path):
+    ref = _scalar_mps(tmp_path, "ref", -1.5, 6.0)
+    for tag, lo, hi in [
+        ("np64", np.float64(-1.5), np.float64(6.0)),
+        ("np32", np.float32(-1.5), np.int32(6)),
+        ("frac", Fraction(-3, 2), Fraction(6)),
+        ("arr0", np.array(-1.5), np.array(6.0)),
+        ("int", -1.5, 6),
+    ]:
+        assert _scalar_mps(tmp_path, tag, lo, hi) == ref, tag
+
+
+# ---------------------------------------------------------------------------
+# Key-dtype / vocabulary semantics of the bound join
+
+
+def test_param_rows_outside_enum_vocab_ignored():
+    pb = fp.Problem()
+    dt = pl.Enum(["n1", "n2"])
+    idx = pl.DataFrame({"n": pl.Series(["n1", "n2"], dtype=dt)})
+    ub = _p(("n",), n=["n2", "zz"], value=[4.0, 1.0])  # "zz" not in vocab
+    x = pb.add_var("x", "n", idx, upper=ub)
+    np.testing.assert_array_equal(x.upper, [INF, 4.0])
+
+
+def test_disjoint_enum_vocabularies_raise():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"n": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"]))})
+    ub = fp.Param(
+        ("n",),
+        pl.DataFrame({"n": pl.Series(["c"], dtype=pl.Enum(["c", "d"])), "value": [1.0]}),
+    )
+    with pytest.raises(ValueError, match="cannot align Enum dtypes"):
+        pb.add_var("x", "n", idx, upper=ub)
+
+
+def test_utf8_vs_int_key_raises():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": ["0", "1"]})
+    with pytest.raises(pl.exceptions.PolarsError):
+        pb.add_var("x", "i", idx, upper=_p(("i",), i=[0], value=[1.0]))
+
+
+def test_null_keys_never_match():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": pl.Series(["a", None], dtype=pl.Utf8)})
+    ub = fp.Param(
+        ("i",), pl.DataFrame({"i": pl.Series([None, "a"], dtype=pl.Utf8), "value": [1.0, 2.0]})
+    )
+    x = pb.add_var("x", "i", idx, upper=ub)
+    np.testing.assert_array_equal(x.upper, [2.0, INF])
+
+
+# ---------------------------------------------------------------------------
+# Bound Params are not tracked by WarmProblem's Param auto-update
+
+
+def _bound_named_problem():
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": ["a", "b"]})
+    ub = fp.Param(("i",), pl.DataFrame({"i": ["a", "b"], "value": [3.0, 4.0]}), name="p_cap")
+    cost = fp.Param(("i",), pl.DataFrame({"i": ["a", "b"], "value": [-1.0, -2.0]}), name="p_cost")
+    x = pb.add_var("x", "i", idx, upper=ub)
+    pb.set_objective(cost * x, sense="min")
+    return pb, x
+
+
+def test_bound_param_names_recorded():
+    pb, x = _bound_named_problem()
+    assert x.bound_param_names == ("p_cap",)
+    y = pb.add_var("y", "i", pl.DataFrame({"i": ["a"]}), upper=_p(("i",), i=["a"], value=[1.0]))
+    assert y.bound_param_names == ()  # unnamed Param
+    z = pb.add_var("z", "i", pl.DataFrame({"i": ["a"]}), lower=-1.0)
+    assert z.bound_param_names == ()
+
+
+def test_declare_mutable_rejects_bound_param():
+    pb, _ = _bound_named_problem()
+    wp = fp.WarmProblem(pb)
+    with pytest.raises(ValueError, match="bound Params are resolved at add_var and not tracked"):
+        wp.declare_mutable("p_cap")
+    wp.declare_mutable("p_cost")  # coefficient Params are unaffected
+    assert wp.solve().obj == pytest.approx(-11.0)
+
+
+def test_update_param_rejects_bound_param():
+    pb, _ = _bound_named_problem()
+    wp = fp.WarmProblem(pb)
+    wp.declare_mutable("p_cost")
+    assert wp.solve().optimal
+    with pytest.raises(ValueError, match="use set_col_bounds"):
+        wp.update_param("p_cap", 10.0)
+    # The supported route: set_col_bounds.
+    ids = wp.col_id_of_var("x")
+    wp.set_col_bounds(ids, np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+    assert wp.solve().obj == pytest.approx(-3.0)
+
+
+# ---------------------------------------------------------------------------
+# Alignment on a later family: non-zero col offset + unsorted index
+
+
+def test_second_family_col_offset_and_unsorted_index(tmp_path):
+    pb = fp.Problem()
+    first = pb.add_var("first", "k", pl.DataFrame({"k": [0, 1, 2]}), upper=5.0)
+    idx = pl.DataFrame({"g": ["u2", "u1", "u3", "u1"], "t": [1, 0, 0, 1]})
+    ub = _p(("g", "t"), g=["u1", "u3", "u1", "u2"], t=[1, 0, 0, 1], value=[1.0, 3.0, 2.0, 4.0])
+    lb = _p(("g",), g=["u3", "u2"], value=[0.5, -1.0])
+    x = pb.add_var("x", ("g", "t"), idx, lower=lb, upper=ub)
+    assert x.frame["col_id"].to_list() == [3, 4, 5, 6]
+    np.testing.assert_array_equal(x.upper, [4.0, 2.0, 3.0, 1.0])
+    np.testing.assert_array_equal(x.lower, [-1.0, 0.0, 0.5, 0.0])
+    pb.set_objective(-1.0 * x + -1.0 * first, sense="min")
+    want_lb = [0.0, 0.0, 0.0, -1.0, 0.0, 0.5, 0.0]
+    want_ub = [5.0, 5.0, 5.0, 4.0, 2.0, 3.0, 1.0]
+    view = LpView.from_problem(pb)
+    np.testing.assert_array_equal(view.col_lb, want_lb)
+    np.testing.assert_array_equal(view.col_ub, want_ub)
+    m = pb.canonicalise()
+    np.testing.assert_array_equal(m.col_lb, want_lb)
+    np.testing.assert_array_equal(m.col_ub, want_ub)
+    for streaming in (True, False):
+        sol = pb.solve(streaming=streaming)
+        assert sol.optimal
+        assert _vals(sol, "x", ("g", "t")) == pytest.approx(
+            {("u2", 1): 4.0, ("u1", 0): 2.0, ("u3", 0): 3.0, ("u1", 1): 1.0}
+        )
+    pb.write_mps(tmp_path / "m.mps")
+    bounds = (tmp_path / "m.mps").read_text().split("BOUNDS\n", 1)[1].split("ENDATA", 1)[0]
+    assert " LO bnd  x[u2,1]  -1\n UP bnd  x[u2,1]  4\n" in bounds
+    assert " LO bnd  x[u3,0]  0.5\n UP bnd  x[u3,0]  3\n" in bounds
+    assert " UP bnd  x[u1,1]  1\n" in bounds
+
+
+# ---------------------------------------------------------------------------
+# Integer variable with fractional Param bounds
+
+
+def test_integer_var_fractional_param_bounds():
+    """x integer in [0.5, 3.7] (elem a) / [-2.3, 1.2] (elem b): max a,
+    min b -> a = 3, b = -2."""
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": ["a", "b"]})
+    lb = _p(("i",), i=["a", "b"], value=[0.5, -2.3])
+    ub = _p(("i",), i=["a", "b"], value=[3.7, 1.2])
+    x = pb.add_var("x", "i", idx, lower=lb, upper=ub, integer=True)
+    cost = _p(("i",), i=["a", "b"], value=[-1.0, 1.0])
+    pb.set_objective(cost * x, sense="min")
+    sol = pb.solve()
+    assert sol.optimal
+    assert _vals(sol, "x", ("i",)) == pytest.approx({"a": 3.0, "b": -2.0})
+    assert sol.obj == pytest.approx(-5.0)
+
+
+# ---------------------------------------------------------------------------
+# set_named_basis: a per-element infinite bound forces basis demotion
+
+
+def _demotion_problem(upper_b: float) -> fp.Problem:
+    """max x_a + x_b  s.t.  x_a + x_b <= 10.  Upper bounds a=3, b=upper_b
+    (Param).  With upper_b=4, both columns sit nonbasic at their upper
+    bound (kUpper).  With upper_b=+inf the capture's kUpper on x[b] names
+    an infinite bound in the target and must be demoted."""
+    pb = fp.Problem()
+    idx = pl.DataFrame({"i": ["a", "b"]})
+    x = pb.add_var("x", "i", idx, upper=_p(("i",), i=["a", "b"], value=[3.0, upper_b]))
+    one = pl.DataFrame({"k": [0]})
+    pb.add_cstr(
+        "cap",
+        over=one,
+        sense="<=",
+        lhs_terms={"s": fp.Sum(x, over="i")},
+        rhs_terms={"r": 10.0},
+    )
+    pb.set_objective(-1.0 * x, sense="min")
+    return pb
+
+
+def _upper_status_basis() -> fp.NamedBasis:
+    wp = fp.WarmProblem(_demotion_problem(4.0))
+    sol = wp.solve(options={"output_flag": False})
+    assert sol.optimal and sol.obj == pytest.approx(-7.0)
+    nb = sol.get_named_basis()
+    s_upper = int(highspy.HighsBasisStatus.kUpper)
+    assert nb.col_status["x[b]"] == s_upper
+    return nb
+
+
+@pytest.mark.parametrize("mode", ["warm", "streaming"])
+def test_set_named_basis_demotes_status_on_elementwise_inf_bound(mode, caplog):
+    nb = _upper_status_basis()
+    target = _demotion_problem(INF)
+    caplog.set_level("INFO", logger="polar_high.engine")
+    if mode == "warm":
+        wp = fp.WarmProblem(target)
+        wp.set_named_basis(nb, policy="exact")
+        sol = wp.solve(options={"output_flag": False})
+    else:
+        target.set_named_basis(nb, policy="exact")
+        sol = target.solve(streaming=True, options={"output_flag": False})
+    assert sol.optimal
+    assert sol.obj == pytest.approx(-10.0)
+    injected = [r.getMessage() for r in caplog.records if "warm-basis injected" in r.getMessage()]
+    assert injected, [r.getMessage() for r in caplog.records]
+    assert "sanitized=1" in injected[0]
