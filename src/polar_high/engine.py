@@ -3741,8 +3741,10 @@ class Problem:
 
         ``frame`` is REQUIRED and has NO default (a silent default frame is a
         corruption vector).  (The :class:`WarmProblem` ``update_rhs`` /
-        ``update_obj_coef`` methods do default to ``frame="user"``, for
-        backward compatibility with callers that predate the keyword.)  ``frame="scaled"`` uses each value as-is in the
+        ``update_obj_coef`` methods do default to ``frame="user"``: that is
+        backward compatible when no Layer-2 side vectors are set, and under
+        Layer 2 it is the deliberate fix — the values mean what they mean at
+        build.)  ``frame="scaled"`` uses each value as-is in the
         solver's post-Layer-2 scaled space.  ``frame="user"`` converts with
         the model's own Layer-2 side-vector
         (``x_scaled = x_user / _layer2_col_factor[col_id]``; identity when
@@ -7229,8 +7231,9 @@ class WarmProblem:
         all rows), or a numpy array (positional — length must equal the
         family's row count, in the order of the original ``over`` frame).
 
-        ``frame="user"`` (default, the behaviour of earlier releases when
-        no Layer-2 side vectors are set): the values are in user space, as
+        ``frame="user"`` (default; backward compatible when no Layer-2 side
+        vectors are set, a deliberate change under Layer 2, where earlier
+        releases wrote the values unscaled): the values are in user space, as
         the RHS terms passed to :meth:`Problem.add_cstr`; the Layer-2 row
         factor of each row is applied, exactly as at build.
         ``frame="scaled"``: the values are already in the solver's scaled
@@ -7329,8 +7332,10 @@ class WarmProblem:
 
         This DOES NOT touch the cost coefficients of other variables.
 
-        ``frame="user"`` (default): the coefficients are in user space, as
-        the objective terms passed to :meth:`Problem.set_objective`; the
+        ``frame="user"`` (default; backward compatible when no Layer-2 side
+        vectors are set, a deliberate change under Layer 2, where earlier
+        releases wrote the values unscaled): the coefficients are in user
+        space, as the objective terms passed to :meth:`Problem.set_objective`; the
         Layer-2 column side vector is applied, exactly as at build.
         ``frame="scaled"``: the coefficients are already in the solver's
         scaled space and are written as given.  With no side vectors set
