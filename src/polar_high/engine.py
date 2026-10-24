@@ -3740,7 +3740,9 @@ class Problem:
         absent are silently skipped (the subset behaviour, ``missing="skip"``).
 
         ``frame`` is REQUIRED and has NO default (a silent default frame is a
-        corruption vector).  ``frame="scaled"`` uses each value as-is in the
+        corruption vector).  (The :class:`WarmProblem` ``update_rhs`` /
+        ``update_obj_coef`` methods do default to ``frame="user"``, for
+        backward compatibility with callers that predate the keyword.)  ``frame="scaled"`` uses each value as-is in the
         solver's post-Layer-2 scaled space.  ``frame="user"`` converts with
         the model's own Layer-2 side-vector
         (``x_scaled = x_user / _layer2_col_factor[col_id]``; identity when
@@ -7058,17 +7060,34 @@ class WarmProblem:
     only the changed coefficients / RHS values are pushed to HiGHS
     between solves.
 
-    Typical rolling-horizon usage::
+    Typical usage (re-solving the same LP with new data)::
 
         wp = WarmProblem(p)
         sol_0 = wp.solve()
-        for r in range(1, n_rolls):
-            wp.update_rhs("balance", demand_param_for_roll[r])
-            wp.update_obj_coef("v_flow", cost_param_for_roll[r])
+        for r in range(1, n_cases):
+            # user-space values on the build labels (or positional arrays)
+            wp.update_rhs("balance", demand_param_for_case[r])
+            wp.update_obj_coef("v_flow", cost_param_for_case[r])
             sol_r = wp.solve()
 
     The ``update_*`` calls are O(rows_or_cols_in_family); the ``solve()``
     benefits from HiGHS's hot-start (basis is preserved across calls).
+
+    Value frames.  :meth:`update_rhs`, :meth:`update_obj_coef` and
+    :meth:`update_obj_coef_array` take values in **user space** by default
+    (``frame="user"``): the Layer-2 side vectors set on the Problem are
+    applied, exactly as at build, so the update means the same as
+    rebuilding with the new values.  ``frame="scaled"`` writes values
+    as given.  :meth:`update_param` recomputes cells from factors cached
+    in the scaled space, so it takes user-space Param values too.  The
+    column-bound and cut APIs (:meth:`fix_cols`, :meth:`fix_col_ids`,
+    :meth:`set_col_bounds`, :meth:`add_cut_row`) write in the **scaled**
+    frame: the caller applies any Layer-2 transform itself.
+
+    The live LP keeps the labels of the Problem it was built from (the
+    ``Var`` frames and the HiGHS column / row names).  The ``update_*``
+    calls change values, never labels: a :class:`Param` is matched to rows
+    and columns by those build labels.
     """
 
     def __init__(self, problem: Problem):
@@ -7194,16 +7213,40 @@ class WarmProblem:
 
     # -- public update API -----------------------------------------------
 
-    def update_rhs(self, cstr_name: str, new_param: Param | float | int) -> None:
+    def update_rhs(
+        self,
+        cstr_name: str,
+        new_param: Param | float | int | np.ndarray,
+        *,
+        frame: Literal["user", "scaled"] = "user",
+    ) -> None:
         """Replace the RHS of constraint family ``cstr_name`` with values
         drawn from ``new_param``.
 
         ``new_param`` may be a :class:`Param` whose dims match a subset
-        of the constraint's ``over=`` axis (broadcasting to the rest), a
-        scalar (broadcast to all rows), or a numpy array (positional —
-        length must equal the family's row count, in the order of the
-        original ``over`` frame).
+        of the constraint's ``over=`` axis (broadcasting to the rest; the
+        values are matched by the ``over`` labels), a scalar (broadcast to
+        all rows), or a numpy array (positional — length must equal the
+        family's row count, in the order of the original ``over`` frame).
+
+        ``frame="user"`` (default, the behaviour of earlier releases when
+        no Layer-2 side vectors are set): the values are in user space, as
+        the RHS terms passed to :meth:`Problem.add_cstr`; the Layer-2 row
+        factor of each row is applied, exactly as at build.
+        ``frame="scaled"``: the values are already in the solver's scaled
+        space and are written as given.
+
+        The ``replace`` is total: the new vector is the whole RHS of each
+        row, so any constant the build put into the row (from other RHS
+        terms or constant LHS terms) must be included by the caller.
+
+        The small-value floor (``Problem.coef_zero_threshold``) is judged
+        on the user-space magnitude in both frames, as at build.  ``±inf``
+        one-sided sentinels are preserved.  With no side vectors set both
+        frames push the same arrays as earlier releases.
         """
+        if frame not in ("user", "scaled"):
+            raise ValueError(f"frame must be 'user' or 'scaled', got {frame!r}")
         self._require_built()
         meta = self._cstr_meta.get(cstr_name)
         if meta is None:
@@ -7224,6 +7267,13 @@ class WarmProblem:
 
         # Resolve new RHS vector (length == row_count, aligned to over).
         new_rhs = self._resolve_rhs_vec(new_param, meta, cstr_name)
+        # Layer-2 row factor of this family's rows (``None`` when Layer 2 is
+        # off).  The build multiplies every RHS by it, so a user-frame value
+        # gets the same multiply; ±inf stays ±inf (positive factors).
+        _rf = self._p._layer2_row_factor
+        rf_slice = None if _rf is None or not row_count else _rf[base_row : base_row + row_count]
+        if frame == "user" and rf_slice is not None:
+            new_rhs = new_rhs * rf_slice
 
         # Build lower / upper bound vectors per sense.
         inf = highspy.kHighsInf
@@ -7250,13 +7300,22 @@ class WarmProblem:
         # cached one-sided bounds) are preserved verbatim.  No-op when
         # the threshold is 0.0 (default), so warm updates stay
         # byte-identical with the cutoff off.
+        # The bound in HiGHS is scaled, so the user-space magnitude is
+        # ``|bound| / rf`` in both frames (scale-invariant floor, as at build).
         _coef_zero_thr = float(getattr(self._p, "coef_zero_threshold", 0.0) or 0.0)
         if _coef_zero_thr > 0.0:
-            lb = _floor_small_coefs(lb, _coef_zero_thr)
-            ub = _floor_small_coefs(ub, _coef_zero_thr)
+            _rb_uns = None if rf_slice is None else 1.0 / rf_slice
+            lb = _floor_small_coefs(lb, _coef_zero_thr, _rb_uns)
+            ub = _floor_small_coefs(ub, _coef_zero_thr, _rb_uns)
         self._h.changeRowsBounds(int(row_count), row_idx, lb, ub)
 
-    def update_obj_coef(self, var_name: str, new_param: Param | float | int) -> None:
+    def update_obj_coef(
+        self,
+        var_name: str,
+        new_param: Param | float | int,
+        *,
+        frame: Literal["user", "scaled"] = "user",
+    ) -> None:
         """Replace the objective coefficient on every column of ``var_name``.
 
         Assumes the objective contribution from ``var_name`` is exactly
@@ -7269,7 +7328,18 @@ class WarmProblem:
         ahead of the call.
 
         This DOES NOT touch the cost coefficients of other variables.
+
+        ``frame="user"`` (default): the coefficients are in user space, as
+        the objective terms passed to :meth:`Problem.set_objective`; the
+        Layer-2 column side vector is applied, exactly as at build.
+        ``frame="scaled"``: the coefficients are already in the solver's
+        scaled space and are written as given.  With no side vectors set
+        both frames push the same values as earlier releases.  Values of a
+        :class:`Param` are matched to the columns by the variable's dim
+        labels; columns without a match get ``0.0``.
         """
+        if frame not in ("user", "scaled"):
+            raise ValueError(f"frame must be 'user' or 'scaled', got {frame!r}")
         self._require_built()
         v = self._p._vars.get(var_name)
         if v is None:
@@ -7321,7 +7391,7 @@ class WarmProblem:
                     cost = pf["value"].to_numpy().astype(np.float64, copy=False)
                 else:
                     cf_a, pf_a = _align_enum_join_keys(col_frame, pf, on)
-                    j = cf_a.join(pf_a, on=on, how="left").with_columns(
+                    j = cf_a.join(pf_a, on=on, how="left", maintain_order="left").with_columns(
                         value=pl.col("value").fill_null(0.0)
                     )
                     cost = j["value"].to_numpy().astype(np.float64, copy=False)
@@ -7330,10 +7400,26 @@ class WarmProblem:
                 f"update_obj_coef: new_param must be Param or "
                 f"scalar, got {type(new_param).__name__}"
             )
+        cost = self._obj_to_scaled(cids, cost, frame)
         self._h.changeColsCost(int(cids.size), cids, cost)
 
+    def _obj_to_scaled(self, cids: np.ndarray, cost: np.ndarray, frame: str) -> np.ndarray:
+        """Apply the Layer-2 column side vector to user-frame objective
+        coefficients (the build multiplies each cost by
+        ``_layer2_col_factor[col_id]``); identity for ``frame="scaled"`` or
+        when Layer 2 is off."""
+        _cf = self._p._layer2_col_factor
+        if frame == "user" and _cf is not None and cids.size:
+            return cost * _cf[cids]
+        return cost
+
     def update_obj_coef_array(
-        self, var_name: str, dim_tuples: list[tuple], values: np.ndarray
+        self,
+        var_name: str,
+        dim_tuples: list[tuple],
+        values: np.ndarray,
+        *,
+        frame: Literal["user", "scaled"] = "user",
     ) -> None:
         """Array-form of :meth:`update_obj_coef`.
 
@@ -7346,7 +7432,13 @@ class WarmProblem:
         new objective coefficient on the column whose dim-tuple is
         ``dim_tuples[k]``.  Vectorised — a single ``changeColsCost``
         call regardless of cell count.
+
+        ``frame`` as in :meth:`update_obj_coef`: ``"user"`` (default)
+        applies the Layer-2 column side vector, ``"scaled"`` writes the
+        values as given.
         """
+        if frame not in ("user", "scaled"):
+            raise ValueError(f"frame must be 'user' or 'scaled', got {frame!r}")
         self._require_built()
         v = self._p._vars.get(var_name)
         if v is None:
@@ -7361,6 +7453,7 @@ class WarmProblem:
                 f"{vals.size} != dim_tuples length {cols.size}"
             )
         cols_i32 = cols.astype(np.int32, copy=False)
+        vals = self._obj_to_scaled(cols, vals, frame)
         self._h.changeColsCost(int(cols_i32.size), cols_i32, vals)
 
     def fix_cols(self, var_name: str, dim_tuples: list[tuple], values: np.ndarray) -> None:
@@ -7371,6 +7464,11 @@ class WarmProblem:
         but to set the column at that level).  Used by the Lagrangian
         primal-recovery step ("fix-and-resolve").  Vectorised — single
         ``changeColsBounds`` call.
+
+        Scaled frame: ``values`` are written verbatim as column bounds of
+        the live (possibly Layer-2 scaled) model; any caller-side scaling
+        must be applied beforehand.  Unlike :meth:`update_obj_coef`, there
+        is no ``frame="user"`` conversion.
         """
         self._require_built()
         v = self._p._vars.get(var_name)
@@ -7399,7 +7497,8 @@ class WarmProblem:
         ids returned by :meth:`add_recourse_col`).  Typical consumer: a
         cutting-plane driver temporarily pinning coupling columns.
         Bounds are written verbatim into the live model — any caller-side
-        scaling must be applied to ``values`` beforehand.
+        scaling must be applied to ``values`` beforehand (scaled frame;
+        there is no ``frame="user"`` conversion here).
         """
         self._require_built()
         cids = np.asarray(col_ids, dtype=np.int64)
@@ -7452,6 +7551,10 @@ class WarmProblem:
         save/pin/restore pattern).  Vectorised — single
         ``changeColsBounds`` call; ``±inf`` entries round-trip unchanged
         (HiGHS' bound sentinel IS the IEEE infinity).
+
+        Scaled frame: the bounds are written verbatim into the live model
+        (as read back by :meth:`get_col_bounds`); there is no
+        ``frame="user"`` conversion here.
         """
         self._require_built()
         cids = np.asarray(col_ids, dtype=np.int64)
@@ -7518,8 +7621,9 @@ class WarmProblem:
 
         Appends ``Σ coefs[k] · x[col_ids[k]] >= lower`` to the live HiGHS
         model via ``addRow``.  This is a POST-build mutation of the warm
-        ``_h`` handle (the same class of live edit as :meth:`update_rhs` /
-        :meth:`update_coef`); it deliberately bypasses the build-time
+        ``_h`` handle (the same class of live edit as :meth:`update_coef`;
+        unlike :meth:`update_rhs`, which defaults to the user frame, the
+        row is written in the scaled frame); it deliberately bypasses the build-time
         ``Problem.add_cstr`` DSL lock, which only guards the fixed-size
         Layer-2 autoscale side vectors and is irrelevant once the model is
         built.  The caller is responsible for keeping the master autoscale
@@ -7961,6 +8065,23 @@ class WarmProblem:
         names a Param used as an ``add_var`` bound (bound Params are
         resolved at ``add_var`` and not tracked; use
         :meth:`set_col_bounds`).
+
+        Scope, which the caller must respect:
+
+        * It updates **tracked matrix cells only**.  Contributions of the
+          Param to the objective, to row bounds (RHS) or to column bounds
+          are NOT updated, nor are cells reached through an anonymous
+          composite Param that carries no link to ``param_name``.  The
+          caller must ensure the Param reaches the LP only through tracked
+          cells; a Param with zero tracked cells is a silent no-op.
+        * Values are matched to the cells **by the Param's dim labels**
+          (a join on the labels recorded at build); cells whose labels are
+          missing from ``new_param`` get ``0.0``.  A Param whose labels
+          shifted (e.g. a rolled time axis) is therefore misplaced, not
+          re-aligned by position.
+        * Values are in user space; the cached factors carry the Layer-2
+          side vectors, and the small-value floor is judged on the
+          user-space magnitude, as at build.
         """
         self._require_built()
         self._reject_bound_param("update_param", param_name)
@@ -8035,9 +8156,15 @@ class WarmProblem:
         # reaches HiGHS, exactly as ``sorted_v`` / ``val64`` are floored
         # at build time.  No-op when the threshold is 0.0 (default), so
         # warm updates stay byte-identical with the cutoff off.
+        # ``factor`` was cached from the scaled (Layer-2 baked) coefficient,
+        # so ``new_coefs`` is scaled: judge the floor on the user-space
+        # magnitude ``|coef| / (rf[row]·cf[col])``, as at build.
         _coef_zero_thr = float(getattr(self._p, "coef_zero_threshold", 0.0) or 0.0)
         if _coef_zero_thr > 0.0:
-            new_coefs = _floor_small_coefs(new_coefs, _coef_zero_thr)
+            _m_uns = _layer2_matrix_unscale(
+                rows, cols, self._p._layer2_row_factor, self._p._layer2_col_factor
+            )
+            new_coefs = _floor_small_coefs(new_coefs, _coef_zero_thr, _m_uns)
 
         h = self._h
         rows_list = rows.tolist()
@@ -8312,7 +8439,7 @@ class WarmProblem:
             # Fallback — join on dims; left-join preserves over-frame
             # order so the resulting "value" column is row-aligned.
             over_a, pf_a = _align_enum_join_keys(over, param_frame, on)
-            j = over_a.join(pf_a, on=on, how="left")
+            j = over_a.join(pf_a, on=on, how="left", maintain_order="left")
             return j["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
         raise TypeError(
             f"update_rhs({cstr_name!r}): unsupported new_param type {type(new_param).__name__}"

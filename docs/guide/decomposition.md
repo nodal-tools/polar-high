@@ -36,9 +36,11 @@ cut_dual = sol.row_dual[row_id]                 # read the appended row BY id
 
 - **`WarmProblem.add_cut_row(col_ids, coefs, lower) -> int`** appends a `>=`
   row to the built model and returns its `row_id`. It is a post-build live
-  edit (same class as `update_rhs` / `update_coef`) and deliberately bypasses
-  the build-time DSL lock, which only guards the fixed-size autoscale side
-  vectors. There is **no auto-scaling for appended rows** — keep the master
+  edit (same class as `update_coef`) and deliberately bypasses the build-time
+  DSL lock, which only guards the fixed-size autoscale side vectors. Unlike
+  `update_rhs` / `update_obj_coef`, which take user-space values by default
+  (`frame="user"`), the cut is written in the **scaled** frame: there is
+  **no auto-scaling for appended rows** — keep the master
   autoscale off, or pre-scale `coefs` so the cut lives on the built columns'
   scale. The appended row's dual is read by `Solution.row_dual[row_id]`, not
   `constraint_dual` (which only knows named build-time rows).

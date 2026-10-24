@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.9.0] — 2026-10-24
+
+### Added
+
+- **`frame=` keyword on the warm update methods.**
+  `WarmProblem.update_rhs`, `update_obj_coef` and `update_obj_coef_array`
+  take `frame="user"` (default) or `frame="scaled"`. In the user frame the
+  values are in the model's own units and the Layer-2 side vectors are
+  applied as at build; in the scaled frame they are written to HiGHS as
+  given (the previous behaviour, for callers that pre-scale).
+
+### Fixed
+
+- **Warm updates under Layer-2 autoscaling.** `update_rhs` wrote the new
+  RHS without the Layer-2 row factor, and `update_obj_coef` /
+  `update_obj_coef_array` wrote the new costs without the column side
+  vector, so a warm re-solve of a Layer-2 scaled LP solved a different
+  model than a fresh build with the same values. They now apply the side
+  vectors (`frame="user"`). Without side vectors the pushed values are
+  unchanged.
+- **Scale-invariant small-value floor on the warm path.** `update_rhs`
+  and `update_param` judged `coef_zero_threshold` on the scaled value,
+  so a user value of 1 scaled to `2**-14` could be floored to 0. The
+  floor is now judged on the user-space magnitude, as at build.
+- `update_rhs` / `update_obj_coef` label joins keep the row order of the
+  constraint / variable explicitly (`maintain_order="left"`).
+- Docstrings and the warm-starting guide state the value frame of every
+  `WarmProblem` method (`fix_cols`, `fix_col_ids`, `set_col_bounds`,
+  `update_coef`, `add_cut_row` write in the scaled frame), that the live
+  LP keeps its build labels, and the scope of `update_param` (tracked
+  matrix cells only, matched by label).
+
 ## [3.8.0] — 2026-10-09
 
 ### Added
