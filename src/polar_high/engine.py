@@ -354,6 +354,26 @@ def _aligned_join(
 # Core types
 
 
+def _dedup_sum_coo(r: np.ndarray, c: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sum the values of duplicate ``(r, c)`` pairs of a COO triple list.
+
+    Deterministic: the triples are stably sorted by ``(r, c)`` and each group is summed in its production
+    order (``np.add.reduceat``), so a group of three or more coefficients (e.g. ``+a``, ``−a``, ``ε`` on one
+    column, whose float sum depends on the order) gives the same bits in every process — unlike a hash
+    ``group_by``, whose within-group order is not fixed.  Returns ``(r, c, v)`` sorted by ``(r, c)``,
+    ``v`` float64."""
+    if r.size == 0:
+        return r, c, np.asarray(v, dtype=np.float64)
+    order = np.lexsort((c, r))          # stable: ties keep production order
+    rs, cs = r[order], c[order]
+    vs = np.asarray(v, dtype=np.float64)[order]
+    new_group = np.empty(rs.size, dtype=bool)
+    new_group[0] = True
+    new_group[1:] = (rs[1:] != rs[:-1]) | (cs[1:] != cs[:-1])
+    starts = np.flatnonzero(new_group)
+    return rs[starts], cs[starts], np.add.reduceat(vs, starts)
+
+
 class Param:
     """A parameter table.  ``frame`` carries columns ``*dims, value``.
 
@@ -4811,15 +4831,9 @@ class Problem:
             tc = np.concatenate(triple_cols)
             tv = np.concatenate(triple_vals)
             del triple_rows, triple_cols, triple_vals
-            dedup = (
-                pl.DataFrame({"r": tr, "c": tc, "v": tv})
-                .group_by(["r", "c"])
-                .agg(pl.col("v").sum())
-            )
-            tr = dedup["r"].to_numpy().astype(np.int64, copy=False)
-            tc = dedup["c"].to_numpy().astype(np.int64, copy=False)
-            tv = dedup["v"].to_numpy().astype(np.float64, copy=False)
-            del dedup
+            tr, tc, tv = _dedup_sum_coo(tr, tc, tv)
+            tr = tr.astype(np.int64, copy=False)
+            tc = tc.astype(np.int64, copy=False)
         else:
             tr = np.zeros(0, dtype=np.int64)
             tc = np.zeros(0, dtype=np.int64)
@@ -6199,15 +6213,7 @@ class Problem:
                 fv = np.concatenate(fam_vals)
                 # Sum coefs for duplicate (row, col) pairs within the
                 # family — same dedup the passModel path does globally.
-                dedup = (
-                    pl.DataFrame({"r": fr, "c": fc, "v": fv})
-                    .group_by(["r", "c"])
-                    .agg(pl.col("v").sum())
-                )
-                fr = dedup["r"].to_numpy()
-                fc = dedup["c"].to_numpy()
-                fv = dedup["v"].to_numpy().astype(np.float64, copy=False)
-                del dedup
+                fr, fc, fv = _dedup_sum_coo(fr, fc, fv)
             else:
                 fr = np.zeros(0, dtype=np.int64)
                 fc = np.zeros(0, dtype=np.int64)
