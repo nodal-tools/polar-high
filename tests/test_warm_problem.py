@@ -325,3 +325,25 @@ def test_set_output_flag_after_solve_persists(capfd):
     combined = out + err
     for needle in ("Solving the presolved LP", "Simplex   iterations", "HiGHS run time"):
         assert needle not in combined, f"unexpected HiGHS log line: {needle!r}"
+
+
+def test_warm_resolve_with_threads_after_scheduler_repinned_elsewhere() -> None:
+    """A warm re-solve of an instance with ``threads`` set must still run after another caller re-initialised
+    HiGHS' process-global scheduler with a different count (``prewarm_global_scheduler(1)`` before a parallel
+    pass, as the Benders region pass does between master solves).  Before, ``run()`` rejected the option and the
+    re-solve came back kNotset."""
+    p = fp.Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    x = p.add_var("x", "i", idx, lower=0.0, upper=10.0)
+    p.add_cstr("c", over=idx, sense="<=", lhs_terms={"x": x},
+               rhs_terms={"r": fp.Param(("i",), pl.DataFrame({"i": [0, 1], "value": [5.0, 6.0]}))})
+    p.set_objective(x.to_expr() * -1.0, sense="min")
+    p.set_solver_options({"threads": 2, "parallel": "on", "output_flag": False})
+    w = fp.WarmProblem(p)
+    assert w.solve().obj == pytest.approx(-11.0)
+    for _ in range(2):
+        fp.prewarm_global_scheduler(1)
+        w.set_col_bounds(np.array([0]), np.array([0.0]), np.array([3.0]))
+        sol = w.solve()
+        assert sol.optimal
+        assert sol.obj == pytest.approx(-9.0)

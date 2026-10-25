@@ -1749,6 +1749,95 @@ def test_shared_column_pinned_once_and_ub_valid(weight) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The in-out incumbent is the plan the upper bound priced (pinned_solve_at):
+# master  min C + η,  f ≤ C,  f, C ∈ [0, 10]    (C = capacity, the master's own plan)
+# sub     min 3·g  s.t. g + f ≥ 6                 (import displaces generation)
+# Optimum C = f = 6, cost 6.  The outer vertex builds C = 10 while the overlay
+# point is interior (f = 5 at iteration 1): the plan the bound prices is C = f.
+# ---------------------------------------------------------------------------
+
+
+class _CapMaster(_ToyMaster):
+    """One coupling column f bounded by the master's own capacity C (its plan)."""
+
+    def __init__(self):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f = p.add_var("f", "i", idx, lower=0.0, upper=_F_MAX)
+        cap = p.add_var("C", "i", idx, lower=0.0, upper=_F_MAX)
+        eta = p.add_var("eta1", "i", idx, lower=_PROVISIONAL_FLOOR)
+        p.add_cstr("fcap", over=idx, sense="<=", lhs_terms={"f": f, "neg_C": cap.to_expr() * -1.0},
+                   rhs_terms={"zero": _scalar_param(0.0)})
+        p.set_objective(cap.to_expr() * 1.0 + eta.to_expr(), sense="min")
+        self.wp = fp.WarmProblem(p)
+        self.wp.solve()
+        self.f_col = {"sub1": int(self.wp.col_id_of_var("f", (0,)))}
+        self.c_col = int(self.wp.col_id_of_var("C", (0,)))
+        self._eta_col = {"sub1": int(self.wp.col_id_of_var("eta1", (0,)))}
+        self._relaxed: set[str] = set()
+        self.floor_set = None
+        self._last_msol = None
+
+    def solve(self) -> fp.Solution:
+        sol = super().solve()
+        self._last_msol = sol
+        return sol
+
+    def project_point(self, f, sol, *, hard_fail: bool = True) -> float:
+        cap = float(sol.col_value[self.c_col])
+        slack = 0.0
+        for c, v in f.items():
+            if v > cap:
+                slack = max(slack, v - cap)
+                f[c] = cap
+        return slack
+
+    def pinned_solve_at(self, point):
+        cols = np.array(list(self.f_col.values()), dtype=np.int64)
+        lo, hi = self.wp.get_col_bounds(cols)
+        self.wp.fix_col_ids(cols, np.array([float(point[int(c)]) for c in cols], dtype=np.float64))
+        try:
+            sol = self.wp.solve(retry_on_unknown=True)
+            if not sol.optimal:
+                raise PinnedMasterNotOptimal("cap master")
+            eta = sum(float(sol.col_value[c]) for c in self._eta_col.values())
+            return float(sol.obj) - eta, sol
+        finally:
+            self.wp.set_col_bounds(cols, lo, hi)
+
+    def native_cost_at(self, point) -> float:
+        return self.pinned_solve_at(point)[0]
+
+
+def test_in_out_incumbent_is_the_plan_the_upper_bound_priced() -> None:
+    master = _CapMaster()
+    sub = _ToySub("sub1", master.f_col["sub1"], demand=6.0, gen_cost=3.0)
+    col = master.f_col["sub1"]
+    seen: list[tuple[float, float, float, float]] = []
+
+    def on_incumbent(msol, results, info):
+        # (C of the handed solution, f at the incumbent point, its cost, the UB)
+        cap = float(msol.col_value[master.c_col])
+        seen.append((cap, info["point"][col], cap + sum(info["sub_costs"].values()), info["upper_bound"]))
+        return {"C": cap}
+
+    result = solve_benders_loop(
+        master, [sub],
+        options=BendersLoopOptions(max_iters=40, tol=1e-9, workers=1, in_out_weight=0.5),
+        initial_point={col: 0.0}, on_incumbent=on_incumbent,
+    )
+    assert result.converged
+    assert result.best_upper_bound == pytest.approx(6.0, abs=1e-6)
+    assert seen
+    # The vertex built more capacity than the interior point needed at least once (else the test is vacuous).
+    assert any(abs(cap - f) < 1e-9 and f < _F_MAX - 1e-9 for cap, f, _, _ in seen)
+    for cap, f, plan_cost, ub in seen:
+        assert cap == pytest.approx(f, abs=1e-9)                # capacity re-optimised for the pinned flow
+        assert plan_cost == pytest.approx(ub, rel=1e-12)        # the handed plan costs exactly the bound
+    assert result.incumbent_payload["C"] == pytest.approx(result.incumbent_point[col], abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # Unified UB helper — the single L-shaped feasible-point code path.
 # ---------------------------------------------------------------------------
 

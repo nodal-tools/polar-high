@@ -393,6 +393,19 @@ class BendersMaster(Protocol):
         subproblems were solved at."""
         ...
 
+    def pinned_solve_at(self, point: dict[int, float]) -> tuple[float, Solution]:
+        """OPTIONAL member — :meth:`native_cost_at` plus the pinned master's
+        solution: ``(native cost at point, that Solution)``.  With in-out ON
+        the loop prefers it: the Solution (the master's own variables, e.g.
+        investments, re-optimised for the coupling columns pinned at
+        ``point``) is the plan the upper bound priced, and becomes the
+        incumbent's master solution handed to ``on_incumbent``.  Without it
+        the incumbent keeps the outer vertex ``msol``, whose plan can cost
+        more than the reported bound.  The Solution must not alias buffers a
+        later solve overwrites.  Raises :class:`PinnedMasterNotOptimal` like
+        :meth:`native_cost_at`."""
+        ...
+
     #: OPTIONAL attribute/property — ``True`` iff the master's native cost
     #: DEPENDS on the coupling flow columns (a cost-bearing master, e.g. one
     #: hosting balance/storage nodes whose balances are filled by the coupling
@@ -934,7 +947,11 @@ def solve_benders_loop(
         observer must not break the solve).
     on_incumbent
         Fired when an iteration improves the best upper bound, with
-        ``(master_solution, [SubproblemResult...], info)`` where ``info``
+        ``(master_solution, [SubproblemResult...], info)`` — ``master_solution``
+        is the solution whose plan the bound priced: the boxed iterate under
+        the trust region, the pinned solution of ``pinned_solve_at`` with
+        in-out ON (when the master implements it), else the master vertex —
+        where ``info``
         carries ``{"iteration", "upper_bound", "point", "sub_costs"}``.
         Its return value is stored as :attr:`BendersLoopResult.incumbent_payload`.
         Domain adapters MUST materialize anything they keep (solver-backed
@@ -1425,6 +1442,8 @@ def solve_benders_loop(
         # there.
         native_cost_flow_dependent = getattr(master, "native_cost_flow_dependent", False)
         ub_valid = True
+        # The master solution handed to ``on_incumbent``: the solution whose plan the UB priced.
+        incumbent_msol = tr_msol if tr_on else msol
         if in_out_on and shared_owners:
             n_split = sum(
                 1 for c, owners in shared_owners.items()
@@ -1456,14 +1475,22 @@ def solve_benders_loop(
                     "(native_cost_flow_dependent) needs BendersMaster.native_cost_at to form a valid upper bound"
                 )
             try:
-                ub = _upper_bound(
-                    master,
-                    sub_costs,
-                    msol=msol,
-                    recourse=recourse_by_sub,
-                    query_point=overlay_point,
-                    native_at_query=True,
-                )
+                pinned_solve_at = getattr(master, "pinned_solve_at", None)
+                if callable(pinned_solve_at):
+                    # The pinned master's own solution is the plan this UB prices (its investments
+                    # re-optimised for the overlay flows); it becomes the incumbent's master solution.
+                    native_at_overlay, pinned_msol = pinned_solve_at(overlay_point)
+                    ub = float(native_at_overlay) + sum(sub_costs.values())
+                    incumbent_msol = pinned_msol
+                else:
+                    ub = _upper_bound(
+                        master,
+                        sub_costs,
+                        msol=msol,
+                        recourse=recourse_by_sub,
+                        query_point=overlay_point,
+                        native_at_query=True,
+                    )
             except PinnedMasterNotOptimal as exc:
                 ub_valid = False
                 ub = float("nan")
@@ -1500,7 +1527,7 @@ def solve_benders_loop(
             payload: object | None = None
             if on_incumbent is not None:
                 payload = on_incumbent(
-                    tr_msol if tr_on else msol,
+                    incumbent_msol,
                     list(sub_results),
                     {
                         "iteration": iterations,

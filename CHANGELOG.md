@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [3.9.1] — 2026-10-25
+## [3.10.0] — 2026-10-25
 
 ### Added
 
@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applies now: 0 for a pass-through), `InOutStabilizer.centre_value()`,
   `polar_high.consistent_separation_points` and the exception
   `PinnedMasterNotOptimal` (raised by a master adapter's `native_cost_at`
-  when the pinned master is not optimal).
+  when the pinned master is not optimal), and the optional `BendersMaster`
+  member `pinned_solve_at(point) -> (native cost, Solution)`: with in-out ON
+  the loop hands its Solution to `on_incumbent`, so the incumbent plan (e.g.
+  the investments) is the plan the upper bound priced.
 
 ### Fixed
 
@@ -34,9 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupling column also makes it flow-dependent. An iteration whose point
   the pinned master cannot reach, or whose shared columns are split (a
   guard), contributes no upper bound (warning; `on_iteration` reports NaN).
-  In-out runs can take more iterations, since the bound is no longer the
-  optimistic mixed-point value; a flow-dependent master without
+  This costs one extra master solve per in-out iteration; iteration counts
+  are unchanged on the test models. A flow-dependent master without
   `native_cost_at` is now an error under in-out.
+- **Warm re-solve with `threads` after the global scheduler was re-pinned.**
+  HiGHS' task scheduler is process-global; after another caller
+  re-initialised it with a different thread count (e.g.
+  `prewarm_global_scheduler(1)` before a parallel pass), a `WarmProblem`
+  re-solve with an explicit `threads` option was rejected by HiGHS and came
+  back not solved. `WarmProblem.solve` now re-initialises the scheduler
+  before a re-solve of an instance that sets `threads` (as the first build
+  already did); call it while no other HiGHS instance runs.
 - Duplicate `(row, col)` coefficients of the COO matrix build (global and
   per-family streaming) are summed in a fixed order, so a group of nearly
   cancelling coefficients gives the same matrix in every process.

@@ -8289,6 +8289,14 @@ class WarmProblem:
         """
         if self._h is None:
             self._initial_build(options=options)
+        else:
+            # A re-solve of an instance with an explicit ``threads`` count: HiGHS' task scheduler is
+            # process-global, and another Highs may have re-initialised it with a different count since this
+            # instance last ran (e.g. ``prewarm_global_scheduler(1)`` before a parallel pass over other
+            # instances).  ``run()`` then rejects the option ("global scheduler has already been initialized
+            # to use N threads").  Re-initialise it for this instance first, as the first build does.  Only
+            # call this while no other Highs instance is running.
+            self._repin_scheduler()
         # subsequent: just rerun
         h = self._h
         # Idempotent: installs once on the first solve, no-ops on reuse.
@@ -8307,6 +8315,17 @@ class WarmProblem:
             h.clearSolver()
             h.run()
         return self._build_solution(h)
+
+    def _repin_scheduler(self) -> None:
+        """``resetGlobalScheduler`` before a re-solve when this instance sets ``threads`` (> 0): the next
+        ``run()`` initialises the process-global scheduler with this instance's count."""
+        try:
+            got = self._h.getOptionValue("threads")
+            threads = got[1] if isinstance(got, tuple) else got
+            if int(threads) > 0:
+                self._h.resetGlobalScheduler(False)
+        except Exception:  # noqa: BLE001 — best-effort, as the build-time reset
+            pass
 
     def _build_solution(self, h) -> Solution:
         """Read the live HiGHS handle into a :class:`Solution` (shared by
