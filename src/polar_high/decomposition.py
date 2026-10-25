@@ -49,6 +49,7 @@ __all__ = [
     "StallMonitor",
     "StallVerdict",
     "TrustRegionStabilizer",
+    "consistent_separation_points",
 ]
 
 # Empirical defaults (validated on Benders spatial-decomposition traces up to
@@ -407,6 +408,22 @@ class InOutStabilizer:
         self._maybe_arm_periodic_out()
         return "null"
 
+    def effective_weight(self) -> float:
+        """The weight :meth:`separation_point` applies right now: ``0.0`` when
+        it returns the master point verbatim (weight 0, no centre yet, or a
+        pending forced out-step), else :attr:`weight`.  Pure."""
+        if self.weight == 0.0 or self._centre is None or self._force_out:
+            return 0.0
+        return self.weight
+
+    def centre_value(self, col: int, default: float) -> float:
+        """The centre's value of column ``col`` (``default`` without a centre or
+        without that column) — the value :meth:`separation_point` interpolates
+        towards."""
+        if self._centre is None:
+            return default
+        return self._centre.get(col, default)
+
     def _shrink_weight(self) -> None:
         """Shrink the weight one null step, bottoming out at a FORCED 0.
 
@@ -428,6 +445,60 @@ class InOutStabilizer:
         if self.out_step_every > 0 and self._since_out >= self.out_step_every:
             self._force_out = True
             self._since_out = 0
+
+
+def consistent_separation_points(
+    stabilizers: dict[str, InOutStabilizer],
+    sep_points: dict[str, dict[int, float]],
+    point: dict[int, float],
+    shared: dict[int, list[str]],
+) -> dict[str, dict[int, float]]:
+    """One separation value per SHARED coupling column, the same in every owner.
+
+    With one :class:`InOutStabilizer` per subproblem, a column pinned in
+    several subproblems (e.g. the exporter and importer half-flows of one
+    cross-region arc, both mapped to one master column) would otherwise be
+    pinned at different values whenever the owners' effective weights differ
+    (one forced out, one shrunk, one interpolating): the summed recourse is
+    then the recourse of no single physical point (the exporter sends ``f_A``
+    while the importer receives ``f_B``) and is no valid upper bound.
+
+    ``sep_points`` holds each subproblem's separation point (after any
+    projection onto the master's feasible set); ``shared`` maps every column
+    owned by more than one subproblem to its owner names.  For each shared
+    column every owner gets the value of the owner with the SMALLEST
+    :meth:`InOutStabilizer.effective_weight` (first in ``shared`` order on a
+    tie) — the value closest to the master point.  The owners' centres must
+    be identical on shared columns (true when every stabilizer is seeded with
+    the same point and every serious step jumps all of them to the same
+    incumbent); then every owner's value lies on the one segment
+    ``centre → point`` and the smallest weight is one point of that segment.
+    A ``ValueError`` names the column if the centres differ.
+
+    A subproblem with a pending forced out-step has weight 0 and so keeps the
+    master point verbatim on all its columns (the Ben-Ameur–Neto convergence
+    guarantee); its neighbours are merely less stabilised on the shared
+    columns.  Columns owned by one subproblem keep that subproblem's value.
+    Points are copied only where a value changes, so an unchanged point keeps
+    its identity (``is point`` stays meaningful to the caller).  Pure.
+    """
+    out = dict(sep_points)
+    for col, owners in shared.items():
+        centres = {stabilizers[o].centre_value(col, point.get(col, 0.0)) for o in owners
+                   if stabilizers[o]._centre is not None}
+        if len(centres) > 1:
+            raise ValueError(
+                f"consistent_separation_points: the owners {owners} of coupling column {col} have different "
+                f"in-out centres {sorted(centres)}; a consistent separation point needs identical centres"
+            )
+        pick = min(owners, key=lambda o: stabilizers[o].effective_weight())
+        value = out[pick][col]
+        for o in owners:
+            if out[o][col] != value:
+                if out[o] is sep_points[o]:
+                    out[o] = dict(out[o])
+                out[o][col] = value
+    return out
 
 
 # ---------------------------------------------------------------------------

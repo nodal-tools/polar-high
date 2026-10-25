@@ -58,7 +58,11 @@ option, so at the defaults the loop is byte-identical to plain exact Benders:
   ``f_sep``.  A per-subproblem separation test then drives the stabilizer's
   register/forced-out-step logic, and the incumbent point overlays each
   subproblem's ``f_sep`` onto ONLY the master columns it owns (ownership =
-  its :class:`SubproblemResult.slopes` key set).
+  its :class:`SubproblemResult.slopes` key set).  A column owned by several
+  subproblems gets one value in all of them
+  (:func:`~polar_high.decomposition.consistent_separation_points`), so the
+  overlay is one coupling point, and the upper bound is the master's own cost
+  at that point (``native_cost_at``) plus the subproblem costs.
 * **Trust-region stabilization** (``trust_region_radius`` set; Ruszczyński
   1986; Göke et al. 2023) — MUTUALLY EXCLUSIVE with in-out.  A single
   :class:`~polar_high.decomposition.TrustRegionStabilizer` bounds the master
@@ -101,7 +105,12 @@ from typing import Protocol
 
 import numpy as np
 
-from polar_high.decomposition import InOutStabilizer, StallMonitor, TrustRegionStabilizer
+from polar_high.decomposition import (
+    InOutStabilizer,
+    StallMonitor,
+    TrustRegionStabilizer,
+    consistent_separation_points,
+)
 from polar_high.engine import Solution, WarmProblem
 from polar_high.parallel import resolve_worker_count, solve_indexed_parallel
 
@@ -112,6 +121,7 @@ __all__ = [
     "BendersMaster",
     "BendersStalled",
     "BendersSubproblem",
+    "PinnedMasterNotOptimal",
     "PointEvaluation",
     "SubproblemHandle",
     "SubproblemNotOptimal",
@@ -157,6 +167,17 @@ class SubproblemNotOptimal(RuntimeError):
             else f"benders: subproblem {sub_name!r} did not solve to optimality"
             + (f" (status {status!r})" if status is not None else "")
         )
+
+
+class PinnedMasterNotOptimal(RuntimeError):
+    """The master, with its coupling columns pinned at a query point, did not
+    solve to optimality (typically infeasible: the point is not master-feasible).
+
+    Raised DOMAIN-SIDE by :meth:`BendersMaster.native_cost_at`.  The in-out
+    upper bound of :func:`solve_benders_loop` catches it and does not use that
+    iteration's upper bound (a point the master cannot reach has no valid
+    first-stage cost); every other caller sees it as a ``RuntimeError``.
+    """
 
 
 class BendersBoundInvalid(RuntimeError):
@@ -351,7 +372,8 @@ class BendersMaster(Protocol):
         PINNED at ``point`` (``{master col id -> value}``): pin the coupling
         columns to ``point``, solve the master ONCE, and return
         ``obj − Σ recourse`` at that pinned solution (restoring the pinned
-        columns' bounds afterwards).
+        columns' bounds afterwards).  Raises :class:`PinnedMasterNotOptimal`
+        when the pinned master is not optimal.
 
         This is the L-shaped "evaluate the first-stage cost at an ARBITRARY
         feasible coupling point" primitive — the counterpart of
@@ -362,7 +384,13 @@ class BendersMaster(Protocol):
         cost-bearing master, e.g. one hosting balance/storage nodes).  A
         master whose native cost is flow-independent, or one that simply
         does not implement this, is reported subproblem-only by
-        :func:`evaluate_at_point` (``master_native_cost = None``)."""
+        :func:`evaluate_at_point` (``master_native_cost = None``).
+
+        :func:`solve_benders_loop` with in-out ON scores every upper bound
+        with it (one extra master solve per iteration): the master's own
+        cost can depend on the coupling flows (a flow cost, an online /
+        startup cost, hosted nodes), so it must be read at the same point the
+        subproblems were solved at."""
         ...
 
     #: OPTIONAL attribute/property — ``True`` iff the master's native cost
@@ -370,12 +398,12 @@ class BendersMaster(Protocol):
     #: hosting balance/storage nodes whose balances are filled by the coupling
     #: flows).  Read by :func:`solve_benders_loop` via
     #: ``getattr(master, "native_cost_flow_dependent", False)``, so a master
-    #: that does not define it defaults to ``False``.  When it is ``True`` AND
-    #: in-out is on, the loop scores the UB at one consistent overlay point via
-    #: :meth:`native_cost_at` instead of the flow-independent
-    #: ``native_cost(msol)`` sum; when it is ``False`` (or absent) the UB keeps
-    #: the exact ``native_cost(msol)`` evaluation verbatim (byte-parity for
-    #: every flow-independent master and every λ=0 run).
+    #: that does not define it defaults to ``False``.  With in-out on, a master
+    #: that implements :meth:`native_cost_at` is always scored at the overlay
+    #: point; this flag only decides the in-out upper bound of a master WITHOUT
+    #: :meth:`native_cost_at`: ``True`` is then an error (no valid bound can be
+    #: formed), ``False`` keeps ``native_cost(msol) + Σ cost`` (valid because
+    #: the cost does not depend on the coupling columns).  λ=0 never reads it.
     native_cost_flow_dependent: bool
 
     def project_point(self, f: dict[int, float], sol: Solution, *, hard_fail: bool = True) -> float:
@@ -896,7 +924,9 @@ def solve_benders_loop(
         Fired once per outer iteration (after that iteration's master +
         subproblem solves) with ``{"iter", "lower_bound", "upper_bound",
         "best_upper_bound", "gap", "converged", "sub_costs", "cut_rows"}``
-        — all values in the caller's scale.
+        — all values in the caller's scale.  ``upper_bound`` is NaN in an
+        in-out iteration whose upper bound is not used (see the in-out
+        upper-bound rule in the loop); ``best_upper_bound`` is then unchanged.
     on_subsolve
         Fired once per subproblem as its ``solve_at`` RETURNS, with
         ``{"iter", "sub", "cost"}`` (``iter`` 0 = bootstrap).  Runs on the
@@ -1016,6 +1046,15 @@ def solve_benders_loop(
     bootstrap_cuts: list[tuple[str, dict[int, float], float, dict[int, float]]] = []
     for sub, res in zip(subproblems, _solve_subs(initial_point)):
         bootstrap_cuts.append((sub.name, bootstrap_gen, res.cost, res.slopes))
+    # Column ownership: by protocol a subproblem's ``slopes`` carry a key for
+    # every master column it is pinned on.  ``shared_owners`` = the columns
+    # pinned in more than one subproblem (e.g. both half-flows of a
+    # cross-region arc); the in-out separation point gives them one value.
+    _owners: dict[int, list[str]] = {}
+    for name, _, _, slopes in bootstrap_cuts:
+        for col in slopes:
+            _owners.setdefault(int(col), []).append(name)
+    shared_owners = {c: o for c, o in _owners.items() if len(o) > 1}
     cost_scale = max((abs(c) for _, _, c, _ in bootstrap_cuts), default=1.0)
     # Per-subproblem STAND-ALONE (initial-point) cost, keyed by name.  Its
     # absolute sum is a "sane objective magnitude" reference for the stall
@@ -1267,6 +1306,13 @@ def solve_benders_loop(
         # must force an exact-Benders out-step next.  With ``λ == 0.0`` (OFF)
         # this whole block is skipped and the subproblem pin / gen-point are
         # ``point`` verbatim ⇒ byte-identical to exact Benders.
+        #
+        # A column pinned in SEVERAL subproblems gets ONE value in all of them
+        # (:func:`consistent_separation_points`: the projected value of the
+        # owner with the smallest effective weight, i.e. closest to
+        # ``point``), so the subproblems are solved at one physical coupling
+        # point and ``Σ cost`` is the recourse of that point.  A forced
+        # out-step owner keeps ``point`` verbatim on all its columns.
         f_sep_by_sub: dict[str, dict[int, float]] = {}
         if in_out_on:
             for sub in subproblems:
@@ -1279,6 +1325,8 @@ def solve_benders_loop(
                     f_sep_s = dict(f_sep_s)
                     master.project_point(f_sep_s, msol, hard_fail=False)
                 f_sep_by_sub[sub.name] = f_sep_s
+            if shared_owners:
+                f_sep_by_sub = consistent_separation_points(stabilizers, f_sep_by_sub, point, shared_owners)
 
         def _sub_pin(i: int, _f_sep=f_sep_by_sub) -> dict[int, float]:
             # Per-subproblem pin point: its own projected ``f_sep`` (in-out
@@ -1311,7 +1359,7 @@ def solve_benders_loop(
         # as the base, with each subproblem's ``f_sep`` overlaid onto ONLY the
         # master columns it owns (ownership = its ``SubproblemResult.slopes``
         # key set — by protocol it carries a key for every pinned column; a
-        # shared column takes the LAST owner's value, in subproblem order).
+        # shared column has the same value in every owner, see above).
         # This is the one feasible point at which BOTH the master native cost
         # AND every subproblem cost can be scored (the subproblems delivered
         # exactly this point), so it is the correct point for the L-shaped
@@ -1344,47 +1392,52 @@ def solve_benders_loop(
         # evaluation — the exact (λ=0) UB, kept verbatim.
         #
         # With in-out ON, ``Σ sub_costs`` is the recourse at ``overlay_point``
-        # but ``native_cost(msol)`` is the master's cost at its OUTER vertex
-        # ``msol`` — a mixed point.  Two cases:
-        #   * The master's native cost is FLOW-INDEPENDENT (the current
-        #     trade-invest partition: ``native_cost`` is the pure invest cost
-        #     of the coupling connections, which does NOT depend on the
-        #     coupling FLOW columns).  Then ``c(msol) == c(overlay_point)`` on
-        #     every coordinate that differs, the mixed sum coincides with a
-        #     genuine single-point evaluation, and we keep the exact line
-        #     below verbatim ⇒ byte-identical to the pre-fix UB.  This is the
-        #     ``native_cost_flow_dependent = False`` (default) path — taken by
-        #     every existing master and by every λ=0 run.
-        #   * The master's native cost DEPENDS on the coupling flows
-        #     (master-hosted balance/storage nodes: the master serves real
-        #     demand THROUGH the coupling flows).  Then ``c(msol)`` and
-        #     ``Σ Q_r(overlay_point)`` are the objective at no single feasible
-        #     primal — the mixed UB UNDER-counts and the sandwich guard
-        #     legitimately fails.  Re-evaluate the master's native cost at the
-        #     SAME ``overlay_point`` the subproblems used, so the whole UB is
-        #     ``c(overlay_point) + Σ Q_r(overlay_point)``: a true
-        #     feasible-point cost ⇒ a valid upper bound.
+        # (one physical point: shared columns carry one value in every owner),
+        # while ``msol`` sits at the master's OUTER vertex.  The master's own
+        # cost is therefore re-read at ``overlay_point`` (``native_cost_at``:
+        # pin the coupling columns, ONE extra master solve per iteration), so
+        # the UB is ``c(overlay_point) + Σ Q_r(overlay_point)``.  Reading it at
+        # ``msol`` is valid only when ``c`` does not depend on the coupling
+        # columns at all — not true in general: a coupling connection's flow,
+        # online or startup cost, or master-hosted nodes all make it
+        # flow-dependent.  No cheap screen can skip the solve:
+        # ``native_cost(msol)`` minimizes ``native + Σ η``, not ``native``,
+        # so it is no bound on ``native_cost_at(overlay_point)``.  A master
+        # WITHOUT ``native_cost_at`` keeps the ``native_cost(msol)`` sum (it
+        # must then be flow-independent; a flow-dependent one without the
+        # member is an error).  An overlay point the pinned master cannot
+        # reach (``PinnedMasterNotOptimal``) gives no valid bound: that
+        # iteration's UB is not used.  So is a split shared column (a guard:
+        # the harmonisation above makes it impossible).  A skipped UB enters
+        # neither ``best_ub`` nor ``improved`` (so neither the incumbent, the
+        # stall window nor the in-out serious step), and ``on_iteration``
+        # reports it as NaN.
         #
-        # Cost containment: the flow-dependent path costs ONE extra master
-        # solve (``native_cost_at`` pins the coupling columns and re-solves)
-        # per in-out iteration.  We do it every iteration rather than behind a
-        # screen: ``native_cost(msol)`` minimizes ``native + Σ η`` (not
-        # ``native`` alone), so it is NOT a lower bound on
-        # ``native_cost_at(overlay_point)`` — there is no cheap valid screen
-        # that could skip the solve without risking a missed real UB
-        # improvement.  The masterfuel master is small and early iterations
-        # are cheap, so the direct solve is the correct, provably-safe
-        # tradeoff.
-        #   * Under the TRUST REGION the subproblems were queried at the boxed
-        #     iterate ``tr_iterate_point``, and the boxed master's OWN primal
-        #     ``tr_msol`` sits AT that iterate — so ``native_cost(tr_msol)`` is
-        #     already the master native cost at the query point (the FAST path,
-        #     no ``native_cost_at`` re-solve) and the UB is valid BY
-        #     CONSTRUCTION even for a flow-dependent master.
+        # Under the TRUST REGION the subproblems were queried at the boxed
+        # iterate ``tr_iterate_point``, and the boxed master's OWN primal
+        # ``tr_msol`` sits AT that iterate — so ``native_cost(tr_msol)`` is
+        # already the master native cost at the query point (the FAST path,
+        # no ``native_cost_at`` re-solve) and the UB is valid BY CONSTRUCTION
+        # even for a flow-dependent master.
         #
-        # All three cases route through the ONE helper below, parametrized by
-        # the query point and which native-cost read is valid there.
+        # Every case routes through the ONE helper ``_upper_bound``,
+        # parametrized by the query point and which native-cost read is valid
+        # there.
         native_cost_flow_dependent = getattr(master, "native_cost_flow_dependent", False)
+        ub_valid = True
+        if in_out_on and shared_owners:
+            n_split = sum(
+                1 for c, owners in shared_owners.items()
+                if len({f_sep_by_sub[o][c] for o in owners}) > 1
+            )
+            if n_split:
+                ub_valid = False
+                _logger.warning(
+                    "benders iter %d: %d shared coupling column(s) were pinned at different values in their "
+                    "owning subproblems; this iteration's upper bound is not used",
+                    iterations,
+                    n_split,
+                )
         if tr_on:
             ub = _upper_bound(
                 master,
@@ -1394,15 +1447,32 @@ def solve_benders_loop(
                 query_point=tr_iterate_point,
                 native_at_query=False,
             )
-        elif in_out_on and native_cost_flow_dependent:
-            ub = _upper_bound(
-                master,
-                sub_costs,
-                msol=msol,
-                recourse=recourse_by_sub,
-                query_point=overlay_point,
-                native_at_query=True,
-            )
+        elif in_out_on and not ub_valid:
+            ub = float("nan")
+        elif in_out_on and (callable(getattr(master, "native_cost_at", None)) or native_cost_flow_dependent):
+            if not callable(getattr(master, "native_cost_at", None)):
+                raise TypeError(
+                    "benders: in-out separation with a master whose native cost depends on the coupling columns "
+                    "(native_cost_flow_dependent) needs BendersMaster.native_cost_at to form a valid upper bound"
+                )
+            try:
+                ub = _upper_bound(
+                    master,
+                    sub_costs,
+                    msol=msol,
+                    recourse=recourse_by_sub,
+                    query_point=overlay_point,
+                    native_at_query=True,
+                )
+            except PinnedMasterNotOptimal as exc:
+                ub_valid = False
+                ub = float("nan")
+                _logger.warning(
+                    "benders iter %d: the master cannot reach the in-out separation point (%s); this "
+                    "iteration's upper bound is not used",
+                    iterations,
+                    exc,
+                )
         else:
             ub = _upper_bound(
                 master,
@@ -1412,7 +1482,7 @@ def solve_benders_loop(
                 query_point=point,
                 native_at_query=False,
             )
-        improved = ub < best_ub
+        improved = ub_valid and ub < best_ub
         if improved:
             best_ub = ub
             # The incumbent coupling point is the overlay point (in-out ON, a

@@ -49,6 +49,7 @@ from polar_high import (
     BendersBoundInvalid,
     BendersLoopOptions,
     BendersStalled,
+    PinnedMasterNotOptimal,
     PointEvaluation,
     SubproblemHandle,
     SubproblemNotOptimal,
@@ -795,27 +796,34 @@ def test_input_validation() -> None:
 def test_in_out_converges_on_toy_lp() -> None:
     """λ=0.5 still converges to the known optimum on the toy LP, the
     subproblems are actually pinned at the INTERIOR separation points, and
-    the incumbent point carries each subproblem's own ``f_sep`` value."""
+    every upper bound is the whole cost of the point the subproblems were
+    solved at (``native_cost_at`` + recourse), so it never dips below the
+    optimum: the toy master's cost f1 + 5·f2 depends on the coupling flows.
+    The interior point approaches the master vertex (4, 0) — 5, 4.5, 4.25, …
+    — until the periodic out-step (``out_step_every`` 5) pins it there."""
     master, subs, initial = _build_toy()
+    seen: list[dict] = []
     result = solve_benders_loop(
         master,
         subs,
         options=BendersLoopOptions(max_iters=20, tol=1e-9, workers=1, in_out_weight=0.5),
         initial_point=initial,
+        on_iteration=seen.append,
     )
     assert result.converged
-    assert result.iterations == 2
+    assert result.iterations == 6
     assert result.lower_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
     assert result.best_upper_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
+    assert [i["upper_bound"] for i in seen] == pytest.approx([17.0, 16.5, 16.25, 16.125, 16.0625, 16.0])
+    assert all(i["upper_bound"] >= _TOY_OPTIMUM - 1e-9 for i in seen)
     # Iteration-1 pin was the interior (5, 0), not the master vertex (10, 0);
     # iteration-2 pin the interior (4.5, 0), not (4, 0).
     f1, f2 = master.f_col["sub1"], master.f_col["sub2"]
     assert subs[0].seen_points[1][f1] == pytest.approx(5.0, abs=1e-7)
     assert subs[0].seen_points[1][f2] == pytest.approx(0.0, abs=1e-7)
     assert subs[0].seen_points[2][f1] == pytest.approx(4.5, abs=1e-7)
-    # The incumbent point reflects the value each subproblem actually solved
-    # at (its own f_sep), overlaid on its owned column.
-    assert result.incumbent_point[f1] == pytest.approx(4.5, abs=1e-7)
+    # The incumbent is the point the last (out-step) iteration solved at.
+    assert result.incumbent_point[f1] == pytest.approx(4.0, abs=1e-7)
     assert result.incumbent_point[f2] == pytest.approx(0.0, abs=1e-7)
 
 
@@ -914,9 +922,10 @@ def test_main_projection_still_hard_fails_gross() -> None:
 def test_in_out_incumbent_overlay_ownership() -> None:
     """The λ>0 incumbent overlay writes each subproblem's ``f_sep`` onto
     exactly its slopes-key columns — including a SHARED column owned by two
-    subproblems (the cross-arc shape), which takes the last owner's value —
-    after the two stabilizers have genuinely DIVERGED (one forced out-step,
-    one interior)."""
+    subproblems (the cross-arc shape) — after the two stabilizers have
+    genuinely DIVERGED (one forced out-step, one interior).  The shared column
+    is pinned at ONE value in both owners: the value of the owner with the
+    smaller effective weight (the forced-out one: the master vertex)."""
     # Ownership: sub 'a' owns {0, 1}, sub 'b' owns {1, 2}; column 1 shared.
     subs = [
         _ScriptedSub("a", [0, 1], [50.0, 50.0, 50.0, 40.0]),
@@ -941,15 +950,15 @@ def test_in_out_incumbent_overlay_ownership() -> None:
         options=BendersLoopOptions(max_iters=3, tol=1e-9, workers=1, in_out_weight=0.5),
         initial_point={0: 0.0, 1: 0.0, 2: 0.0},
     )
-    # iter 3 pins diverge: 'a' at the master vertex verbatim (forced out),
-    # 'b' at its interior 0.5·4 + 0.5·8 = 6 (centre from the iter-1 serious
-    # step's incumbent (4, 4, 4), held through the iter-2 null step).
+    # iter 3 stabilizers diverge: 'a' at the master vertex verbatim (forced
+    # out), 'b' at its interior 0.5·4 + 0.5·8 = 6 (centre from the iter-1
+    # serious step's incumbent (4, 4, 4), held through the iter-2 null step)
+    # — except on the shared column 1, which takes 'a''s value 8 in both.
     assert subs[0].seen_points[3] == {0: 8.0, 1: 8.0, 2: 8.0}
-    assert subs[1].seen_points[3] == {0: 6.0, 1: 6.0, 2: 6.0}
+    assert subs[1].seen_points[3] == {0: 6.0, 1: 8.0, 2: 6.0}
     # iter 3 improves (UB 80 < 100) -> incumbent overlay: base (8, 8, 8);
-    # 'a' writes 8 onto {0, 1}; 'b' then writes 6 onto {1, 2} — the shared
-    # column 1 takes the LAST owner's value.
-    assert result.incumbent_point == {0: 8.0, 1: 6.0, 2: 6.0}
+    # 'a' writes 8 onto {0, 1}; 'b' writes (8, 6) onto {1, 2}.
+    assert result.incumbent_point == {0: 8.0, 1: 8.0, 2: 6.0}
     assert result.best_upper_bound == pytest.approx(80.0, abs=1e-9)
 
 
@@ -1530,55 +1539,213 @@ def test_flow_dependent_master_in_out_converges() -> None:
     assert result.incumbent_point[f2] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_flow_dependent_master_old_mixed_ub_fails_sandwich() -> None:
-    """WITHOUT the fix (simulated by native_cost_flow_dependent=False, i.e. the
-    coordinator keeps the OLD mixed ``native_cost(msol) + sum Q_r(f_sep)`` UB)
-    the same model manufactures a spurious ``LB > UB`` — the invalid,
-    under-counting bound the fix cures — and the always-on sandwich guard
-    hard-fails.  This is exactly the failure the flow-dependent gate removes."""
+def test_flow_dependent_master_undeclared_still_valid_ub() -> None:
+    """A master whose native cost depends on the coupling flows but that does
+    NOT declare it (native_cost_flow_dependent=False — e.g. a coupling
+    connection with a flow cost) still gets a valid in-out upper bound: with
+    ``native_cost_at`` available the UB is always scored at the overlay point.
+    Before, this master kept the mixed ``native_cost(msol) + Σ Q_r(f_sep)``
+    UB, which under-counts (15 < LB 24 at iteration 1) and hard-failed the
+    sandwich guard."""
     master, subs, initial = _build_flowdep(flow_dependent=False)
-    with pytest.raises(BendersBoundInvalid) as exc_info:
-        solve_benders_loop(
-            master,
-            subs,
-            options=BendersLoopOptions(max_iters=60, tol=1e-7, workers=1, in_out_weight=0.5),
-            initial_point=initial,
-        )
-    assert exc_info.value.kind == "sandwich"
-    # The OLD path never consulted native_cost_at (the whole point of the bug).
-    assert master.native_cost_at_calls == 0
+    seen: list[dict] = []
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=60, tol=1e-7, workers=1, in_out_weight=0.5),
+        initial_point=initial,
+        on_iteration=seen.append,
+    )
+    assert result.converged
+    assert result.best_upper_bound == pytest.approx(_FLOWDEP_OPTIMUM, abs=1e-4)
+    assert all(i["upper_bound"] >= _FLOWDEP_OPTIMUM * (1 - 1e-9) for i in seen)
+    assert master.native_cost_at_calls == result.iterations
 
 
-def test_flow_independent_ub_byte_identical_under_in_out() -> None:
-    """A flow-INDEPENDENT master (the current partition) under in-out keeps the
-    exact ``native_cost(msol)`` UB VERBATIM: the coordinator never calls
-    native_cost_at, and the run reproduces the byte-identical in-out toy result
-    (optimum 16 in 2 iterations, incumbent overlay (4.5, 0))."""
+def test_in_out_ub_scored_at_overlay_point_every_iteration() -> None:
+    """With in-out ON a master implementing ``native_cost_at`` is asked for its
+    own cost at the overlay point once per iteration (one extra master solve),
+    and the UB is that cost plus the subproblem costs at the same point."""
     master, subs, initial = _build_toy()
-    # _ToyMaster has no ``native_cost_flow_dependent`` attribute, so the
-    # coordinator's ``getattr(..., False)`` default applies — the current
-    # partition contract.  Count native_cost_at to prove it is never taken.
-    calls = {"n": 0}
+    calls: list[dict] = []
     original = master.native_cost_at
 
     def _counting_native_cost_at(point, _orig=original):
-        calls["n"] += 1
+        calls.append(dict(point))
         return _orig(point)
 
     master.native_cost_at = _counting_native_cost_at  # type: ignore[assignment]
+    seen: list[dict] = []
     result = solve_benders_loop(
         master,
         subs,
         options=BendersLoopOptions(max_iters=20, tol=1e-9, workers=1, in_out_weight=0.5),
         initial_point=initial,
+        on_iteration=seen.append,
     )
-    assert calls["n"] == 0  # flow-independent path: native_cost_at untouched
     assert result.converged
-    assert result.iterations == 2
-    assert result.best_upper_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
+    assert len(calls) == result.iterations
     f1, f2 = master.f_col["sub1"], master.f_col["sub2"]
-    assert result.incumbent_point[f1] == pytest.approx(4.5, abs=1e-7)
-    assert result.incumbent_point[f2] == pytest.approx(0.0, abs=1e-7)
+    for point, info in zip(calls, seen):
+        native = point[f1] + 5.0 * point[f2]          # the toy master's cost f1 + 5·f2
+        assert info["upper_bound"] == pytest.approx(native + sum(info["sub_costs"].values()))
+
+
+def test_in_out_master_without_native_cost_at_uses_vertex_cost() -> None:
+    """A master without ``native_cost_at`` (whose cost must then not depend on
+    the coupling columns) keeps ``native_cost(msol) + Σ cost`` under in-out."""
+    subs = _scripted_pair((50.0, 50.0))
+    master = _ScriptedMaster(objs=[10.0, 20.0], recourse_seq=[{"a": 50.0, "b": 50.0}], native=7.0)
+    seen: list[dict] = []
+    solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=2, tol=1e-12, workers=1, in_out_weight=0.5),
+        initial_point=dict(_SCRIPT_INITIAL),
+        on_iteration=seen.append,
+    )
+    assert seen and all(i["upper_bound"] == pytest.approx(107.0) for i in seen)
+
+
+def test_in_out_flow_dependent_master_without_native_cost_at_is_an_error() -> None:
+    subs = _scripted_pair((50.0, 50.0))
+    master = _ScriptedMaster(objs=[10.0], recourse_seq=[{"a": 50.0, "b": 50.0}], native=7.0)
+    master.native_cost_flow_dependent = True
+    with pytest.raises(TypeError, match="native_cost_at"):
+        solve_benders_loop(
+            master,
+            subs,
+            options=BendersLoopOptions(max_iters=2, tol=1e-12, workers=1, in_out_weight=0.5),
+            initial_point=dict(_SCRIPT_INITIAL),
+        )
+
+
+def test_in_out_ub_skipped_when_pinned_master_not_optimal() -> None:
+    """An overlay point the pinned master cannot reach gives no upper bound:
+    that iteration reports NaN, the best UB and the incumbent are unchanged,
+    and the loop goes on (here: the first iteration is skipped, the second is
+    scored)."""
+    master, subs, initial = _build_toy()
+    original = master.native_cost_at
+    state = {"n": 0}
+
+    def _failing_once(point, _orig=original):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise PinnedMasterNotOptimal("toy: pinned master infeasible")
+        return _orig(point)
+
+    master.native_cost_at = _failing_once  # type: ignore[assignment]
+    seen: list[dict] = []
+    incumbents: list[dict] = []
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=20, tol=1e-9, workers=1, in_out_weight=0.5),
+        initial_point=initial,
+        on_iteration=seen.append,
+        on_incumbent=lambda msol, res, info: incumbents.append(info) or None,
+    )
+    assert np.isnan(seen[0]["upper_bound"])
+    assert seen[0]["best_upper_bound"] == float("inf")
+    assert incumbents[0]["iteration"] == 2
+    assert seen[1]["best_upper_bound"] == seen[1]["upper_bound"] >= _TOY_OPTIMUM
+    assert result.converged
+    assert result.best_upper_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# One coupling column pinned in two subproblems (the cross-region arc shape):
+# master  min 1·f + η_exp + η_imp,  f ∈ [0, 10]          (a flow cost on the arc)
+# export  produce g ≥ f: 3 at cost 1, the rest at cost 2  (exporter half-flow)
+# import  serve d = 6:   f + 3 local at cost 3 + the rest at cost 6
+# f ∈ [0, 3] saves 6 per unit for 1 + 1; f ∈ [3, 6] saves 3 for 1 + 2 (a tie),
+# so the optimum is 15 (e.g. f = 3: 3 + 3 + 3·3).  Before the shared-column
+# pins were harmonised, every λ below reported an upper bound under the lower
+# bound (the exporter and importer were pinned at different flows) and the
+# sandwich guard raised BendersBoundInvalid.
+# ---------------------------------------------------------------------------
+
+_SHARED_OPT = 15.0
+
+
+class _SharedMaster(_ToyMaster):
+    """One coupling column ``f`` (cost 1) and the two recourse columns."""
+
+    def __init__(self):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f = p.add_var("f", "i", idx, lower=0.0, upper=_F_MAX)
+        eta1 = p.add_var("eta1", "i", idx, lower=_PROVISIONAL_FLOOR)
+        eta2 = p.add_var("eta2", "i", idx, lower=_PROVISIONAL_FLOOR)
+        p.add_cstr("cap", over=idx, sense="<=", lhs_terms={"f": f}, rhs_terms={"cap": _scalar_param(100.0)})
+        p.set_objective(f.to_expr() * 1.0 + eta1.to_expr() + eta2.to_expr(), sense="min")
+        self.wp = fp.WarmProblem(p)
+        self.wp.solve()
+        col = int(self.wp.col_id_of_var("f", (0,)))
+        self.f_col = {"exp": col}
+        self._eta_col = {"exp": int(self.wp.col_id_of_var("eta1", (0,))),
+                         "imp": int(self.wp.col_id_of_var("eta2", (0,)))}
+        self._relaxed: set[str] = set()
+        self.floor_set = None
+
+
+class _TierSub:
+    """Two-tier recourse pinned on one master column: ``export`` produces
+    g1 + g2 ≥ f, ``import`` serves g1 + g2 + f ≥ demand (g1 ≤ 3)."""
+
+    def __init__(self, name: str, master_col: int, *, export: bool, costs: tuple[float, float],
+                 demand: float = 0.0):
+        p = fp.Problem()
+        idx = pl.DataFrame({"i": [0]})
+        f_in = p.add_var("f_in", "i", idx, lower=0.0, upper=1.0e3)
+        g1 = p.add_var("g1", "i", idx, lower=0.0, upper=3.0)
+        g2 = p.add_var("g2", "i", idx, lower=0.0, upper=1.0e6)
+        f_term = f_in.to_expr() * (-1.0 if export else 1.0)
+        p.add_cstr("bal", over=idx, sense=">=", lhs_terms={"g1": g1, "g2": g2, "f": f_term},
+                   rhs_terms={"d": _scalar_param(demand)})
+        p.set_objective(g1.to_expr() * costs[0] + g2.to_expr() * costs[1], sense="min")
+        self.name = name
+        self.warm = fp.WarmProblem(p)
+        self.warm.solve()
+        self._local = int(self.warm.col_id_of_var("f_in", (0,)))
+        self._master_col = int(master_col)
+        self.seen_points: list[dict[int, float]] = []
+
+    def solve_at(self, point: dict[int, float]) -> SubproblemResult:
+        self.seen_points.append(dict(point))
+        self.warm.fix_col_ids(np.array([self._local]), np.array([point[self._master_col]], dtype=np.float64))
+        sol = self.warm.solve(retry_on_unknown=True)
+        if not sol.optimal:
+            raise SubproblemNotOptimal(self.name)
+        return SubproblemResult(cost=float(sol.obj), slopes={self._master_col: float(sol.col_dual[self._local])})
+
+
+def _build_shared():
+    master = _SharedMaster()
+    col = master.f_col["exp"]
+    subs = [_TierSub("exp", col, export=True, costs=(1.0, 2.0)),
+            _TierSub("imp", col, export=False, costs=(3.0, 6.0), demand=6.0)]
+    return master, subs, {col: 0.0}, col
+
+
+@pytest.mark.parametrize("weight", [0.3, 0.5, 0.7])
+def test_shared_column_pinned_once_and_ub_valid(weight) -> None:
+    """Both owners of the shared column are pinned at the same value in every
+    iteration, no upper bound is below the optimum, and the loop converges."""
+    master, subs, initial, col = _build_shared()
+    seen: list[dict] = []
+    result = solve_benders_loop(
+        master,
+        subs,
+        options=BendersLoopOptions(max_iters=40, tol=1e-9, workers=1, in_out_weight=weight),
+        initial_point=initial,
+        on_iteration=seen.append,
+    )
+    assert result.converged
+    assert result.best_upper_bound == pytest.approx(_SHARED_OPT, abs=1e-6)
+    assert all(i["upper_bound"] >= _SHARED_OPT * (1 - 1e-9) for i in seen)
+    assert [p[col] for p in subs[0].seen_points] == [p[col] for p in subs[1].seen_points]
 
 
 # ---------------------------------------------------------------------------

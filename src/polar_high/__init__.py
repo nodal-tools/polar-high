@@ -20,6 +20,7 @@ from polar_high.benders import (
     BendersMaster,
     BendersStalled,
     BendersSubproblem,
+    PinnedMasterNotOptimal,
     PointEvaluation,
     SubproblemHandle,
     SubproblemNotOptimal,
@@ -32,6 +33,7 @@ from polar_high.decomposition import (
     StallMonitor,
     StallVerdict,
     TrustRegionStabilizer,
+    consistent_separation_points,
 )
 from polar_high.engine import (
     CstrRecord,
@@ -68,6 +70,7 @@ __all__ = [
     "BendersMaster",
     "BendersStalled",
     "BendersSubproblem",
+    "PinnedMasterNotOptimal",
     "PointEvaluation",
     "SubproblemHandle",
     "SubproblemNotOptimal",
@@ -91,6 +94,7 @@ __all__ = [
     "StallMonitor",
     "StallVerdict",
     "TrustRegionStabilizer",
+    "consistent_separation_points",
     "prewarm_global_scheduler",
     "resolve_worker_count",
     "solve_indexed_parallel",

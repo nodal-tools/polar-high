@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.9.1] — 2026-10-25
+
+### Added
+
+- `InOutStabilizer.effective_weight()` (the weight `separation_point`
+  applies now: 0 for a pass-through), `InOutStabilizer.centre_value()`,
+  `polar_high.consistent_separation_points` and the exception
+  `PinnedMasterNotOptimal` (raised by a master adapter's `native_cost_at`
+  when the pinned master is not optimal).
+
+### Fixed
+
+- **Benders in-out (λ > 0) upper bound could fall below the optimum.**
+  A coupling column pinned in several subproblems (e.g. the exporter and
+  importer half-flows of one cross-region arc) was pinned at different
+  values whenever their per-subproblem stabilizers diverged (one forced
+  out-step, one interpolating), so the summed recourse belonged to no
+  single point and the loop could stop on a bound below the optimum. Every
+  owner of a shared column now gets one value: that of the owner with the
+  smallest effective weight (`consistent_separation_points`; a forced
+  out-step keeps the master point verbatim). The in-out upper bound is now
+  always the master's own cost at the same point (`native_cost_at`, one
+  extra master solve per iteration) plus the subproblem costs, whether or
+  not the master declares `native_cost_flow_dependent`: a flow cost on a
+  coupling column also makes it flow-dependent. An iteration whose point
+  the pinned master cannot reach, or whose shared columns are split (a
+  guard), contributes no upper bound (warning; `on_iteration` reports NaN).
+  In-out runs can take more iterations, since the bound is no longer the
+  optimistic mixed-point value; a flow-dependent master without
+  `native_cost_at` is now an error under in-out.
+- Duplicate `(row, col)` coefficients of the COO matrix build (global and
+  per-family streaming) are summed in a fixed order, so a group of nearly
+  cancelling coefficients gives the same matrix in every process.
+
 ## [3.9.0] — 2026-10-24
 
 ### Added
