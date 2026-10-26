@@ -164,6 +164,21 @@ p.set_solver_option("user_objective_scale", plan.user_objective_scale)
 p.set_solver_option("simplex_scale_strategy", plan.simplex_scale_strategy)
 ```
 
+## Tiny cost coefficients — `obj_coef_zero_threshold` / `obj_coef_zero_rel_threshold`
+
+The objective is centred with a single exponent: `user_objective_scale` places the geometric centre of the cost band `[min|c|, max|c|]` at 1.0. One spurious near-zero cost — a float residue such as `1e-17` from an algebraic cancellation like `1/eta - slope` — stretches that band to 17 decades and pulls the centre with it (`2**25` and more), and HiGHS' dual simplex can then fail on the inflated costs ("excessive dual values"). The matrix/RHS floor `Problem.coef_zero_threshold` does not touch the cost vector, so the objective has its own cutoff:
+
+```python
+p.obj_coef_zero_rel_threshold = 1e-14   # relative to the largest |cost|
+p.obj_coef_zero_threshold = 0.0         # absolute (user units); 0 = off
+```
+
+A column's summed objective coefficient whose magnitude is strictly below `max(obj_coef_zero_threshold, 2**floor(log2(obj_coef_zero_rel_threshold * max|c|)))` becomes exactly `0.0` (`max|c|` is the largest `|coefficient|` of any objective term; the relative part is rounded down to a power of two). Both default to `0.0` — off, byte-identical to earlier releases.
+
+- The cut is judged on the **user-space** coefficient, before the Layer 2 side vectors and the Layer 3 `user_objective_scale` (both are power-of-two conditioning transforms), so the decision does not depend on how the LP happens to be scaled.
+- It applies everywhere the cost vector is produced: the canonical matrix (`write_mps`, `passModel`, `WarmProblem`), the streaming solve and its `streamed_lp_ranges`, the pre-solve `detect_ranges` readout — so `recommend_scaling` centres on the costs the solver will actually see — and `WarmProblem.update_obj_coef` / `update_obj_coef_array` (with the cutoff resolved at build).
+- Prefer the **relative** form: cost magnitudes legitimately span many decades (a penalty of `1e6` next to an O&M cost of `0.01`), and a model's whole objective may be scaled by a constant, so an absolute cutoff that is safe for one model can delete real costs in another. A relative `1e-14` sits about 100 machine epsilons below the largest cost — far below any real cost spread, above cancellation residue.
+
 ## Why the escape branch and the min-floor guard exist
 
 HiGHS' built-in recommendation looks at `max(bound_max, rhs_max)` and picks a delta that pulls that single value into `[1e-4, 1e+6]`. On wide-spread LPs the consequence can be brutal:

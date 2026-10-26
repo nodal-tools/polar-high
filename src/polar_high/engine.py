@@ -139,6 +139,37 @@ def _floor_small_coefs(
     return out.astype(np.float64, copy=False)
 
 
+def _objective_zero_floor(abs_threshold: float, rel_threshold: float, ref_max: float) -> float:
+    """The user-space cutoff below which an objective coefficient is zeroed.
+
+    ``max(abs_threshold, 2**floor(log2(rel_threshold * ref_max)))``, where
+    ``ref_max`` is the largest user-space ``|coefficient|`` of any objective
+    term (see :meth:`Problem.obj_coef_zero_threshold`).  The relative part is
+    rounded DOWN to a power of two so that a binade-histogram range readout
+    (:mod:`polar_high.autoscale._ranges`) reproduces the cut exactly without
+    a second pass.  A non-positive threshold disables its part; ``0.0`` when
+    both are off (or ``ref_max`` is not a positive finite number).
+    """
+    floor = abs_threshold if abs_threshold > 0.0 else 0.0
+    if rel_threshold > 0.0 and math.isfinite(ref_max) and ref_max > 0.0:
+        x = rel_threshold * ref_max
+        if math.isfinite(x) and x > 0.0:
+            _, e = math.frexp(x)  # x = m·2**e, m ∈ [0.5, 1)
+            floor = max(floor, math.ldexp(0.5, e))  # 2**(e-1) <= x
+    return floor
+
+
+def _abs_finite_max(vals: np.ndarray, cur: float) -> float:
+    """``max(cur, max |vals|)`` over the finite entries of ``vals``."""
+    if vals.size == 0:
+        return cur
+    a = np.abs(vals)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return cur
+    return max(cur, float(a.max()))
+
+
 def _layer2_matrix_unscale(
     rows: np.ndarray,
     cols: np.ndarray,
@@ -3377,6 +3408,26 @@ class Problem:
         # never drops a matrix entry, so matrix structure/determinism is
         # preserved.
         self.coef_zero_threshold: float = 0.0
+        # Generic small-OBJECTIVE-coefficient cutoff (the matrix / RHS floor
+        # above never touches the cost vector).  A column's summed objective
+        # coefficient whose user-space |value| is strictly below
+        #     max(obj_coef_zero_threshold,
+        #         2**floor(log2(obj_coef_zero_rel_threshold * ref_max)))
+        # is replaced by exactly 0.0, where ref_max is the largest user-space
+        # |coefficient| of any objective term.  Judged before Layer-2 side
+        # vectors and Layer-3 ``user_objective_scale`` (both power-of-two
+        # conditioning transforms), and applied in every build path
+        # (canonical matrix → write_mps / passModel / WarmProblem, streaming
+        # solve), in the pre-solve range readout that drives Layer 3, and in
+        # the WarmProblem cost updates (with the cutoff resolved at build).
+        # Purpose: a float residue (e.g. 1e-17 from an algebraic cancellation)
+        # must not stretch the cost range and drive the objective centring.
+        # Both default 0.0 ⇒ OFF — byte-identical to earlier releases.
+        self.obj_coef_zero_threshold: float = 0.0
+        self.obj_coef_zero_rel_threshold: float = 0.0
+        # The resolved objective cutoff of the last build (0.0 = none);
+        # read by WarmProblem's cost updates.
+        self._obj_zero_floor: float = 0.0
         # HiGHS option-name → value applied via setOptionValue at solve()
         # time.  Populated by ``set_solver_options`` (or by flextool's
         # ``build_flextool`` when ``FlexData.solver_options`` is set).
@@ -3820,6 +3871,34 @@ class Problem:
         if sense not in ("min", "max"):
             raise ValueError(f"sense must be 'min' or 'max'; got {sense!r}")
         self._obj_sense = sense
+
+    def _floor_objective(
+        self,
+        col_obj: np.ndarray,
+        ref_max: float,
+        col_factor: np.ndarray | None,
+    ) -> np.ndarray:
+        """Zero the summed objective coefficients below the objective cutoff.
+
+        ``col_obj`` is the per-column cost vector as handed to the solver
+        (Layer-2 column factors baked in when ``col_factor`` is set);
+        ``ref_max`` is the largest user-space ``|coefficient|`` over the
+        objective terms.  The cut is judged on the user-space magnitude
+        ``|col_obj| / col_factor`` (scale-invariant, as the matrix floor) and
+        the resolved cutoff is remembered on ``self._obj_zero_floor`` for
+        :class:`WarmProblem`'s cost updates.  Both thresholds ``0.0`` ⇒ the
+        input is returned unchanged.
+        """
+        floor = _objective_zero_floor(
+            float(self.obj_coef_zero_threshold or 0.0),
+            float(self.obj_coef_zero_rel_threshold or 0.0),
+            ref_max,
+        )
+        self._obj_zero_floor = floor
+        if floor <= 0.0:
+            return col_obj
+        uns = None if col_factor is None else 1.0 / np.abs(col_factor)
+        return _floor_small_coefs(col_obj, floor, uns)
 
     def add_obj_constant(self, value: float) -> None:
         """Accumulate a constant into the objective offset.  HiGHS adds
@@ -4869,6 +4948,8 @@ class Problem:
         # the cost row is NOT in the row_factor vector per GLPK
         # convention; orchestrator principle #4).
         col_obj = np.zeros(n_cols, dtype=np.float64)
+        _obj_rel_on = float(self.obj_coef_zero_rel_threshold or 0.0) > 0.0
+        _obj_ref = 0.0
         for t in self._obj_terms:
             # Bake any deferred Where pushdown frames before the collect.
             # Objective terms flow through Sum(over=None), which already
@@ -4883,11 +4964,14 @@ class Problem:
                 continue
             cids = f["col_id"].to_numpy().astype(np.int64, copy=False)
             vals = f["coef"].to_numpy().astype(np.float64, copy=False)
+            if _obj_rel_on:
+                _obj_ref = _abs_finite_max(vals, _obj_ref)
             if _cf is not None:
                 vals = vals * _cf[cids]
             # np.add.at handles duplicate col_ids across obj terms.
             np.add.at(col_obj, cids, vals)
             del f
+        col_obj = self._floor_objective(col_obj, _obj_ref, _cf)
 
         # ---- Pass 5: col metadata.  ``Var.lower``/``upper`` are
         # already mutated in place by ``apply_layer2``; no further
@@ -5561,6 +5645,8 @@ class Problem:
         # Layer 2 col-factor (off ⇒ no-op).  Objective gets col_factor
         # only — there is no row_factor entry for the cost row.
         _cf_obj = self._layer2_col_factor
+        _obj_rel_on = float(self.obj_coef_zero_rel_threshold or 0.0) > 0.0
+        _obj_ref = 0.0
         for t in self._obj_terms:
             # Defensive bake-before-consume (see _build_canonical_matrix
             # objective loop) — Sum(over=None) already bakes both slots.
@@ -5569,10 +5655,13 @@ class Problem:
             f = _obj_lazy.collect()
             cids = f["col_id"].to_numpy()
             vals = f["coef"].to_numpy()
+            if _obj_rel_on:
+                _obj_ref = _abs_finite_max(vals, _obj_ref)
             if _cf_obj is not None:
                 vals = vals * _cf_obj[cids]
             np.add.at(col_obj, cids, vals)
             del f
+        col_obj = self._floor_objective(col_obj, _obj_ref, _cf_obj)
 
         if _sp_on:
             _sp_emit("obj_terms_collected", n_obj_terms=len(self._obj_terms))
@@ -7417,11 +7506,21 @@ class WarmProblem:
     def _obj_to_scaled(self, cids: np.ndarray, cost: np.ndarray, frame: str) -> np.ndarray:
         """Apply the Layer-2 column side vector to user-frame objective
         coefficients (the build multiplies each cost by
-        ``_layer2_col_factor[col_id]``); identity for ``frame="scaled"`` or
-        when Layer 2 is off."""
+        ``_layer2_col_factor[col_id]``; identity for ``frame="scaled"`` or
+        when Layer 2 is off), then the objective cutoff resolved at build
+        (``Problem.obj_coef_zero_threshold`` / ``obj_coef_zero_rel_threshold``;
+        its relative reference is the build's objective, not refreshed by the
+        update)."""
         _cf = self._p._layer2_col_factor
         if frame == "user" and _cf is not None and cids.size:
-            return cost * _cf[cids]
+            cost = cost * _cf[cids]
+        # The objective cutoff resolved at build (``Problem._floor_objective``)
+        # applies to updated costs too, judged on the user-space magnitude in
+        # both frames.  ``0.0`` (default) ⇒ unchanged.
+        floor = float(getattr(self._p, "_obj_zero_floor", 0.0) or 0.0)
+        if floor > 0.0 and cids.size:
+            uns = None if _cf is None else 1.0 / np.abs(_cf[cids])
+            cost = _floor_small_coefs(np.asarray(cost, dtype=np.float64), floor, uns)
         return cost
 
     def update_obj_coef_array(

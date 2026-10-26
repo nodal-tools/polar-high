@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.11.0] — 2026-10-26
+
+### Added
+
+- **Optional floor for tiny objective coefficients**:
+  `Problem.obj_coef_zero_threshold` (absolute) and
+  `Problem.obj_coef_zero_rel_threshold` (relative to the largest
+  `|cost|`).  A column's summed cost whose user-space magnitude is
+  strictly below `max(abs, 2**floor(log2(rel * max|c|)))` becomes exactly
+  `0.0` — judged before the Layer-2 side vectors and Layer-3
+  `user_objective_scale`, and applied in the canonical matrix
+  (`write_mps`, passModel, `WarmProblem`), the streaming solve and its
+  `streamed_lp_ranges`, the pre-solve `detect_ranges` readout and
+  `WarmProblem.update_obj_coef(_array)`.  A float residue (e.g. `1e-17`)
+  can no longer stretch the cost range and drive the objective centring
+  to `2**25`+ (HiGHS dual simplex "excessive dual values").  Both default
+  to `0.0` (off, byte-identical).  The matrix/RHS floor
+  `coef_zero_threshold` is unchanged and still never touches costs.
+
 ## [3.10.0] — 2026-10-25
 
 ### Added

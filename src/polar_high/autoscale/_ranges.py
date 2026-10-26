@@ -78,6 +78,80 @@ class RangeReport:
     trigger: bool
 
 
+class _FlooredCostRange:
+    """Objective-coefficient range under the objective cutoff, in one pass.
+
+    The cutoff (``Problem.obj_coef_zero_threshold`` /
+    ``obj_coef_zero_rel_threshold``, resolved by
+    :func:`polar_high.engine._objective_zero_floor`) has a relative part that
+    depends on the largest user-space ``|coefficient|`` of the WHOLE
+    objective, which is known only after every term was read.  Rather than a
+    second pass, each term's entries are binned by the binade of their
+    user-space magnitude (``np.frexp`` exponent ``e``: ``|u| ∈ [2**(e-1),
+    2**e)``), keeping per bin the min / max of the reported (post-Layer-2)
+    magnitude.  The relative cutoff is a power of two ``2**k``, so a bin is
+    either wholly kept (``e > k``) or wholly cut (``e <= k``) — the readout
+    is exact.  The absolute part is known up front and is applied per entry.
+
+    ``add(user, reported)`` takes the term's user-space coefficients and the
+    magnitudes this readout reports for them (equal when Layer 2 is off);
+    ``result()`` returns ``(lo, hi)`` over the kept entries, or
+    ``(None, None)`` when nothing survives.
+    """
+
+    # frexp exponents of finite non-zero float64 lie in [-1073, 1024].
+    _OFFSET = 1080
+    _NBINS = 2112
+
+    def __init__(self, abs_threshold: float, rel_threshold: float) -> None:
+        self.abs_threshold = abs_threshold if abs_threshold > 0.0 else 0.0
+        self.rel_threshold = rel_threshold if rel_threshold > 0.0 else 0.0
+        self.ref_max = 0.0
+        self._lo = np.full(self._NBINS, np.inf)
+        self._hi = np.zeros(self._NBINS)
+
+    def add(self, user: np.ndarray, reported: np.ndarray) -> None:
+        u = np.abs(np.asarray(user, dtype=np.float64))
+        w = np.abs(np.asarray(reported, dtype=np.float64))
+        fin = np.isfinite(u)
+        if fin.any():
+            self.ref_max = max(self.ref_max, float(u[fin].max()))
+        mask = fin & (u > 0.0) & np.isfinite(w) & (w > 0.0)
+        if self.abs_threshold > 0.0:
+            mask &= u >= self.abs_threshold
+        if not mask.any():
+            return
+        u = u[mask]
+        w = w[mask]
+        _, e = np.frexp(u)
+        idx = e.astype(np.int64) + self._OFFSET
+        np.minimum.at(self._lo, idx, w)
+        np.maximum.at(self._hi, idx, w)
+
+    def result(self) -> tuple[float | None, float | None]:
+        from ..engine import _objective_zero_floor
+
+        floor = _objective_zero_floor(0.0, self.rel_threshold, self.ref_max)
+        keep = np.isfinite(self._lo)
+        if floor > 0.0:
+            _, k = math.frexp(floor)  # floor = 2**(k-1)
+            # bin e holds [2**(e-1), 2**e): kept iff 2**(e-1) >= floor.
+            keep[: max(k + self._OFFSET, 0)] = False  # cut every bin e < k
+        if not keep.any():
+            return None, None
+        return float(self._lo[keep].min()), float(self._hi[keep].max())
+
+
+def _objective_cost_floor_active(problem: Any) -> tuple[float, float] | None:
+    """``(abs, rel)`` objective-cutoff thresholds of ``problem`` when either
+    is on, else ``None`` (the pre-cutoff readout, byte-identical)."""
+    a = float(getattr(problem, "obj_coef_zero_threshold", 0.0) or 0.0)
+    r = float(getattr(problem, "obj_coef_zero_rel_threshold", 0.0) or 0.0)
+    if a > 0.0 or r > 0.0:
+        return a, r
+    return None
+
+
 def _abs_finite_nonzero_min_max(
     arrays: Iterable[np.ndarray | None],
 ) -> tuple[float, float]:
@@ -578,7 +652,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _emit_block_coo_path("rhs_positional")
         return coef
 
-    def _obj_chain_bounded(term) -> tuple[float | None, float | None] | None:
+    def _obj_chain_bounded(term) -> tuple[np.ndarray, np.ndarray] | None:
         """Bounded min/max(abs(post-Layer-2 objective coef)) for a
         ``Sum(Var × Param-chain, over=ALL)`` objective term (Phase D-3) —
         WITHOUT materialising the deep ``Var × P1 × P2 …`` product.
@@ -607,7 +681,10 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         objective has no constraint row), then apply ``|_l2_cf[col_id]|``
         and :func:`_reduce_abs` — BYTE-IDENTICAL to the streaming readout.
 
-        Returns the ``(lo, hi)`` magnitude pair, or ``None`` to decline
+        Returns ``(user_coef, reported)`` arrays — the per-cell user-space
+        coefficients and their post-Layer-2 magnitudes ``coef·|cf|`` the
+        caller reduces (with :func:`_reduce_abs`, or through the objective
+        cutoff) — or ``None`` to decline
         (caller falls through to the existing streaming collect unchanged).
         Declining is always safe — a false decline costs memory, never
         correctness.  Only fires on the side-vectors-on path (``_l2_cf is
@@ -669,7 +746,8 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         seed = var.frame.select(*var_dims, "col_id")
         n = int(seed.height)
         if n == 0:
-            return None, None
+            _empty = np.zeros(0, dtype=np.float64)
+            return _empty, _empty
 
         # Completeness guard: the grid is dense-complete (every leading
         # block holds the full, identically-ordered dense set) iff
@@ -738,7 +816,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         cids = seed["col_id"].to_numpy().astype(np.int64)
         vals = coef * np.abs(_l2_cf[cids])
         _emit_block_coo_path("obj_positional")
-        return _reduce_abs(vals)
+        return coef, vals
 
     def _update_cost(lo: float | None, hi: float | None) -> None:
         nonlocal cost_lo, cost_hi
@@ -787,12 +865,37 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     # Cost — stream-aggregate each objective term.  Apply Layer 2 col
     # factor (objective row is NOT in the row-factor vector — GLPK
     # convention).  No-op when ``_l2_cf`` is None.
+    # Objective cutoff (``Problem.obj_coef_zero_threshold`` /
+    # ``obj_coef_zero_rel_threshold``): when on, the cost range is read
+    # over the entries the build keeps (the cutoff is judged on the
+    # user-space coefficient), so a sub-cutoff float residue cannot drive
+    # Layer 3's objective centring.  Off ⇒ the readout below is unchanged.
+    _cost_floor = _objective_cost_floor_active(problem)
+    _floored_cost = None if _cost_floor is None else _FlooredCostRange(*_cost_floor)
     for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
         # Bake deferred Where pushdown frames before consuming the lazy
         # plan (Sum(over=None) objective terms already bake — defensive).
         t_lazy, _t_dims = _bake_term(t)
+        if _floored_cost is not None:
+            _obj_bounded = None if _l2_cf is None else _obj_chain_bounded(t)
+            if _obj_bounded is not None:
+                _floored_cost.add(*_obj_bounded)
+            else:
+                cols = ("coef",) if _l2_cf is None else ("col_id", "coef")
+                df = _collect_streaming(t_lazy.select(*cols))
+                if df.height:
+                    user = df["coef"].to_numpy().astype(np.float64)
+                    if _l2_cf is None:
+                        _floored_cost.add(user, user)
+                    else:
+                        cids = df["col_id"].to_numpy().astype(np.int64)
+                        _floored_cost.add(user, user * np.abs(_l2_cf[cids]))
+                del df
+            if _profile:
+                _emit("obj_term_done", term_idx=ti, floored="1")
+            continue
         if _l2_cf is None:
             lo, hi = _agg(t_lazy, "coef")
         else:
@@ -808,7 +911,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # through to the existing collect unchanged.
             _obj_bounded = _obj_chain_bounded(t)
             if _obj_bounded is not None:
-                lo, hi = _obj_bounded
+                lo, hi = _reduce_abs(_obj_bounded[1])
                 if _profile:
                     _emit("obj_term_bounded", term_idx=ti, bounded="1")
             else:
@@ -824,6 +927,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _update_cost(lo, hi)
         if _profile:
             _emit("obj_term_done", term_idx=ti)
+
+    if _floored_cost is not None:
+        _update_cost(*_floored_cost.result())
 
     if _profile:
         _emit("obj_done")
@@ -1433,8 +1539,19 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     import polars as pl  # local import — autoscale must not pull polars
 
     # at import time for environments that don't need this fallback.
-    from ..engine import _apply_where_frames, _apply_where_map_frames
+    from ..engine import (
+        _abs_finite_max,
+        _apply_where_frames,
+        _apply_where_map_frames,
+        _floor_small_coefs,
+        _objective_zero_floor,
+    )
 
+    # Objective cutoff (user space — this rebuild carries no side vectors),
+    # as the build applies it to the summed cost vector.
+    _cost_floor = _objective_cost_floor_active(problem)
+    _floor_on = _cost_floor is not None
+    _obj_ref = 0.0
     for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
@@ -1458,6 +1575,8 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
             f = _t_lazy
         if f.height == 0:
             continue
+        if _floor_on:
+            _obj_ref = _abs_finite_max(f["coef"].to_numpy(), _obj_ref)
         np.add.at(
             col_obj,
             f["col_id"].to_numpy(),
@@ -1465,6 +1584,9 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         )
         if _profile:
             _emit("obj_term_collected", term_idx=ti, height=int(f.height))
+
+    if _floor_on:
+        col_obj = _floor_small_coefs(col_obj, _objective_zero_floor(*_cost_floor, _obj_ref))
 
     # ``kHighsInf`` substitution in ``_build_lp_arrays`` replaces ±inf,
     # so we filter via ``np.isfinite`` and the HiGHS sentinel explicitly.
