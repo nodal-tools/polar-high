@@ -664,7 +664,9 @@ class Log2HistogramReducer(Reducer):
         has = uniq_b >= 0
         if not has.any():
             return {}, uniq_bidx
-        present, first_pos, dense_of = np.unique(uniq_b[has], return_index=True, return_inverse=True)
+        present, first_pos, dense_of = np.unique(
+            uniq_b[has], return_index=True, return_inverse=True
+        )
         # Visit the distinct buckets in first-appearance order (the callable
         # path's order).  A key equal to an earlier one joins its dense
         # index, and the dict keeps the first object, as the callable does.

@@ -443,7 +443,9 @@ def _aligned_join(
 # Core types
 
 
-def _dedup_sum_coo(r: np.ndarray, c: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _dedup_sum_coo(
+    r: np.ndarray, c: np.ndarray, v: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sum the values of duplicate ``(r, c)`` pairs of a COO triple list.
 
     Deterministic: the triples are stably sorted by ``(r, c)`` and each group is summed in its production
@@ -453,7 +455,7 @@ def _dedup_sum_coo(r: np.ndarray, c: np.ndarray, v: np.ndarray) -> tuple[np.ndar
     ``v`` float64."""
     if r.size == 0:
         return r, c, np.asarray(v, dtype=np.float64)
-    order = np.lexsort((c, r))          # stable: ties keep production order
+    order = np.lexsort((c, r))  # stable: ties keep production order
     rs, cs = r[order], c[order]
     vs = np.asarray(v, dtype=np.float64)[order]
     new_group = np.empty(rs.size, dtype=bool)
@@ -771,7 +773,9 @@ def _composite_prune_applies(factor: Param, shared: list[str]) -> bool:
     )
 
 
-def _composite_key_sources(t: _Term, use_lazy: pl.LazyFrame, shared: list[str]) -> list[pl.LazyFrame]:
+def _composite_key_sources(
+    t: _Term, use_lazy: pl.LazyFrame, shared: list[str]
+) -> list[pl.LazyFrame]:
     """Frames whose distinct projections bound the rows of term ``t`` on
     ``shared``, for :func:`_prune_composite_lazy`.
 

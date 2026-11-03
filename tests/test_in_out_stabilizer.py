@@ -408,13 +408,13 @@ def _stab(centre, *, weight=0.5):
 
 
 def test_effective_weight_cases():
-    assert _stab(None).effective_weight() == 0.0                 # no centre yet: pass-through
+    assert _stab(None).effective_weight() == 0.0  # no centre yet: pass-through
     assert _stab({0: 1.0}).effective_weight() == 0.5
     assert _stab({0: 1.0}, weight=0.0).effective_weight() == 0.0
     forced = _stab({0: 1.0})
     forced.register(master_point={0: 2.0}, separated=False, incumbent_point=None, improved=False)
-    assert forced.effective_weight() == 0.0                      # pending forced out-step
-    assert forced.weight == 0.25                                 # the shrunk weight waits for the next step
+    assert forced.effective_weight() == 0.0  # pending forced out-step
+    assert forced.weight == 0.25  # the shrunk weight waits for the next step
 
 
 def test_consistent_separation_points_one_value_per_shared_column():
@@ -430,12 +430,12 @@ def test_consistent_separation_points_one_value_per_shared_column():
     # column 1: forced + plain; column 2: shrunk + plain; column 0 forced only, column 3 plain only.
     shared = {1: ["forced", "plain"], 2: ["shrunk", "plain"]}
     out = consistent_separation_points(stabs, sep, point, shared)
-    assert out["forced"] is point                                # forced out-step keeps the master point
+    assert out["forced"] is point  # forced out-step keeps the master point
     assert out["plain"][1] == out["forced"][1] == 8.0
-    assert out["plain"][2] == out["shrunk"][2] == 6.0             # 0.25·0 + 0.75·8, closest to the point
-    assert out["plain"][3] == 4.0                                # unshared: its own λ
-    assert out["shrunk"] is sep["shrunk"]                        # unchanged points keep their identity
-    assert sep["plain"][1] == 4.0                                # the inputs are not mutated
+    assert out["plain"][2] == out["shrunk"][2] == 6.0  # 0.25·0 + 0.75·8, closest to the point
+    assert out["plain"][3] == 4.0  # unshared: its own λ
+    assert out["shrunk"] is sep["shrunk"]  # unchanged points keep their identity
+    assert sep["plain"][1] == 4.0  # the inputs are not mutated
 
 
 def test_consistent_separation_points_rejects_different_centres():

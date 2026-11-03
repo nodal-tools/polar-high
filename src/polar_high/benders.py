@@ -1343,7 +1343,9 @@ def solve_benders_loop(
                     master.project_point(f_sep_s, msol, hard_fail=False)
                 f_sep_by_sub[sub.name] = f_sep_s
             if shared_owners:
-                f_sep_by_sub = consistent_separation_points(stabilizers, f_sep_by_sub, point, shared_owners)
+                f_sep_by_sub = consistent_separation_points(
+                    stabilizers, f_sep_by_sub, point, shared_owners
+                )
 
         def _sub_pin(i: int, _f_sep=f_sep_by_sub) -> dict[int, float]:
             # Per-subproblem pin point: its own projected ``f_sep`` (in-out
@@ -1446,7 +1448,8 @@ def solve_benders_loop(
         incumbent_msol = tr_msol if tr_on else msol
         if in_out_on and shared_owners:
             n_split = sum(
-                1 for c, owners in shared_owners.items()
+                1
+                for c, owners in shared_owners.items()
                 if len({f_sep_by_sub[o][c] for o in owners}) > 1
             )
             if n_split:
@@ -1468,7 +1471,9 @@ def solve_benders_loop(
             )
         elif in_out_on and not ub_valid:
             ub = float("nan")
-        elif in_out_on and (callable(getattr(master, "native_cost_at", None)) or native_cost_flow_dependent):
+        elif in_out_on and (
+            callable(getattr(master, "native_cost_at", None)) or native_cost_flow_dependent
+        ):
             if not callable(getattr(master, "native_cost_at", None)):
                 raise TypeError(
                     "benders: in-out separation with a master whose native cost depends on the coupling columns "

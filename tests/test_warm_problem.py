@@ -335,8 +335,13 @@ def test_warm_resolve_with_threads_after_scheduler_repinned_elsewhere() -> None:
     p = fp.Problem()
     idx = pl.DataFrame({"i": [0, 1]})
     x = p.add_var("x", "i", idx, lower=0.0, upper=10.0)
-    p.add_cstr("c", over=idx, sense="<=", lhs_terms={"x": x},
-               rhs_terms={"r": fp.Param(("i",), pl.DataFrame({"i": [0, 1], "value": [5.0, 6.0]}))})
+    p.add_cstr(
+        "c",
+        over=idx,
+        sense="<=",
+        lhs_terms={"x": x},
+        rhs_terms={"r": fp.Param(("i",), pl.DataFrame({"i": [0, 1], "value": [5.0, 6.0]}))},
+    )
     p.set_objective(x.to_expr() * -1.0, sense="min")
     p.set_solver_options({"threads": 2, "parallel": "on", "output_flag": False})
     w = fp.WarmProblem(p)

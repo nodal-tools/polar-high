@@ -484,8 +484,11 @@ def consistent_separation_points(
     """
     out = dict(sep_points)
     for col, owners in shared.items():
-        centres = {stabilizers[o].centre_value(col, point.get(col, 0.0)) for o in owners
-                   if stabilizers[o]._centre is not None}
+        centres = {
+            stabilizers[o].centre_value(col, point.get(col, 0.0))
+            for o in owners
+            if stabilizers[o]._centre is not None
+        }
         if len(centres) > 1:
             raise ValueError(
                 f"consistent_separation_points: the owners {owners} of coupling column {col} have different "

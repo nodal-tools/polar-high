@@ -814,7 +814,9 @@ def test_in_out_converges_on_toy_lp() -> None:
     assert result.iterations == 6
     assert result.lower_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
     assert result.best_upper_bound == pytest.approx(_TOY_OPTIMUM, abs=1e-8)
-    assert [i["upper_bound"] for i in seen] == pytest.approx([17.0, 16.5, 16.25, 16.125, 16.0625, 16.0])
+    assert [i["upper_bound"] for i in seen] == pytest.approx(
+        [17.0, 16.5, 16.25, 16.125, 16.0625, 16.0]
+    )
     assert all(i["upper_bound"] >= _TOY_OPTIMUM - 1e-9 for i in seen)
     # Iteration-1 pin was the interior (5, 0), not the master vertex (10, 0);
     # iteration-2 pin the interior (4.5, 0), not (4, 0).
@@ -1587,7 +1589,7 @@ def test_in_out_ub_scored_at_overlay_point_every_iteration() -> None:
     assert len(calls) == result.iterations
     f1, f2 = master.f_col["sub1"], master.f_col["sub2"]
     for point, info in zip(calls, seen):
-        native = point[f1] + 5.0 * point[f2]          # the toy master's cost f1 + 5·f2
+        native = point[f1] + 5.0 * point[f2]  # the toy master's cost f1 + 5·f2
         assert info["upper_bound"] == pytest.approx(native + sum(info["sub_costs"].values()))
 
 
@@ -1678,14 +1680,18 @@ class _SharedMaster(_ToyMaster):
         f = p.add_var("f", "i", idx, lower=0.0, upper=_F_MAX)
         eta1 = p.add_var("eta1", "i", idx, lower=_PROVISIONAL_FLOOR)
         eta2 = p.add_var("eta2", "i", idx, lower=_PROVISIONAL_FLOOR)
-        p.add_cstr("cap", over=idx, sense="<=", lhs_terms={"f": f}, rhs_terms={"cap": _scalar_param(100.0)})
+        p.add_cstr(
+            "cap", over=idx, sense="<=", lhs_terms={"f": f}, rhs_terms={"cap": _scalar_param(100.0)}
+        )
         p.set_objective(f.to_expr() * 1.0 + eta1.to_expr() + eta2.to_expr(), sense="min")
         self.wp = fp.WarmProblem(p)
         self.wp.solve()
         col = int(self.wp.col_id_of_var("f", (0,)))
         self.f_col = {"exp": col}
-        self._eta_col = {"exp": int(self.wp.col_id_of_var("eta1", (0,))),
-                         "imp": int(self.wp.col_id_of_var("eta2", (0,)))}
+        self._eta_col = {
+            "exp": int(self.wp.col_id_of_var("eta1", (0,))),
+            "imp": int(self.wp.col_id_of_var("eta2", (0,))),
+        }
         self._relaxed: set[str] = set()
         self.floor_set = None
 
@@ -1694,16 +1700,28 @@ class _TierSub:
     """Two-tier recourse pinned on one master column: ``export`` produces
     g1 + g2 ≥ f, ``import`` serves g1 + g2 + f ≥ demand (g1 ≤ 3)."""
 
-    def __init__(self, name: str, master_col: int, *, export: bool, costs: tuple[float, float],
-                 demand: float = 0.0):
+    def __init__(
+        self,
+        name: str,
+        master_col: int,
+        *,
+        export: bool,
+        costs: tuple[float, float],
+        demand: float = 0.0,
+    ):
         p = fp.Problem()
         idx = pl.DataFrame({"i": [0]})
         f_in = p.add_var("f_in", "i", idx, lower=0.0, upper=1.0e3)
         g1 = p.add_var("g1", "i", idx, lower=0.0, upper=3.0)
         g2 = p.add_var("g2", "i", idx, lower=0.0, upper=1.0e6)
         f_term = f_in.to_expr() * (-1.0 if export else 1.0)
-        p.add_cstr("bal", over=idx, sense=">=", lhs_terms={"g1": g1, "g2": g2, "f": f_term},
-                   rhs_terms={"d": _scalar_param(demand)})
+        p.add_cstr(
+            "bal",
+            over=idx,
+            sense=">=",
+            lhs_terms={"g1": g1, "g2": g2, "f": f_term},
+            rhs_terms={"d": _scalar_param(demand)},
+        )
         p.set_objective(g1.to_expr() * costs[0] + g2.to_expr() * costs[1], sense="min")
         self.name = name
         self.warm = fp.WarmProblem(p)
@@ -1714,18 +1732,24 @@ class _TierSub:
 
     def solve_at(self, point: dict[int, float]) -> SubproblemResult:
         self.seen_points.append(dict(point))
-        self.warm.fix_col_ids(np.array([self._local]), np.array([point[self._master_col]], dtype=np.float64))
+        self.warm.fix_col_ids(
+            np.array([self._local]), np.array([point[self._master_col]], dtype=np.float64)
+        )
         sol = self.warm.solve(retry_on_unknown=True)
         if not sol.optimal:
             raise SubproblemNotOptimal(self.name)
-        return SubproblemResult(cost=float(sol.obj), slopes={self._master_col: float(sol.col_dual[self._local])})
+        return SubproblemResult(
+            cost=float(sol.obj), slopes={self._master_col: float(sol.col_dual[self._local])}
+        )
 
 
 def _build_shared():
     master = _SharedMaster()
     col = master.f_col["exp"]
-    subs = [_TierSub("exp", col, export=True, costs=(1.0, 2.0)),
-            _TierSub("imp", col, export=False, costs=(3.0, 6.0), demand=6.0)]
+    subs = [
+        _TierSub("exp", col, export=True, costs=(1.0, 2.0)),
+        _TierSub("imp", col, export=False, costs=(3.0, 6.0), demand=6.0),
+    ]
     return master, subs, {col: 0.0}, col
 
 
@@ -1766,8 +1790,13 @@ class _CapMaster(_ToyMaster):
         f = p.add_var("f", "i", idx, lower=0.0, upper=_F_MAX)
         cap = p.add_var("C", "i", idx, lower=0.0, upper=_F_MAX)
         eta = p.add_var("eta1", "i", idx, lower=_PROVISIONAL_FLOOR)
-        p.add_cstr("fcap", over=idx, sense="<=", lhs_terms={"f": f, "neg_C": cap.to_expr() * -1.0},
-                   rhs_terms={"zero": _scalar_param(0.0)})
+        p.add_cstr(
+            "fcap",
+            over=idx,
+            sense="<=",
+            lhs_terms={"f": f, "neg_C": cap.to_expr() * -1.0},
+            rhs_terms={"zero": _scalar_param(0.0)},
+        )
         p.set_objective(cap.to_expr() * 1.0 + eta.to_expr(), sense="min")
         self.wp = fp.WarmProblem(p)
         self.wp.solve()
@@ -1818,13 +1847,17 @@ def test_in_out_incumbent_is_the_plan_the_upper_bound_priced() -> None:
     def on_incumbent(msol, results, info):
         # (C of the handed solution, f at the incumbent point, its cost, the UB)
         cap = float(msol.col_value[master.c_col])
-        seen.append((cap, info["point"][col], cap + sum(info["sub_costs"].values()), info["upper_bound"]))
+        seen.append(
+            (cap, info["point"][col], cap + sum(info["sub_costs"].values()), info["upper_bound"])
+        )
         return {"C": cap}
 
     result = solve_benders_loop(
-        master, [sub],
+        master,
+        [sub],
         options=BendersLoopOptions(max_iters=40, tol=1e-9, workers=1, in_out_weight=0.5),
-        initial_point={col: 0.0}, on_incumbent=on_incumbent,
+        initial_point={col: 0.0},
+        on_incumbent=on_incumbent,
     )
     assert result.converged
     assert result.best_upper_bound == pytest.approx(6.0, abs=1e-6)
@@ -1832,8 +1865,8 @@ def test_in_out_incumbent_is_the_plan_the_upper_bound_priced() -> None:
     # The vertex built more capacity than the interior point needed at least once (else the test is vacuous).
     assert any(abs(cap - f) < 1e-9 and f < _F_MAX - 1e-9 for cap, f, _, _ in seen)
     for cap, f, plan_cost, ub in seen:
-        assert cap == pytest.approx(f, abs=1e-9)                # capacity re-optimised for the pinned flow
-        assert plan_cost == pytest.approx(ub, rel=1e-12)        # the handed plan costs exactly the bound
+        assert cap == pytest.approx(f, abs=1e-9)  # capacity re-optimised for the pinned flow
+        assert plan_cost == pytest.approx(ub, rel=1e-12)  # the handed plan costs exactly the bound
     assert result.incumbent_payload["C"] == pytest.approx(result.incumbent_point[col], abs=1e-9)
 
 

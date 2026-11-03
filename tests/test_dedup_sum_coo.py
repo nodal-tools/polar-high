@@ -1,5 +1,6 @@
 """``_dedup_sum_coo``: duplicate (row, col) coefficients are summed in their production order, so the result is
 the same bits whatever the order a hash group-by would visit them in."""
+
 import numpy as np
 
 from polar_high.engine import _dedup_sum_coo
@@ -22,7 +23,7 @@ def test_result_independent_of_unrelated_rows() -> None:
     c = rng.integers(0, 5, 200)
     v = rng.normal(size=200)
     rr, cc, vv = _dedup_sum_coo(r, c, v)
-    order = np.lexsort((c, r))                # groups contiguous, each group's own order kept
+    order = np.lexsort((c, r))  # groups contiguous, each group's own order kept
     r2, c2, v2 = _dedup_sum_coo(r[order], c[order], v[order])
     assert rr.tolist() == r2.tolist() and cc.tolist() == c2.tolist() and vv.tolist() == v2.tolist()
     for i in range(rr.size):

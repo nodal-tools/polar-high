@@ -57,7 +57,9 @@ def _problem(costs: list[float], *, dense: bool = False) -> fp.Problem:
     )
     cost = fp.Param(
         ("t",),
-        pl.DataFrame({"t": np.arange(n, dtype=np.int64), "value": np.asarray(costs, dtype=np.float64)}),
+        pl.DataFrame(
+            {"t": np.arange(n, dtype=np.int64), "value": np.asarray(costs, dtype=np.float64)}
+        ),
         name="p_cost",
     )
     p.set_objective(cost * x, sense="min")
@@ -239,9 +241,10 @@ def test_presolve_readout_keeps_real_small_cost():
     assert r.cost == (SMALL, REAL)
     # Centred on the real band [1e-6, 2], as without the residue.
     q = _problem([REAL, SMALL])
-    assert recommend_scaling(r, cfg).user_objective_scale == recommend_scaling(
-        detect_ranges(q, cfg), cfg
-    ).user_objective_scale
+    assert (
+        recommend_scaling(r, cfg).user_objective_scale
+        == recommend_scaling(detect_ranges(q, cfg), cfg).user_objective_scale
+    )
 
 
 def test_presolve_readout_absolute_cutoff():
