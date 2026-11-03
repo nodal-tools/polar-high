@@ -39,7 +39,9 @@ def _bits(acc: dict) -> list:
     """Accumulator as (key, exact bit patterns) in insertion order."""
     out = []
     for k, (slog, cnt, amin, amax) in acc.items():
-        out.append((k, struct.pack("<d", slog), cnt, struct.pack("<d", amin), struct.pack("<d", amax)))
+        out.append(
+            (k, struct.pack("<d", slog), cnt, struct.pack("<d", amin), struct.pack("<d", amax))
+        )
     return out
 
 
@@ -55,7 +57,9 @@ def _batches(rng, n_cols: int, n_batches: int, batch_n: int, overshoot: int):
     out = []
     for _ in range(n_batches):
         cid = rng.integers(0, n_cols + overshoot, size=batch_n).astype(np.int64)
-        coef = (10.0 ** rng.uniform(-8.0, 8.0, size=batch_n)) * rng.choice([-1.0, 1.0], size=batch_n)
+        coef = (10.0 ** rng.uniform(-8.0, 8.0, size=batch_n)) * rng.choice(
+            [-1.0, 1.0], size=batch_n
+        )
         coef[rng.random(batch_n) < 0.01] = 0.0
         coef[rng.random(batch_n) < 0.005] = np.nan
         out.append((np.full(batch_n, -1, dtype=np.int64), cid, coef))
@@ -80,8 +84,13 @@ def test_array_classifier_bit_identical_to_callable(seed: int) -> None:
         b = int(bucket[c])
         return None if b < 0 else keys[b]
 
-    batches = _batches(rng, n_cols, n_batches=int(rng.integers(1, 6)), batch_n=int(rng.integers(1, 20000)),
-                       overshoot=int(rng.integers(0, 50)))
+    batches = _batches(
+        rng,
+        n_cols,
+        n_batches=int(rng.integers(1, 6)),
+        batch_n=int(rng.integers(1, 20000)),
+        overshoot=int(rng.integers(0, 50)),
+    )
     for scale in [(None, 0, None), (None, 0, 10.0 ** rng.uniform(-3, 3, size=n_cols + 60))]:
         want = _run(classify, batches, scale)
         got = _run(clf, batches, scale)
