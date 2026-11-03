@@ -425,9 +425,16 @@ class Param:
     ``(param_name, dims_tuple, direction)`` where direction is +1 if the
     Param contributes to the numerator and -1 if to the denominator.
     Anonymous-only chains have ``_sources is None``.
+
+    ``_op`` records the operation tree of a ``Param ⊗ Param`` composite
+    and of scalar multiples / quotients (see :func:`_param_tree`); ``None``
+    for a leaf — a frame-constructed Param or a ``Param + Param`` /
+    ``Param + float`` result.  :func:`_prune_composite_lazy` uses it to
+    rebuild an expanding product with every leaf semi-joined to a consuming
+    term's keys (same association, same per-cell arithmetic).
     """
 
-    __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources", "_value_scalar")
+    __slots__ = ("dims", "lazy", "_frame_cache", "name", "_sources", "_value_scalar", "_op")
 
     def __init__(
         self,
@@ -436,6 +443,7 @@ class Param:
         name: str | None = None,
         _sources: list[tuple[Param, int]] | None = None,
         _value_scalar: float = 1.0,
+        _op: tuple | None = None,
     ):
         # accept either eager or lazy; store as lazy
         if isinstance(frame, pl.LazyFrame):
@@ -466,6 +474,7 @@ class Param:
         # Atomic Params start at 1.0; composite chains multiply scalars
         # together (or invert for division).
         self._value_scalar = float(_value_scalar)
+        self._op = _op
 
     def _own_sources(self) -> list[tuple[Param, int]] | None:
         """Return the list of ``(Param, direction)`` sources that this
@@ -497,28 +506,22 @@ class Param:
         if isinstance(other, (int, float)):
             return Param(
                 self.dims,
-                self.lazy.with_columns(value=pl.col("value") * float(other)),
+                _param_scalar_lazy(self.lazy, "smul", float(other)),
                 _sources=self._sources_for_propagation(),
                 _value_scalar=self._value_scalar * float(other),
+                _op=_param_scalar_node(self, "smul", float(other)),
             )
         if isinstance(other, Param):
-            shared = [d for d in self.dims if d in other.dims]
-            new_dims = tuple(dict.fromkeys(self.dims + other.dims))
-            if shared:
-                left_lf, right_lf = _align_enum_join_keys(self.lazy, other.lazy, shared)
-                j = left_lf.join(right_lf, on=shared, how="inner", suffix="__r")
-            else:
-                j = self.lazy.join(other.lazy, how="cross", suffix="__r")
+            lazy, new_dims = _param_binop_lazy(self.lazy, self.dims, other.lazy, other.dims, "mul")
             merged = _merge_param_sources(
                 self._sources_for_propagation(), other._sources_for_propagation(), flip_other=False
             )
             return Param(
                 new_dims,
-                j.with_columns(value=pl.col("value") * pl.col("value__r")).select(
-                    *new_dims, "value"
-                ),
+                lazy,
                 _sources=merged,
                 _value_scalar=self._value_scalar * other._value_scalar,
+                _op=_param_binop_node(self, other, "mul", new_dims),
             )
         if isinstance(other, (Var, Expr)):
             return other * self
@@ -530,28 +533,22 @@ class Param:
         if isinstance(other, (int, float)):
             return Param(
                 self.dims,
-                self.lazy.with_columns(value=pl.col("value") / float(other)),
+                _param_scalar_lazy(self.lazy, "sdiv", float(other)),
                 _sources=self._sources_for_propagation(),
                 _value_scalar=self._value_scalar / float(other),
+                _op=_param_scalar_node(self, "sdiv", float(other)),
             )
         if isinstance(other, Param):
-            shared = [d for d in self.dims if d in other.dims]
-            new_dims = tuple(dict.fromkeys(self.dims + other.dims))
-            if shared:
-                left_lf, right_lf = _align_enum_join_keys(self.lazy, other.lazy, shared)
-                j = left_lf.join(right_lf, on=shared, how="inner", suffix="__r")
-            else:
-                j = self.lazy.join(other.lazy, how="cross", suffix="__r")
+            lazy, new_dims = _param_binop_lazy(self.lazy, self.dims, other.lazy, other.dims, "div")
             merged = _merge_param_sources(
                 self._sources_for_propagation(), other._sources_for_propagation(), flip_other=True
             )
             return Param(
                 new_dims,
-                j.with_columns(value=pl.col("value") / pl.col("value__r")).select(
-                    *new_dims, "value"
-                ),
+                lazy,
                 _sources=merged,
                 _value_scalar=self._value_scalar / other._value_scalar,
+                _op=_param_binop_node(self, other, "div", new_dims),
             )
         return NotImplemented
 
@@ -612,6 +609,150 @@ class Param:
 
     def __rsub__(self, other):
         return (-self) + other
+
+
+# ---------------------------------------------------------------------------
+# Composite-Param operation tree and its pruned rebuild
+#
+# A node is ``(kind, dims, a, b, expanding, has_div)``:
+#   * ``("leaf", dims, lazy, None, False, False)`` — a Param without an op tree;
+#   * ``("mul"|"div", dims, left_node, right_node, expanding, has_div)``;
+#   * ``("smul"|"sdiv", dims, child_node, scalar, expanding, has_div)``.
+# ``expanding`` is True when some node of the tree is a cross join of two
+# dimensioned children or a join whose output dims equal neither child's
+# dims — the shapes polars cannot narrow by pushing the consuming term's keys
+# through the plan.  ``has_div`` is True when some node divides: polars picks
+# its float-division kernel by operand length (a length-1 / broadcast divisor
+# is applied as a multiply by its reciprocal, ≠ the quotient in the last bit),
+# so a quotient is only reproducible bit for bit on operands of the original
+# length, and a tree that divides is never pruned.  Products are exact under
+# either kernel.  A node holds the leaves' ``lazy`` plans (already referenced
+# by the composite's own plan), never the Param objects, so an intermediate
+# Param's cached ``.frame`` is not kept alive by the tree.
+
+
+def _param_binop_lazy(
+    l_lf: pl.LazyFrame,
+    l_dims: tuple[str, ...],
+    r_lf: pl.LazyFrame,
+    r_dims: tuple[str, ...],
+    op: str,
+) -> tuple[pl.LazyFrame, tuple[str, ...]]:
+    """Join two Param plans and combine their values: ``value * value__r``
+    (``op == "mul"``) or ``value / value__r`` (``op == "div"``).
+
+    Inner join on the shared dims (Enum keys aligned), cross join when there
+    are none.  Shared by ``Param.__mul__`` / ``Param.__truediv__`` and by
+    :func:`_prune_composite_lazy`, so a pruned rebuild combines exactly the
+    same operands in exactly the same left/right roles.  Returns
+    ``(lazy, new_dims)``.
+    """
+    shared = [d for d in l_dims if d in r_dims]
+    new_dims = tuple(dict.fromkeys(tuple(l_dims) + tuple(r_dims)))
+    if shared:
+        left_lf, right_lf = _align_enum_join_keys(l_lf, r_lf, shared)
+        j = left_lf.join(right_lf, on=shared, how="inner", suffix="__r")
+    else:
+        j = l_lf.join(r_lf, how="cross", suffix="__r")
+    if op == "mul":
+        val = pl.col("value") * pl.col("value__r")
+    else:
+        val = pl.col("value") / pl.col("value__r")
+    return j.with_columns(value=val).select(*new_dims, "value"), new_dims
+
+
+def _param_scalar_lazy(lf: pl.LazyFrame, op: str, s: float) -> pl.LazyFrame:
+    """``value * s`` (``op == "smul"``) or ``value / s`` (``op == "sdiv"``)."""
+    if op == "smul":
+        return lf.with_columns(value=pl.col("value") * s)
+    return lf.with_columns(value=pl.col("value") / s)
+
+
+def _param_tree(p: Param) -> tuple:
+    """The op-tree node of ``p``: its ``_op``, or a leaf node over ``p.lazy``."""
+    if p._op is not None:
+        return p._op
+    return ("leaf", p.dims, p.lazy, None, False, False)
+
+
+def _param_binop_node(left: Param, right: Param, op: str, new_dims: tuple[str, ...]) -> tuple:
+    """Op-tree node of ``left (op) right``."""
+    lt, rt = _param_tree(left), _param_tree(right)
+    out = set(new_dims)
+    expanding = bool(lt[4] or rt[4] or (out != set(left.dims) and out != set(right.dims)))
+    return (op, tuple(new_dims), lt, rt, expanding, bool(op == "div" or lt[5] or rt[5]))
+
+
+def _param_scalar_node(p: Param, op: str, s: float) -> tuple:
+    """Op-tree node of ``p (op) s``."""
+    c = _param_tree(p)
+    return (op, p.dims, c, s, c[4], bool(op == "sdiv" or c[5]))
+
+
+def _composite_prune_disabled() -> bool:
+    """Return True when ``POLAR_HIGH_DISABLE_COMPOSITE_PRUNE=1``.
+
+    Escape hatch for :func:`_prune_composite_lazy`: a ``Var × Param`` /
+    ``Expr × Param`` term then joins the composite Param's own plan
+    verbatim, exactly as before the pruning existed."""
+    return os.environ.get("POLAR_HIGH_DISABLE_COMPOSITE_PRUNE") == "1"
+
+
+def _composite_prune_applies(factor: Param, shared: list[str]) -> bool:
+    """True when a term multiplying by ``factor`` on ``shared`` gets the
+    pruned rebuild: ``factor`` is an expanding composite without a division,
+    the join has shared keys and the escape hatch is off.  Pure-filter
+    products and trees that divide keep their plan."""
+    node = factor._op
+    return (
+        bool(shared)
+        and node is not None
+        and bool(node[4])
+        and not node[5]
+        and not _composite_prune_disabled()
+    )
+
+
+def _prune_composite_lazy(node: tuple, keys_lf: pl.LazyFrame, key_cols: list[str]) -> pl.LazyFrame:
+    """Rebuild a composite Param's plan from its op tree with every leaf
+    narrowed to the consuming term's keys.
+
+    A leaf whose dims meet ``key_cols`` is semi-joined (left order kept) to
+    the distinct projection of ``keys_lf`` onto those dims; the keys are cast
+    to the leaf's dtypes, the leaf is never re-typed, so every node's schema
+    — and the Enum alignment the binary ops apply — is unchanged.  Nodes are
+    re-applied through :func:`_param_binop_lazy` / :func:`_param_scalar_lazy`
+    in the original association and left/right roles.
+
+    A composite row survives the term's inner join only if its projection
+    onto ``key_cols`` is among the term's keys; each leaf contributes its own
+    projection of that row, so the semi-joins drop only rows that never
+    survive, and every surviving cell is computed from the same leaf values
+    by the same operations — bit-identical coefficients.
+    """
+    kind, dims, a, b, _expanding, _has_div = node
+    if kind == "leaf":
+        k = [d for d in dims if d in key_cols]
+        if not k:
+            return a
+        keys = keys_lf.select(k).unique()
+        leaf_schema = a.collect_schema()
+        keys_schema = keys.collect_schema()
+        casts = [
+            pl.col(c).cast(leaf_schema[c], strict=False)
+            for c in k
+            if keys_schema[c] != leaf_schema[c]
+        ]
+        if casts:
+            keys = keys.with_columns(*casts)
+        return a.join(keys, on=k, how="semi", maintain_order="left")
+    if kind in ("mul", "div"):
+        left = _prune_composite_lazy(a, keys_lf, key_cols)
+        right = _prune_composite_lazy(b, keys_lf, key_cols)
+        lazy, _ = _param_binop_lazy(left, a[1], right, b[1], kind)
+        return lazy.select(*dims, "value")
+    child = _prune_composite_lazy(a, keys_lf, key_cols)
+    return _param_scalar_lazy(child, kind, b).select(*dims, "value")
 
 
 def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
@@ -2434,7 +2575,10 @@ class Var:
             new_dims = tuple(dict.fromkeys(self.dims + other.dims))
             lf = self.frame.lazy()
             if shared:
-                lf, right_lf = _align_enum_join_keys(lf, other.lazy, shared)
+                other_lf = other.lazy
+                if _composite_prune_applies(other, shared):
+                    other_lf = _prune_composite_lazy(other._op, lf.select(shared), shared)
+                lf, right_lf = _align_enum_join_keys(lf, other_lf, shared)
                 j = lf.join(right_lf, on=shared, how="inner")
             else:
                 j = lf.join(other.lazy, how="cross")
@@ -2804,7 +2948,16 @@ class Expr:
                 shared = [d for d in use_dims if d in scalar.dims and d in lazy_cols]
                 new_dims = tuple(dict.fromkeys(tuple(use_dims) + scalar.dims))
                 if shared:
-                    left_lf, right_lf = _align_enum_join_keys(use_lazy, scalar.lazy, shared)
+                    factor_lf = scalar.lazy
+                    if _composite_prune_applies(scalar, shared):
+                        # Prune keys: the term's rows after its deferred
+                        # pure-filter Wheres (every ``t.lazy`` consumer
+                        # re-applies them, so no surviving row is lost).
+                        keys_lf = _apply_where_frames(
+                            use_lazy.select(shared), shared, t.where_frames
+                        )
+                        factor_lf = _prune_composite_lazy(scalar._op, keys_lf, shared)
+                    left_lf, right_lf = _align_enum_join_keys(use_lazy, factor_lf, shared)
                     j = left_lf.join(right_lf, on=shared, how="inner")
                 else:
                     j = use_lazy.join(scalar.lazy, how="cross")
@@ -2852,6 +3005,8 @@ class Expr:
                 shared = [d for d in use_dims if d in other.dims and d in lazy_cols]
                 new_dims = tuple(dict.fromkeys(tuple(use_dims) + other.dims))
                 if shared:
+                    # Never pruned (see ``_param_tree``): the quotient's
+                    # bits depend on the divisor column's length.
                     left_lf, right_lf = _align_enum_join_keys(use_lazy, other.lazy, shared)
                     j = left_lf.join(right_lf, on=shared, how="inner")
                 else:

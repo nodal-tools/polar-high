@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.12.0] — unreleased
+
+### Changed
+
+- **Lower peak memory for terms that multiply by an expanding Param
+  product.**  A `Param * Param` result now records its operation tree.
+  When a `Var * P` or `Expr * P` term multiplies by a product `P` that
+  expands (a cross join, or a join wider than either operand, e.g.
+  `size[p] * duration[d,t] * limit[g,d]`), the term joins a rebuild of `P`
+  in which every leaf Param is first semi-joined to the term's own keys
+  (after its deferred pure-filter `Where`s).  Before, the whole product was
+  materialised and then mostly thrown away by the term's join, once per
+  batch in every coefficient walk.  The rebuild keeps the association,
+  operand roles and dtypes, so coefficients are bit-identical.  Products
+  that only filter keep their plan unchanged.  Trees that divide, and
+  `Expr / P`, are not pruned: polars picks its float-division kernel by
+  operand length (a length-1 divisor becomes a multiply by its
+  reciprocal), so a pruned quotient could differ in the last bit.
+  `POLAR_HIGH_DISABLE_COMPOSITE_PRUNE=1` turns the pruning off.
+
 ## [3.11.0] — 2026-10-26
 
 ### Added
