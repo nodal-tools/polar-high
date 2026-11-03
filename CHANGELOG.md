@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   When a `Var * P` or `Expr * P` term multiplies by a product `P` that
   expands (a cross join, or a join wider than either operand, e.g.
   `size[p] * duration[d,t] * limit[g,d]`), the term joins a rebuild of `P`
-  in which every leaf Param is first semi-joined to the term's own keys
-  (after its deferred pure-filter `Where`s).  Before, the whole product was
+  in which every leaf Param is first semi-joined to bounds of the term's
+  keys: the Var's frame and the term's `Where` frames when the term still
+  has its Var source (cheap; the term's own plan is not re-run), else the
+  term's rows after its deferred pure-filter `Where`s.  Before, the whole product was
   materialised and then mostly thrown away by the term's join, once per
   batch in every coefficient walk.  The rebuild keeps the association,
   operand roles and dtypes, so coefficients are bit-identical.  Products

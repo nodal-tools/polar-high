@@ -713,45 +713,74 @@ def _composite_prune_applies(factor: Param, shared: list[str]) -> bool:
     )
 
 
-def _prune_composite_lazy(node: tuple, keys_lf: pl.LazyFrame, key_cols: list[str]) -> pl.LazyFrame:
+def _composite_key_sources(t: _Term, use_lazy: pl.LazyFrame, shared: list[str]) -> list[pl.LazyFrame]:
+    """Frames whose distinct projections bound the rows of term ``t`` on
+    ``shared``, for :func:`_prune_composite_lazy`.
+
+    A term that still carries its ``var_source`` has rows drawn from the
+    Var's frame, joined to its map-effect Where frames and filtered by its
+    pure-filter Where frames; each of those frames (all small or already
+    materialised) bounds the columns it carries, so the keys never
+    re-execute the term's own plan.  Any other term falls back to its own
+    rows after the deferred pure-filter Wheres (every ``t.lazy`` consumer
+    re-applies them, so no surviving row is lost)."""
+    if t.var_source is None:
+        return [_apply_where_frames(use_lazy.select(shared), shared, t.where_frames)]
+    sources = [t.var_source.frame.lazy()]
+    sources.extend(t.where_frames or ())
+    sources.extend(mf for mf, _extras in (t.where_map_frames or ()))
+    return sources
+
+
+def _prune_composite_lazy(
+    node: tuple, key_sources: list[pl.LazyFrame], key_cols: list[str]
+) -> pl.LazyFrame:
     """Rebuild a composite Param's plan from its op tree with every leaf
     narrowed to the consuming term's keys.
 
-    A leaf whose dims meet ``key_cols`` is semi-joined (left order kept) to
-    the distinct projection of ``keys_lf`` onto those dims; the keys are cast
+    For each frame in ``key_sources`` (each a superset bound of the term's
+    rows on the columns it carries), a leaf whose dims meet both
+    ``key_cols`` and that frame's columns is semi-joined (left order kept)
+    to the frame's distinct projection onto those dims; the keys are cast
     to the leaf's dtypes, the leaf is never re-typed, so every node's schema
     — and the Enum alignment the binary ops apply — is unchanged.  Nodes are
     re-applied through :func:`_param_binop_lazy` / :func:`_param_scalar_lazy`
     in the original association and left/right roles.
 
     A composite row survives the term's inner join only if its projection
-    onto ``key_cols`` is among the term's keys; each leaf contributes its own
-    projection of that row, so the semi-joins drop only rows that never
-    survive, and every surviving cell is computed from the same leaf values
-    by the same operations — bit-identical coefficients.
+    onto ``key_cols`` is among the term's keys, hence within every bound;
+    each leaf contributes its own projection of that row, so the semi-joins
+    drop only rows that never survive, and every surviving cell is computed
+    from the same leaf values by the same operations — bit-identical
+    coefficients.
     """
     kind, dims, a, b, _expanding, _has_div = node
     if kind == "leaf":
-        k = [d for d in dims if d in key_cols]
-        if not k:
-            return a
-        keys = keys_lf.select(k).unique()
-        leaf_schema = a.collect_schema()
-        keys_schema = keys.collect_schema()
-        casts = [
-            pl.col(c).cast(leaf_schema[c], strict=False)
-            for c in k
-            if keys_schema[c] != leaf_schema[c]
-        ]
-        if casts:
-            keys = keys.with_columns(*casts)
-        return a.join(keys, on=k, how="semi", maintain_order="left")
+        out = a
+        leaf_schema = None
+        for src in key_sources:
+            src_schema = src.collect_schema()
+            k = [d for d in dims if d in key_cols and d in src_schema]
+            if not k:
+                continue
+            if leaf_schema is None:
+                leaf_schema = a.collect_schema()
+            keys = src.select(k).unique()
+            casts = [
+                pl.col(c).cast(leaf_schema[c], strict=False)
+                for c in k
+                if src_schema[c] != leaf_schema[c]
+            ]
+            if casts:
+                keys = keys.with_columns(*casts)
+            out = out.join(keys, on=k, how="semi", maintain_order="left")
+        return out
     if kind in ("mul", "div"):
-        left = _prune_composite_lazy(a, keys_lf, key_cols)
-        right = _prune_composite_lazy(b, keys_lf, key_cols)
+        left = _prune_composite_lazy(a, key_sources, key_cols)
+        right = _prune_composite_lazy(b, key_sources, key_cols)
         lazy, _ = _param_binop_lazy(left, a[1], right, b[1], kind)
         return lazy.select(*dims, "value")
-    child = _prune_composite_lazy(a, keys_lf, key_cols)
+    child = _prune_composite_lazy(a, key_sources, key_cols)
     return _param_scalar_lazy(child, kind, b).select(*dims, "value")
 
 
@@ -2577,7 +2606,7 @@ class Var:
             if shared:
                 other_lf = other.lazy
                 if _composite_prune_applies(other, shared):
-                    other_lf = _prune_composite_lazy(other._op, lf.select(shared), shared)
+                    other_lf = _prune_composite_lazy(other._op, [lf], shared)
                 lf, right_lf = _align_enum_join_keys(lf, other_lf, shared)
                 j = lf.join(right_lf, on=shared, how="inner")
             else:
@@ -2950,13 +2979,8 @@ class Expr:
                 if shared:
                     factor_lf = scalar.lazy
                     if _composite_prune_applies(scalar, shared):
-                        # Prune keys: the term's rows after its deferred
-                        # pure-filter Wheres (every ``t.lazy`` consumer
-                        # re-applies them, so no surviving row is lost).
-                        keys_lf = _apply_where_frames(
-                            use_lazy.select(shared), shared, t.where_frames
-                        )
-                        factor_lf = _prune_composite_lazy(scalar._op, keys_lf, shared)
+                        sources = _composite_key_sources(t, use_lazy, shared)
+                        factor_lf = _prune_composite_lazy(scalar._op, sources, shared)
                     left_lf, right_lf = _align_enum_join_keys(use_lazy, factor_lf, shared)
                     j = left_lf.join(right_lf, on=shared, how="inner")
                 else:

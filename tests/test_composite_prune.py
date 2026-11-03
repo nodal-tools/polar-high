@@ -100,13 +100,18 @@ def _var(
 
 def _seed(kind: str, prob: fp.Problem, rng: np.random.Generator, mode: str):
     """The left operand of the product: a Var, an Expr after a map-effect
-    Where, or an Expr after a deferred pure-filter Where."""
+    Where, an Expr after a deferred pure-filter Where, or a Sum result (no
+    Var source left) after a deferred pure-filter Where."""
     if kind == "var":
         return _var(prob, "x", ("a", "b"), rng, mode)
     if kind == "map_where":
         x = _var(prob, "x", ("a",), rng, mode)
         mp = _cast(_rows(("a", "c"), rng, 0.4), mode, rng)
         return fp.Where(x, mp)
+    if kind == "post_sum":
+        x = _var(prob, "x", ("a", "c", "d"), rng, mode)
+        flt = _cast(_rows(("a",), rng, 0.6), mode, rng)
+        return fp.Where(fp.Sum(x, over=("d",)), flt)
     x = _var(prob, "x", ("a", "c"), rng, mode)
     flt = _cast(_rows(("a",), rng, 0.4), mode, rng)
     return fp.Where(x, flt)
@@ -149,7 +154,7 @@ def _build_both(make_term, monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["utf8", "enum", "mixed"])
-@pytest.mark.parametrize("seed_kind", ["var", "map_where", "filter_where"])
+@pytest.mark.parametrize("seed_kind", ["var", "map_where", "filter_where", "post_sum"])
 @pytest.mark.parametrize("op", ["mul", "div"])
 def test_random_trees_bit_identical_to_escape_hatch(mode, seed_kind, op, monkeypatch):
     rng = np.random.default_rng(sum(map(ord, f"{mode}/{seed_kind}/{op}")))
@@ -195,7 +200,7 @@ def test_bound_pruned_composite_height():
     x = prob.add_var("x", ("p",), pl.DataFrame({"p": ["p5", "p1234"]}))
     shared = ["p"]
     assert _composite_prune_applies(comp, shared)
-    pruned = _prune_composite_lazy(comp._op, x.frame.lazy().select(shared), shared).collect()
+    pruned = _prune_composite_lazy(comp._op, [x.frame.lazy()], shared).collect()
     assert pruned.height == 2 * n
     assert pruned.schema == comp.lazy.collect_schema()
     term = (x * comp).terms[0].lazy.collect()
