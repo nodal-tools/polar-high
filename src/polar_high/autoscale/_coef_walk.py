@@ -96,6 +96,7 @@ from ..engine import (
 )
 
 __all__ = [
+    "ArrayClassifier",
     "CoefBatch",
     "CoefWalkRecipe",
     "Log2HistogramReducer",
@@ -502,6 +503,47 @@ class MinMaxAbsReducer(Reducer):
 _HistAcc = tuple[float, int, float, float]
 
 
+class ArrayClassifier:
+    """Array form of a ``col_id -> bucket key | None`` classification.
+
+    ``bucket_of_col[c]`` is the index into ``keys`` of column ``c``'s
+    bucket, or ``-1`` for no bucket (the callable form's ``None``).  A
+    ``col_id`` at or beyond ``len(bucket_of_col)`` also has no bucket.
+    The table holds one small integer per LP column instead of a Python
+    object per column, so a classification over millions of columns
+    costs a few MB.
+
+    :class:`Log2HistogramReducer` accepts an instance in place of a
+    callable and produces the same accumulator: same keys, same
+    insertion order and bit-identical values as the callable
+    ``lambda c: keys[bucket_of_col[c]]`` (``None`` for ``-1``), including
+    keys that compare equal (one bucket, first object kept).
+    """
+
+    __slots__ = ("bucket_of_col", "keys")
+
+    def __init__(self, bucket_of_col: np.ndarray, keys: Sequence[Hashable]) -> None:
+        arr = np.asarray(bucket_of_col)
+        if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
+            raise TypeError("bucket_of_col must be a 1-D integer array")
+        self.keys: tuple[Hashable, ...] = tuple(keys)
+        if arr.size and (int(arr.max()) >= len(self.keys) or int(arr.min()) < -1):
+            raise ValueError("bucket_of_col entries must be -1 or an index into keys")
+        self.bucket_of_col = arr
+
+    def __call__(self, col_id: int) -> Hashable | None:
+        b = int(self.buckets(np.array([col_id], dtype=np.int64))[0])
+        return None if b < 0 else self.keys[b]
+
+    def buckets(self, col_ids: np.ndarray) -> np.ndarray:
+        """Bucket index (int64, ``-1`` = none) of each col_id."""
+        cids = np.asarray(col_ids, dtype=np.int64)
+        out = np.full(cids.size, -1, dtype=np.int64)
+        inside = (cids >= 0) & (cids < self.bucket_of_col.size)
+        out[inside] = self.bucket_of_col[cids[inside]]
+        return out
+
+
 class Log2HistogramReducer(Reducer):
     """Per-bucket ``(sum log2|scaled coef|, count, abs_min, abs_max)``
     accumulator, keyed by a caller-supplied ``col_id -> bucket-key``
@@ -513,7 +555,9 @@ class Log2HistogramReducer(Reducer):
     coefficient magnitude folds into that bucket's accumulator with the
     same ``(log2_sum, count, min, max)`` packing FlexTool uses.
 
-    ``classify`` is ``col_id (int) -> bucket key (Hashable) | None``.  A
+    ``classify`` is ``col_id (int) -> bucket key (Hashable) | None``, or
+    an :class:`ArrayClassifier` (one bucket index per column; same
+    result, no per-column Python call or object).  A
     ``None`` classification drops the entry (mirrors ``bucket_coefficients``
     skipping columns with no registered family).  Entries with a
     non-positive or non-finite magnitude are skipped (``log2`` would be
@@ -530,7 +574,7 @@ class Log2HistogramReducer(Reducer):
     def __init__(
         self,
         scale: tuple[np.ndarray | None, int, np.ndarray | None],
-        classify: Callable[[int], Hashable | None],
+        classify: Callable[[int], Hashable | None] | ArrayClassifier,
     ) -> None:
         self._scale = scale
         self._classify = classify
@@ -558,23 +602,15 @@ class Log2HistogramReducer(Reducer):
         # (cheap); the per-row work is O(n) bincount + ufunc.at, never the
         # old O(n_uniq x batch_n) per-uniq full-mask loop.
         uniq_cids, inv = np.unique(cids, return_inverse=True)
-        bucket_of_uniq = [self._classify(int(c)) for c in uniq_cids.tolist()]
-        # Map each DISTINCT non-None bucket key to a dense int index; a
+        # Map each DISTINCT non-None bucket key to a dense int index, in
+        # order of first appearance over the sorted distinct col_ids; a
         # ``None`` classification gets -1 so its rows are dropped below
         # (mirrors ``bucket_coefficients`` skipping unregistered families).
-        key_to_idx: dict[Hashable, int] = {}
-        keys_in_order: list[Hashable] = []
-        uniq_bidx = np.full(uniq_cids.size, -1, dtype=np.int64)
-        for u_idx, bkey in enumerate(bucket_of_uniq):
-            if bkey is None:
-                continue
-            j = key_to_idx.get(bkey)
-            if j is None:
-                j = len(keys_in_order)
-                key_to_idx[bkey] = j
-                keys_in_order.append(bkey)
-            uniq_bidx[u_idx] = j
-        nb = len(keys_in_order)
+        if isinstance(self._classify, ArrayClassifier):
+            key_to_idx, uniq_bidx = self._dense_from_array(uniq_cids)
+        else:
+            key_to_idx, uniq_bidx = self._dense_from_callable(uniq_cids)
+        nb = len(key_to_idx)
         if nb == 0:
             return
         # One bucket index per surviving row; drop rows whose col_id
@@ -606,6 +642,43 @@ class Log2HistogramReducer(Reducer):
                 float(bmin[j]),
                 float(bmax[j]),
             )
+
+    def _dense_from_callable(self, uniq_cids: np.ndarray) -> tuple[dict[Hashable, int], np.ndarray]:
+        key_to_idx: dict[Hashable, int] = {}
+        uniq_bidx = np.full(uniq_cids.size, -1, dtype=np.int64)
+        for u_idx, c in enumerate(uniq_cids.tolist()):
+            bkey = self._classify(int(c))
+            if bkey is None:
+                continue
+            j = key_to_idx.get(bkey)
+            if j is None:
+                j = len(key_to_idx)
+                key_to_idx[bkey] = j
+            uniq_bidx[u_idx] = j
+        return key_to_idx, uniq_bidx
+
+    def _dense_from_array(self, uniq_cids: np.ndarray) -> tuple[dict[Hashable, int], np.ndarray]:
+        clf: ArrayClassifier = self._classify  # type: ignore[assignment]
+        uniq_b = clf.buckets(uniq_cids)
+        uniq_bidx = np.full(uniq_cids.size, -1, dtype=np.int64)
+        has = uniq_b >= 0
+        if not has.any():
+            return {}, uniq_bidx
+        present, first_pos, dense_of = np.unique(uniq_b[has], return_index=True, return_inverse=True)
+        # Visit the distinct buckets in first-appearance order (the callable
+        # path's order).  A key equal to an earlier one joins its dense
+        # index, and the dict keeps the first object, as the callable does.
+        key_to_idx: dict[Hashable, int] = {}
+        dense_of_present = np.empty(present.size, dtype=np.int64)
+        for k in np.argsort(first_pos, kind="stable").tolist():
+            bkey = clf.keys[int(present[k])]
+            j = key_to_idx.get(bkey)
+            if j is None:
+                j = len(key_to_idx)
+                key_to_idx[bkey] = j
+            dense_of_present[k] = j
+        uniq_bidx[has] = dense_of_present[dense_of.reshape(-1)]
+        return key_to_idx, uniq_bidx
 
     def _fold(self, bkey: Hashable, slog: float, cnt: int, amin: float, amax: float) -> None:
         prev = self._acc.get(bkey)

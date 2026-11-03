@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.12.0] — unreleased
 
+### Added
+
+- **`ArrayClassifier` for `Log2HistogramReducer`**
+  (`polar_high.autoscale._coef_walk`).  A column classification can now
+  be given as one integer bucket index per LP column plus the list of
+  bucket keys (`-1` = no bucket), instead of a Python callable backed by a
+  per-column dict.  The reducer looks the buckets up with numpy and
+  returns the same accumulator as the equivalent callable: same keys, same
+  order, bit-identical values.  Callables keep working unchanged.
+
 ### Changed
 
 - **Lower peak memory for terms that multiply by an expanding Param
