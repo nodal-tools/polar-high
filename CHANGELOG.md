@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-column dict.  The reducer looks the buckets up with numpy and
   returns the same accumulator as the equivalent callable: same keys, same
   order, bit-identical values.  Callables keep working unchanged.
+- **`highs_names="always" | "auto" | "never"`** on `Problem.solve` and
+  `WarmProblem`: when the LP names are passed to HiGHS.  HiGHS keeps its
+  own copy of every name (about 3 GB on a 6 M-column / 7.5 M-row LP) and
+  never reads them while solving.  `"auto"` passes them just before
+  `run()` only when a name-writing HiGHS option is on
+  (`polar_high.engine.HIGHS_NAME_OPTIONS`); `"never"` only on request.
+  New `Solution.highs_names_passed`, `Solution.pass_names_to_highs()` and
+  `WarmProblem.pass_names_to_highs()`.  The solution, the Python
+  `Solution.col_names` / `row_names`, `write_mps` and every HiGHS-written
+  file once names are passed are the same in every mode.
+  `save_memory=True` always passes the names (its MPS round trip goes
+  through HiGHS).  The default stays `"always"`.
 
 ### Changed
 
@@ -38,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operand length (a length-1 divisor becomes a multiply by its
   reciprocal), so a pruned quotient could differ in the last bit.
   `POLAR_HIGH_DISABLE_COMPOSITE_PRUNE=1` turns the pruning off.
+- **`WarmProblem` frees its LP staging copies earlier.**  The
+  sentinel-translated bound arrays are freed once the `HighsLp` holds
+  them, and the `HighsLp` itself once `passModel` has copied it into
+  HiGHS, instead of at the end of the build (about 0.6 GB on a
+  13 M-nonzero LP, before the names are passed).  The LP is unchanged.
 
 ## [3.11.0] — 2026-10-26
 

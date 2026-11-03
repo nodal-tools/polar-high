@@ -69,6 +69,7 @@ def run(
     env: Any = None,
     options: dict | None = None,
     keep_solver: bool = False,
+    highs_names: str = "always",
     **kwargs: Any,
 ) -> SolverResult:
     """Solve ``view`` with HiGHS via the non-streaming ``passModel`` path.
@@ -93,6 +94,11 @@ def run(
         ``_highs_instance``. Used by ``Problem.solve(keep_solver=True)``
         to preserve the old ``Solution.highs`` field. Other callers
         should leave this ``False``.
+    highs_names
+        ``"always"`` (default), ``"auto"`` or ``"never"``: when the LP
+        names go to HiGHS, as for :meth:`~polar_high.engine.Problem.solve`.
+        The result's ``_highs_names_passed`` says whether they did, and
+        ``_highs_name_passer`` (``None`` once passed) passes them later.
     **kwargs
         Reserved for forward compatibility with the cross-solver
         dispatch; ignored here.
@@ -109,6 +115,9 @@ def run(
         into the legacy :class:`~polar_high.engine.Solution` shape.
     """
     del env, kwargs  # unused — see docstring
+    from ..engine import _check_highs_names, highs_options_need_names
+
+    _check_highs_names(highs_names)
 
     n_cols = int(view.n_cols)
     n_rows = int(view.n_rows)
@@ -182,11 +191,18 @@ def run(
     h.passModel(lp)
 
     # names — passColName / passRowName per item (cheap)
-    for i, n in enumerate(col_names):
-        if n is not None:
-            h.passColName(i, n)
-    for i, n in enumerate(row_names):
-        h.passRowName(i, n)
+    def _pass_names(h: highspy.Highs) -> None:
+        for i, n in enumerate(col_names):
+            if n is not None:
+                h.passColName(i, n)
+        for i, n in enumerate(row_names):
+            h.passRowName(i, n)
+
+    names_passed = highs_names == "always" or (
+        highs_names == "auto" and highs_options_need_names(h)
+    )
+    if names_passed:
+        _pass_names(h)
 
     h.run()
     sol = h.getSolution()
@@ -247,8 +263,12 @@ def run(
     # Raw HiGHS objective (carried even for non-optimal solves) so the
     # legacy ``Solution.obj`` round-trip stays bit-identical.
     result._objective_raw = float(obj_val_raw)
+    result._highs_names_passed = names_passed
+    result._highs_name_passer = None
     if keep_solver:
         result._highs_instance = h
+        if not names_passed:
+            result._highs_name_passer = lambda: _pass_names(h)
     else:
         result._highs_instance = None
         del h, lp

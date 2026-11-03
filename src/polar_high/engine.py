@@ -31,6 +31,8 @@ import os
 import sys
 import tempfile
 import time
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -251,6 +253,62 @@ def _make_solve_profile_emitter():
         sys.stderr.flush()
 
     return emit, True
+
+
+# ---------------------------------------------------------------------------
+# LP names in HiGHS
+#
+# HiGHS keeps its own copy of every column and row name (plus a name hash)
+# for the life of the instance.  Solving never reads them; HiGHS' file
+# writers do.  ``highs_names`` on :meth:`Problem.solve` / :class:`WarmProblem`
+# chooses when the names are passed: ``"always"`` (right after the model is
+# loaded), ``"auto"`` (just before ``run()``, only when an option in
+# :data:`HIGHS_NAME_OPTIONS` is on) or ``"never"`` (only on an explicit
+# ``pass_names_to_highs()`` call).  The Python-side ``Solution.col_names`` /
+# ``row_names`` are the same in every mode.
+
+#: HiGHS options that make ``run()`` write a file carrying LP names (the
+#: solution, model, presolved model, basis and IIS model files).  A bool
+#: option counts when ``True``, a file-name option when non-empty.
+HIGHS_NAME_OPTIONS: tuple[str, ...] = (
+    "write_solution_to_file",
+    "write_model_to_file",
+    "write_presolved_model_to_file",
+    "write_basis_file",
+    "write_iis_model_file",
+)
+
+_HIGHS_NAMES_MODES = ("always", "auto", "never")
+
+
+def _check_highs_names(mode: str) -> str:
+    if mode not in _HIGHS_NAMES_MODES:
+        raise ValueError(f"highs_names must be one of {_HIGHS_NAMES_MODES}, got {mode!r}")
+    return mode
+
+
+def highs_options_need_names(h: highspy.Highs) -> bool:
+    """``True`` when an option in :data:`HIGHS_NAME_OPTIONS` is on in ``h``.
+
+    Reads the instance's effective option values, so options set by any
+    route (a stored options dict, a per-call dict, ``setOptionValue`` on
+    the live handle) are seen.  An option this HiGHS build does not know
+    is ignored."""
+    ok = getattr(highspy.HighsStatus, "kOk", None)
+    for key in HIGHS_NAME_OPTIONS:
+        try:
+            got = h.getOptionValue(key)
+        except Exception:  # noqa: BLE001 — unknown option on this build
+            continue
+        if isinstance(got, tuple):
+            status, val = got
+            if ok is not None and status != ok:
+                continue
+        else:
+            val = got
+        if val:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -4174,6 +4232,7 @@ class Problem:
         streaming: bool = True,
         save_memory: bool = False,
         tmp_dir: str | os.PathLike | None = None,
+        highs_names: str = "always",
     ) -> Solution:
         """Solve the LP and return a :class:`Solution`.
 
@@ -4237,7 +4296,20 @@ class Problem:
             same filesystem as its workspace, or a per-job scratch
             directory) instead of the system default.  Ignored when
             ``save_memory=False``.
+        highs_names
+            When the column / row names are passed to HiGHS (see
+            :data:`HIGHS_NAME_OPTIONS`): ``"always"`` (default), ``"auto"``
+            (just before ``run()``, only if a name-writing HiGHS option is
+            on) or ``"never"``.  HiGHS does not use names to solve, so the
+            solution is the same in every mode; leaving them out saves
+            HiGHS' copy of every name.  ``Solution.col_names`` /
+            ``row_names`` are unchanged; ``Solution.highs_names_passed``
+            says whether the kept HiGHS instance has them, and
+            :meth:`Solution.pass_names_to_highs` passes them later.  A
+            ``save_memory`` solve always passes them: its MPS round trip
+            through HiGHS carries the names.
         """
+        _check_highs_names(highs_names)
         # Guard against re-entry on a Problem whose LP source has
         # already been dropped — see ``save_memory`` above.  We can
         # neither rebuild the matrix from ``self._cstrs`` (cleared) nor
@@ -4263,6 +4335,7 @@ class Problem:
                 keep_solver=keep_solver,
                 save_memory=save_memory,
                 tmp_dir=tmp_dir,
+                highs_names=highs_names,
             )
 
         if save_memory:
@@ -4315,6 +4388,7 @@ class Problem:
             view,
             options=opts,
             keep_solver=keep_solver,
+            highs_names=highs_names,
         )
         if _sp_on_ns:
             _sp_emit_ns("nonstreaming_highs_run_done")
@@ -4345,6 +4419,8 @@ class Problem:
             row_names=row_names_out,
             vars=dict(self._vars),
             highs=sol_highs,
+            highs_names_passed=result._highs_names_passed,
+            highs_name_passer=result._highs_name_passer if sol_highs is not None else None,
         )
 
     def build_only(
@@ -5750,8 +5826,12 @@ class Problem:
         _mps_out_path: str | None = None,
         _build_only: bool = False,
         tmp_dir: str | os.PathLike | None = None,
+        highs_names: str = "always",
     ) -> Solution | None:
         _sp_emit, _sp_on = _make_solve_profile_emitter()
+        # The save_memory round trip writes the MPS through HiGHS and reads
+        # the names back from it, so names always go to HiGHS there.
+        names_mode = "always" if (save_memory or _build_only) else _check_highs_names(highs_names)
         # Small-coefficient cutoff threshold (0.0 ⇒ OFF).  Read once here
         # so every per-family floor below shares the same value.
         _coef_zero_thr = float(getattr(self, "coef_zero_threshold", 0.0) or 0.0)
@@ -5952,13 +6032,17 @@ class Problem:
         if _sp_on:
             _sp_emit("integrality_set", n_int_cols=int(col_int.sum()))
 
-        # Column names — passColName is per-item but cheap.
-        for i, nm in enumerate(col_names):
-            if nm is not None:
-                h.passColName(i, nm)
+        # Column names — passColName is per-item but cheap.  Unless
+        # ``highs_names="always"``, they wait for the decision before run().
+        def _pass_col_names(h: highspy.Highs) -> None:
+            for i, nm in enumerate(col_names):
+                if nm is not None:
+                    h.passColName(i, nm)
 
-        if _sp_on:
-            _sp_emit("col_names_passed", n_cols=n_cols)
+        if names_mode == "always":
+            _pass_col_names(h)
+            if _sp_on:
+                _sp_emit("col_names_passed", n_cols=n_cols)
 
         # Under save_memory, HiGHS now owns the canonical name
         # storage, so we can drop the Python-side list.  At N=3000 dense
@@ -6617,11 +6701,14 @@ class Problem:
         # ``row_<idx>`` name so diagnostics still work and the API
         # contract is satisfied.  The right long-term fix is for the
         # caller to assign a name to every row before solving.
-        for i, nm in enumerate(row_names):
-            h.passRowName(i, nm if nm is not None else f"row_{i}")
+        def _pass_row_names(h: highspy.Highs) -> None:
+            for i, nm in enumerate(row_names):
+                h.passRowName(i, nm if nm is not None else f"row_{i}")
 
-        if _sp_on:
-            _sp_emit("row_names_passed", n_rows=n_rows)
+        if names_mode == "always":
+            _pass_row_names(h)
+            if _sp_on:
+                _sp_emit("row_names_passed", n_rows=n_rows)
 
         # Same logic as col_names above — HiGHS now owns the row name
         # storage; the Python list is ~1.1 GB of redundant strings at
@@ -6977,6 +7064,14 @@ class Problem:
                 if _sp_on:
                     _sp_emit("primal_seed", injected=0, error=type(exc).__name__)
 
+        names_passed = names_mode == "always"
+        if names_mode == "auto" and highs_options_need_names(h):
+            _pass_col_names(h)
+            _pass_row_names(h)
+            names_passed = True
+            if _sp_on:
+                _sp_emit("names_passed_for_options", n_cols=n_cols, n_rows=n_rows)
+
         h.run()
 
         if _sp_on:
@@ -6997,8 +7092,15 @@ class Problem:
                 n_cols=n_cols,
             )
 
+        name_passer = None
         if keep_solver:
             sol_highs: highspy.Highs | None = h
+            if not names_passed:
+
+                def name_passer() -> None:
+                    _pass_col_names(sol_highs)
+                    _pass_row_names(sol_highs)
+
         else:
             sol_highs = None
             del h
@@ -7014,6 +7116,8 @@ class Problem:
             vars=dict(self._vars),
             highs=sol_highs,
             streamed_lp_ranges=streamed_lp_ranges,
+            highs_names_passed=names_passed,
+            highs_name_passer=name_passer,
         )
 
 
@@ -7067,6 +7171,8 @@ class Solution:
         col_dual: np.ndarray | None = None,
         highs: highspy.Highs | None = None,
         streamed_lp_ranges: dict | None = None,
+        highs_names_passed: bool = True,
+        highs_name_passer: Callable[[], None] | None = None,
     ):
         self.optimal = optimal
         self.obj = obj
@@ -7091,6 +7197,23 @@ class Solution:
         # ``(abs_min, abs_max) | None``.  ``None`` when the solution was
         # synthesised outside a streaming solve.
         self.streamed_lp_ranges = streamed_lp_ranges
+        # Whether ``highs`` holds the LP names (``highs_names`` on the
+        # solve).  ``False`` only when a solve kept them out of HiGHS; then
+        # HiGHS reports no names (or its own ``c<i>`` / ``r<i>`` in files it
+        # writes) and ``col_names`` / ``row_names`` above are the names.
+        self.highs_names_passed = highs_names_passed
+        self._highs_name_passer = highs_name_passer
+
+    def pass_names_to_highs(self) -> None:
+        """Pass the LP names to the kept HiGHS instance, if the solve left
+        them out (``highs_names="auto"`` / ``"never"``).  Idempotent; a
+        no-op when the names are already there or no instance is kept.
+        Call before ``highs.writeModel`` / ``writeSolution`` / ``writeBasis``
+        when those files should carry the LP names."""
+        if self.highs_names_passed or self.highs is None or self._highs_name_passer is None:
+            return
+        self._highs_name_passer()
+        self.highs_names_passed = True
 
     @property
     def max_primal_infeasibility(self) -> float:
@@ -7327,6 +7450,20 @@ class Solution:
 _COMPACT_VERIFY_TOL: float = 1e-6
 
 
+def _pass_warm_names(h: highspy.Highs, col_names: list, row_names: list) -> None:
+    """Pass a :class:`WarmProblem` build's names to HiGHS."""
+    for i, n in enumerate(col_names):
+        # Canonical matrix uses "" for unused col slots; skip those.
+        if n:
+            h.passColName(i, n)
+    for i, n in enumerate(row_names):
+        # HiGHS' pybind11 binding requires ``str``; the canonical
+        # matrix may carry ``None`` (or ``""``) for unnamed rows.
+        # Fall back to a synthetic ``row_<idx>`` so the API contract
+        # is satisfied and diagnostics remain useful.
+        h.passRowName(i, n if n else f"row_{i}")
+
+
 class WarmProblem:
     """Warm-update wrapper around a :class:`Problem`.
 
@@ -7364,12 +7501,23 @@ class WarmProblem:
     ``Var`` frames and the HiGHS column / row names).  The ``update_*``
     calls change values, never labels: a :class:`Param` is matched to rows
     and columns by those build labels.
+
+    ``highs_names`` chooses when the column / row names go to HiGHS:
+    ``"always"`` (default; right after the build), ``"auto"`` (before a
+    ``run()`` at which an option in :data:`HIGHS_NAME_OPTIONS` is on) or
+    ``"never"``.  HiGHS solves the same LP without them; leaving them out
+    saves its copy of every name.  ``Solution.col_names`` / ``row_names``
+    are the same in every mode, and :meth:`pass_names_to_highs` passes the
+    names on demand (e.g. before ``Solution.highs.writeModel``).
     """
 
-    def __init__(self, problem: Problem):
+    def __init__(self, problem: Problem, *, highs_names: str = "always"):
         if not isinstance(problem, Problem):
             raise TypeError("WarmProblem requires a polar_high.Problem instance")
         self._p = problem
+        self._highs_names = _check_highs_names(highs_names)
+        # Whether the live HiGHS instance holds the names (set at build).
+        self._highs_names_passed = False
         # Lazy state — populated on first solve()
         self._h: highspy.Highs | None = None
         self._n_cols: int = 0
@@ -7955,8 +8103,10 @@ class WarmProblem:
         if self._row_names is not None:
             self._row_names.append(name)
         # Mirror the cached name into the live HiGHS model so MPS/name
-        # readers (Solution.highs consumers) see the appended row too.
-        self._h.passRowName(row_id, name)
+        # readers (Solution.highs consumers) see the appended row too; when
+        # the names are kept out of HiGHS, ``pass_names_to_highs`` adds it.
+        if self._highs_names_passed:
+            self._h.passRowName(row_id, name)
         # Retain the cut so :meth:`compact_cuts` can classify + drop it later.
         # The first appended cut fixes the build-time / cut row boundary.
         if self._first_cut_row is None:
@@ -7991,7 +8141,8 @@ class WarmProblem:
         self._n_cols += 1
         if self._col_names is not None:
             self._col_names.append(name)
-        self._h.passColName(col_id, name)
+        if self._highs_names_passed:
+            self._h.passColName(col_id, name)
         # Register as a recourse column so :meth:`compact_cuts` (dominance
         # policy) can group retained cuts by the recourse variable they bound.
         self._recourse_cols.add(col_id)
@@ -8579,6 +8730,7 @@ class WarmProblem:
         h = self._h
         # Idempotent: installs once on the first solve, no-ops on reuse.
         route_highs_log_to_stdout(h)
+        self._pass_names_if_options_need_them()
         h.run()
         if retry_on_unknown and h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
             # The warm re-solve did NOT return a certified optimum.  Appending
@@ -8593,6 +8745,45 @@ class WarmProblem:
             h.clearSolver()
             h.run()
         return self._build_solution(h)
+
+    def pass_names_to_highs(self) -> None:
+        """Pass the column / row names to the live HiGHS instance now.
+
+        Idempotent (a no-op once the names are there, which is always the
+        case under ``highs_names="always"``).  Call it before reading names
+        back from HiGHS or writing a HiGHS file that should carry them
+        (``writeModel``, ``writeSolution``, ``writeBasis``) when the
+        WarmProblem was built with ``"auto"`` or ``"never"``.  Rows and
+        columns appended later (:meth:`add_cut_row`,
+        :meth:`add_recourse_col`) then pass their names as they are added."""
+        self._require_built()
+        if self._highs_names_passed:
+            return
+        _pass_warm_names(self._h, self._col_names, self._row_names)
+        self._highs_names_passed = True
+
+    def _solution_name_passer(self) -> Callable[[], None] | None:
+        """``Solution.pass_names_to_highs`` hook.  Holds the WarmProblem only
+        weakly, so a kept Solution does not keep the build alive."""
+        if self._highs_names_passed:
+            return None
+        wp_ref = weakref.ref(self)
+        h, col_names, row_names = self._h, self._col_names, self._row_names
+
+        def passer() -> None:
+            wp = wp_ref()
+            if wp is not None and wp._h is h:
+                wp.pass_names_to_highs()
+            else:
+                _pass_warm_names(h, col_names, row_names)
+
+        return passer
+
+    def _pass_names_if_options_need_them(self) -> None:
+        if self._highs_names != "auto" or self._highs_names_passed:
+            return
+        if highs_options_need_names(self._h):
+            self.pass_names_to_highs()
 
     def _repin_scheduler(self) -> None:
         """``resetGlobalScheduler`` before a re-solve when this instance sets ``threads`` (> 0): the next
@@ -8627,6 +8818,8 @@ class WarmProblem:
             row_names=self._row_names,
             vars=dict(self._p._vars),
             highs=h,
+            highs_names_passed=self._highs_names_passed,
+            highs_name_passer=self._solution_name_passer(),
         )
 
     def solve_with_fallback(self, fallback_options: dict) -> tuple[Solution, str]:
@@ -8670,6 +8863,7 @@ class WarmProblem:
                         f"(status={status!r})"
                     )
             h.clearSolver()
+            self._pass_names_if_options_need_them()
             h.run()
             return self._build_solution(h), "fallback"
         finally:
@@ -9308,6 +9502,11 @@ class WarmProblem:
             kInt = highspy.HighsVarType.kInteger
             integ_arr = np.where(m.col_int, kInt, kCont)
             lp.integrality_ = integ_arr.tolist()
+            del integ_arr
+        # ``lp`` holds its own copies of the sentinel-translated bounds; the
+        # numpy temporaries are not read again, so free them before
+        # passModel copies the LP a second time.
+        del col_lb_h, col_ub_h, row_lb_h, row_ub_h
         if _sp_on:
             _sp_emit(
                 "lp_assembled",
@@ -9364,28 +9563,23 @@ class WarmProblem:
         if _sp_on:
             _sp_emit("highs_passmodel_pre", n_cols=int(n_cols), n_rows=int(n_rows))
         h.passModel(lp)
+        # HiGHS now holds its own copy of the whole LP (matrix included);
+        # free the intermediate before the names and the solve.
+        del lp
         if _sp_on:
             _sp_emit("highs_passmodel_post")
-        for i, n in enumerate(col_names):
-            # Canonical matrix uses "" for unused col slots; skip those.
-            if n:
-                h.passColName(i, n)
-        if _sp_on:
-            _sp_emit("highs_col_names_passed", n_col_names=len(col_names))
-        for i, n in enumerate(row_names):
-            # HiGHS' pybind11 binding requires ``str``; the canonical
-            # matrix may carry ``None`` (or ``""``) for unnamed rows.
-            # Fall back to a synthetic ``row_<idx>`` so the API contract
-            # is satisfied and diagnostics remain useful.
-            h.passRowName(i, n if n else f"row_{i}")
-        if _sp_on:
-            _sp_emit("highs_row_names_passed", n_row_names=len(row_names))
 
         self._h = h
         self._n_cols = int(n_cols)
         self._n_rows = int(n_rows)
         self._col_names = col_names
         self._row_names = row_names
+        if self._highs_names == "always":
+            self.pass_names_to_highs()
+            if _sp_on:
+                _sp_emit(
+                    "highs_names_passed", n_col_names=len(col_names), n_row_names=len(row_names)
+                )
 
         # ------------------------------------------------------------------
         # Warm-start basis injection (spec §4.1, in-process default-path arm).
@@ -9403,9 +9597,10 @@ class WarmProblem:
         # correct after a rejected / absent ``setBasis``).  Mirrors the
         # streaming hook in :meth:`Problem._solve_streaming`.
         if self._warm_basis is not None:
-            # Names exactly as HiGHS received them: the ``passRowName`` loop
-            # above renders an empty/None name as the synthetic ``row_<i>``,
-            # so the fingerprint and the basis-build see the same name-set.
+            # Names as :meth:`pass_names_to_highs` renders them (an empty/None
+            # row name becomes the synthetic ``row_<i>``) whether or not they
+            # are in HiGHS, so the fingerprint and the basis-build see the
+            # same name-set in every ``highs_names`` mode.
             warm_row_names = [n if n else f"row_{i}" for i, n in enumerate(row_names)]
             try:
                 target_fp = basis_fingerprint(col_names, warm_row_names)

@@ -62,6 +62,11 @@ result = (
 than the individual dimension columns — parse it if you need to join on
 component parts.
 
+If the solve was run with `highs_names="auto"` or `"never"` (see
+[Keeping LP names out of HiGHS](performance.md#keeping-lp-names-out-of-highs)),
+call `sol.pass_names_to_highs()` before `writeModel` so the file carries
+the LP names.
+
 `writeModel("model.lp")` produces human-readable LP format and is the
 fastest route to "what did the kernel actually send to HiGHS" — diff
 against a reference build of the same model to locate mis-wired terms.

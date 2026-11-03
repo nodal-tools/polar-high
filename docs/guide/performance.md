@@ -204,6 +204,36 @@ specific volume (e.g. the same filesystem as the workspace, or a
 per-job scratch directory). The argument is ignored when
 `save_memory=False`.
 
+## Keeping LP names out of HiGHS
+
+HiGHS keeps its own copy of every column and row name, plus a name
+hash, for the life of the instance. On a 6 M-column / 7.5 M-row LP that
+is about 3 GB. HiGHS never reads the names while solving; only its own
+file writers use them. Python keeps the same names on
+`Solution.col_names` / `row_names`, so they are not needed in HiGHS
+unless HiGHS writes a file.
+
+`highs_names` on `Problem.solve(...)` and `WarmProblem(...)` chooses
+when the names go to HiGHS:
+
+- `"always"` (default): right after the LP is loaded, as before.
+- `"auto"`: just before `run()`, and only if a HiGHS option that writes
+  names is on (`polar_high.engine.HIGHS_NAME_OPTIONS`:
+  `write_solution_to_file`, `write_model_to_file`,
+  `write_presolved_model_to_file`, `write_basis_file`,
+  `write_iis_model_file`). The check reads the live instance's options,
+  so it sees options from any source.
+- `"never"`: only when you ask.
+
+The solution is the same in every mode. `Solution.highs_names_passed`
+says whether the kept HiGHS instance has the names, and
+`Solution.pass_names_to_highs()` / `WarmProblem.pass_names_to_highs()`
+pass them on demand, for example before `sol.highs.writeModel(...)`.
+Without them, HiGHS reports no names and writes its own `c0`, `r0`, ….
+`save_memory=True` always passes the names, because its MPS round trip
+goes through HiGHS. `Problem.write_mps` renders names from Python, so
+it does not depend on this setting.
+
 ## Profiling
 
 `Problem.solve()` is straightforward to profile with `cProfile` or
