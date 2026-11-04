@@ -8822,7 +8822,9 @@ class WarmProblem:
         i.e. a stale-basis transient (kUnknown / kSolveError) or a
         spurious kUnbounded / kInfeasible / primal-infeasible miss — do we
         drop the basis with ``clearSolver()`` and re-run ONCE (the proven
-        cold fallback) to re-certify the true status.  Used by the Benders
+        cold fallback) to re-certify the true status; if that cold run is
+        still ``kUnknown``, it passes the instance's own LP back to HiGHS and
+        runs once more.  Used by the Benders
         master, which appends a cut each iteration; on a well-scaled
         master the warm path stays ``kOptimal`` and the fallback never
         fires.
@@ -8855,6 +8857,13 @@ class WarmProblem:
             # the warm path failed to certify, never on the hot common case.
             h.clearSolver()
             h.run()
+            if h.getModelStatus() == highspy.HighsModelStatus.kUnknown:
+                # The cold run did not determine the status either.  clearSolver() keeps solver state that a badly
+                # scaled LP can carry into the cold run (a few rows left just outside the tolerance after the
+                # clean-up solve); passing the instance's own LP back replaces that state.  The LP, its names and
+                # the options are unchanged, so column and row ids stay valid.
+                h.passModel(h.getLp())
+                h.run()
         return self._build_solution(h)
 
     def pass_names_to_highs(self) -> None:

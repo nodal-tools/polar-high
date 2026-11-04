@@ -178,3 +178,65 @@ def test_default_retry_false_is_byte_identical() -> None:
     assert np.array_equal(legacy.col_value, explicit.col_value)
     assert np.array_equal(legacy.row_dual, explicit.row_dual)
     assert np.array_equal(legacy.col_dual, explicit.col_dual)
+
+
+# -- Test 4: cold run still kUnknown ⇒ the LP is passed back and run once more
+
+
+class _UnknownUntilModelPassed:
+    """A HiGHS handle whose runs end in ``kUnknown`` until ``passModel`` is called (as the in-place instance of a
+    badly scaled master can after ``clearSolver()``); afterwards runs are passed through.  Records each call."""
+
+    def __init__(self, h) -> None:
+        self._h = h
+        self.calls: list[str] = []
+        self._passed = False
+
+    def __getattr__(self, name):
+        return getattr(self._h, name)
+
+    def run(self):
+        self.calls.append("run")
+        return self._h.run()
+
+    def clearSolver(self):
+        self.calls.append("clearSolver")
+        return self._h.clearSolver()
+
+    def passModel(self, lp):
+        self.calls.append("passModel")
+        self._passed = True
+        return self._h.passModel(lp)
+
+    def getModelStatus(self):
+        import highspy
+
+        return self._h.getModelStatus() if self._passed else highspy.HighsModelStatus.kUnknown
+
+
+def test_cold_kunknown_passes_the_lp_back_and_runs_once_more() -> None:
+    """When the cold fallback is still ``kUnknown``, ``retry_on_unknown=True`` passes the instance's own LP back
+    to HiGHS, runs once more and returns that run's certified optimum.  Hand value: the well-scaled master with
+    the cut ``eta + 2 f >= 50`` (``f <= 10``, ``C >= f``, objective ``C + eta``): raising ``f`` lowers ``eta`` by
+    2 and raises ``C`` by 1, so ``f = C = 10``, ``eta = 30`` and the objective is 40."""
+    wp = fp.WarmProblem(_build_master(cost=1.0, eta_floor=-1.0e2))
+    wp.solve()
+    f_col = wp.col_id_of_var("f", (0,))
+    eta_col = wp.col_id_of_var("eta", (0,))
+    wp.add_cut_row([eta_col, f_col], [1.0, 2.0], 50.0)
+    proxy = _UnknownUntilModelPassed(wp._h)
+    wp._h = proxy
+
+    sol = wp.solve(retry_on_unknown=True)
+
+    assert proxy.calls == [
+        "run",
+        "clearSolver",
+        "run",
+        "passModel",
+        "run",
+    ]  # warm, cold, reloaded LP
+    assert sol.optimal
+    assert sol.obj == pytest.approx(40.0, abs=1e-9)
+    assert sol.col_value[f_col] == pytest.approx(10.0, abs=1e-9)
+    assert sol.col_value[eta_col] == pytest.approx(30.0, abs=1e-9)

@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`WarmProblem.solve(retry_on_unknown=True)` reloads the LP when the cold
+  retry is still `kUnknown`.** On a badly scaled LP (a Benders master with
+  cut slopes near 1e9), `clearSolver()` can keep solver state that leaves
+  the cold run `kUnknown` with a few rows just outside the tolerance, while
+  the same LP solves to optimality in a fresh instance.  The retry now
+  passes the instance's own LP back to HiGHS and runs once more; the LP,
+  names, options and column / row ids are unchanged.
 - **A Var whose rows share columns** (built directly from a registered
   family's ``col_id``s, e.g. one column held over a run of time steps and
   indexed on every step; new `Var.col_ids_unique`): a `Sum` over its rows
