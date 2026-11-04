@@ -1801,6 +1801,15 @@ def _build_block_coo_plan(
     return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
 
 
+def _sum_is_relabel(var: Var, reduce_dims) -> bool:
+    """Whether a ``Sum`` over ``reduce_dims`` of a term on ``var`` is a pure
+    relabel: every reduced dim is a Var dim and every Var row has its own
+    column, so no two summed rows share a ``(row, col)`` cell.  A Var whose
+    rows share columns (:attr:`Var.col_ids_unique` False) makes the Sum
+    combine coefficients even over Var dims."""
+    return set(reduce_dims).issubset(set(var.dims)) and var.col_ids_unique
+
+
 def _sum_block_coo_classify(
     term: _Term,
     axis_cols: list[str],
@@ -2224,9 +2233,10 @@ def _build_sum_block_coo_plan(
     var_source = meta.var_source
     var_dims = list(var_source.dims)
 
-    # --- Relabel fast-path: reduce_dims ⊆ var.dims ⇒ single-element groups
-    # ⇒ no summation ⇒ skip the full-product sort + reduceat.  Bit-identical.
-    if set(dense_spec["reduce_dims"]).issubset(set(var_dims)):
+    # --- Relabel fast-path: reduce_dims ⊆ var.dims (and one column per Var
+    # row) ⇒ single-element groups ⇒ no summation ⇒ skip the full-product
+    # sort + reduceat.  Bit-identical.
+    if _sum_is_relabel(var_source, dense_spec["reduce_dims"]):
         if os.environ.get("POLAR_HIGH_BLOCK_COO_PROFILE") == "1":
             sys.stderr.write("[block_coo profile]\tkind=sum\tpath=relabel\n")
             sys.stderr.flush()
@@ -2592,9 +2602,25 @@ class Var:
     are resolved to numbers at :meth:`Problem.add_var` time and are NOT
     tracked afterwards, so :meth:`WarmProblem.declare_mutable` /
     :meth:`WarmProblem.update_param` refuse these names (change such
-    bounds with :meth:`WarmProblem.set_col_bounds` instead)."""
+    bounds with :meth:`WarmProblem.set_col_bounds` instead).
 
-    __slots__ = ("name", "dims", "frame", "lower", "upper", "integer", "bound_param_names")
+    A Var built directly (not through :meth:`Problem.add_var`) may map
+    several frame rows to one ``col_id`` — e.g. a variable that keeps one
+    column over a run of time steps, indexed on every step.  Terms built
+    from it are summed per ``(row, col)`` like any duplicate cell;
+    :attr:`col_ids_unique` tells the builders that a Sum over its rows may
+    combine coefficients."""
+
+    __slots__ = (
+        "name",
+        "dims",
+        "frame",
+        "lower",
+        "upper",
+        "integer",
+        "bound_param_names",
+        "_col_ids_unique",
+    )
 
     def __init__(
         self,
@@ -2615,6 +2641,19 @@ class Var:
         self.upper = upper
         self.integer = integer
         self.bound_param_names: tuple[str, ...] = ()
+        self._col_ids_unique: bool | None = None
+
+    @property
+    def col_ids_unique(self) -> bool:
+        """True when every frame row has its own ``col_id`` (always for a
+        family declared with :meth:`Problem.add_var` and its renamed
+        views).  Computed once per Var."""
+        if self._col_ids_unique is None:
+            ids = self.frame["col_id"].to_numpy()
+            self._col_ids_unique = bool(
+                ids.size < 2 or (np.diff(ids) > 0).all() or np.unique(ids).size == ids.size
+            )
+        return self._col_ids_unique
 
     @property
     def has_elementwise_bounds(self) -> bool:
@@ -8544,6 +8583,19 @@ class WarmProblem:
         rows = cells["rows"]
         cols = cells["cols"]
         n = rows.size
+        # ``changeCoeff`` sets a whole cell, so a cell reached by two tracked
+        # coefficients (a Var whose rows share a column, or the Param in two
+        # terms of one row) would keep only the last one written.
+        n_cells = np.unique(
+            np.stack([np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64)]), axis=1
+        )
+        if n_cells.shape[1] != n:
+            raise ValueError(
+                f"update_param({param_name!r}): {n - n_cells.shape[1]} LP cell(s) are reached by more "
+                "than one tracked coefficient (a Var whose rows share a column, or the Param in two "
+                "terms of one row); a per-cell update cannot express their sum.  Rebuild the Problem "
+                "with the new values instead."
+            )
 
         # Resolve new value for every tracked cell.
         if isinstance(new_param, (int, float)):
@@ -9193,7 +9245,9 @@ class WarmProblem:
                         if _sum_block_spec is not None:
                             _keep_set = set(_sum_block_spec["keep"])
                             _var_dims_set = set(_sum_block_spec["var_dims"])
-                            _relabel = set(_sum_block_spec["reduce_dims"]).issubset(_var_dims_set)
+                            _relabel = _sum_is_relabel(
+                                term.sum_block_meta.var_source, _sum_block_spec["reduce_dims"]
+                            )
                             _keep_in_var = _keep_set.issubset(_var_dims_set)
                             _tracked_ok = all(
                                 set(pobj.dims).issubset(_keep_set)

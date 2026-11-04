@@ -357,6 +357,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         _block_coo_disabled,
         _emit_block_coo_path,
         _sum_block_coo_classify,
+        _sum_is_relabel,
         _verify_dense_sorted,
     )
     from ._coef_walk import (
@@ -714,7 +715,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         # Relabel contract: every reduced dim is a Var dim (single-element
         # col_id groups).  For an objective ``reduce_dims`` is the full open
         # set; with no map extras the open set is exactly ``var.dims``.
-        if not set(meta.reduce_dims).issubset(var_dim_set):
+        if not set(meta.reduce_dims).issubset(var_dim_set) or not var.col_ids_unique:
             return None
         # Suffix contract: the Var's dims must END WITH ``dense_axes`` in
         # declared order so block-COO can slice the dense suffix.
@@ -1229,7 +1230,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     if _sum_spec is not None:
                         _sm = term.sum_block_meta
                         _reduce_dims = set(_sum_spec["reduce_dims"])
-                        if _reduce_dims.issubset(set(_sm.var_source.dims)):
+                        if _sum_is_relabel(_sm.var_source, _reduce_dims):
                             _verify_dense_sorted(
                                 _sm.var_source.frame,
                                 _sum_spec["non_dense_dims"],

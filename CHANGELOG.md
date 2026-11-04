@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.12.1] — unreleased
+
+### Fixed
+
+- **A Var whose rows share columns** (built directly from a registered
+  family's ``col_id``s, e.g. one column held over a run of time steps and
+  indexed on every step; new `Var.col_ids_unique`): a `Sum` over its rows
+  combines coefficients even when every summed dim is a Var dim.  The
+  block-COO builders, the warm-start parameter tracker and the range
+  readout no longer treat such a Sum as a relabel: the readout reported
+  the per-row coefficients instead of the summed cells (for example 24
+  times too small for a daily column on hourly rows), and
+  `WarmProblem.update_param` rewrote a summed cell with one row's
+  coefficient.  Problems built only from `Problem.add_var` families are
+  unchanged.
+- **`WarmProblem.update_param` refuses a Param whose tracked cells repeat
+  a `(row, col)`** (the Param in two terms of one row): `changeCoeff`
+  sets the whole cell, so only the last term was kept.
+
 ## [3.12.0] — 2026-11-03
 
 ### Added

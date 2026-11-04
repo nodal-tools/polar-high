@@ -91,6 +91,7 @@ from ..engine import (
     _build_sum_block_coo_plan,
     _emit_block_coo_path,
     _sum_block_coo_classify,
+    _sum_is_relabel,
     _SumBlockCooFallback,
     _verify_dense_sorted,
 )
@@ -1685,9 +1686,7 @@ def bounded_coefficient_walk(
     if (
         mode == "constraint"
         and recipe.sum_block_meta is not None
-        and not set(recipe.sum_block_meta.reduce_dims).issubset(
-            set(recipe.sum_block_meta.var_source.dims)
-        )
+        and not _sum_is_relabel(recipe.sum_block_meta.var_source, recipe.sum_block_meta.reduce_dims)
     ):
         batch_rows = max(batch_rows, n) if n > 0 else batch_rows
 
