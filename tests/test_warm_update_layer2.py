@@ -109,6 +109,7 @@ class _Spy:
         self.bounds: list[tuple[np.ndarray, np.ndarray]] = []
         self.costs: list[np.ndarray] = []
         self.coeffs: list[float] = []
+        self.cells: dict[tuple[int, int], float] = {}
 
     def changeRowsBounds(self, n, idx, lb, ub):  # noqa: N802 (HiGHS API)
         self.bounds.append((np.array(lb, dtype=np.float64), np.array(ub, dtype=np.float64)))
@@ -120,6 +121,7 @@ class _Spy:
 
     def changeCoeff(self, r, c, v):  # noqa: N802
         self.coeffs.append(float(v))
+        self.cells[(int(r), int(c))] = float(v)
         return self._h.changeCoeff(r, c, v)
 
     def __getattr__(self, name):
@@ -276,7 +278,9 @@ def test_rhs_floor_is_judged_in_user_space(frame):
 
 def test_update_param_floor_is_judged_in_user_space():
     """rf·cf = 2**-14: a tracked user coefficient of 1 (scaled 6.1e-5) is kept,
-    a user coefficient of 1e-8 is floored."""
+    a user coefficient of 1e-8 is floored.  Checked per cell (row t, column
+    t): update_param writes the cells in the order the build's join produced
+    them, which polars does not guarantee."""
     rf, cf = 2.0**-7, 2.0**-7
     wp = fp.WarmProblem(_single_row_problem(rf, cf, coef_name="p_coef"))
     wp.declare_mutable("p_coef")
@@ -284,4 +288,4 @@ def test_update_param_floor_is_judged_in_user_space():
     spy = _Spy(wp._h)
     wp._h = spy
     wp.update_param("p_coef", _p([1.0, 1e-8, 1.0]))
-    assert spy.coeffs == [rf * cf, 0.0, rf * cf]
+    assert spy.cells == {(0, 0): rf * cf, (1, 1): 0.0, (2, 2): rf * cf}
