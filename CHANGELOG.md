@@ -20,8 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the per-row coefficients instead of the summed cells (for example 24
   times too small for a daily column on hourly rows), and
   `WarmProblem.update_param` rewrote a summed cell with one row's
-  coefficient.  Problems built only from `Problem.add_var` families are
-  unchanged.
+  coefficient.  `Sum` now adds the rows of one cell of such a term in a
+  fixed order (by the term's dims, with `numpy.add.reduceat` on one
+  contiguous array): a polars group-by summed them per chunk, so the
+  last bits of the coefficient changed from run to run.  Problems built
+  only from `Problem.add_var` families are unchanged.
 - **`WarmProblem.update_param` refuses a Param whose tracked cells repeat
   a `(row, col)`** (the Param in two terms of one row): `changeCoeff`
   sets the whole cell, so only the last term was kept.

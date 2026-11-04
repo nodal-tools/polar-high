@@ -12,6 +12,7 @@ cell, so ``Sum`` over its time dim combines coefficients even though ``t`` is a 
 
 from __future__ import annotations
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -176,3 +177,42 @@ def test_update_param_refuses_repeated_cells() -> None:
     wp.solve()
     with pytest.raises(ValueError, match="more than one tracked coefficient"):
         wp.update_param("p_size", _size(2.0))
+
+
+@pytest.mark.parametrize("block_coo", [True, False])
+def test_shared_cell_sum_does_not_depend_on_row_order(monkeypatch, block_coo) -> None:
+    """The coefficients of one cell are summed in the order of the term's dims with one fixed association,
+    whatever order the Param rows come in.  One column held on t1 … t4 with coefficients 1e16, 1, -1e16, 1,
+    where the association decides the result (0, 1 or 2): every row order gives numpy's sum of the t-ordered
+    values."""
+    if not block_coo:
+        monkeypatch.setenv("POLAR_HIGH_DISABLE_BLOCK_COO", "1")
+    vals = {"t1": 1e16, "t2": 1.0, "t3": -1e16, "t4": 1.0}
+    cells = []
+    for order in (STEPS, list(reversed(STEPS)), ["t2", "t4", "t1", "t3"], ["t4", "t2", "t3", "t1"]):
+        prob = Problem(dense_axes=("d", "t"))
+        reg = prob.add_var(
+            "x", ("p", "d", "t"), pl.DataFrame({"p": ["a"], "d": ["d1"], "t": ["t1"]})
+        )
+        frame = pl.DataFrame({"p": ["a"] * 4, "d": ["d1"] * 4, "t": STEPS}).with_columns(
+            col_id=pl.lit(reg.frame["col_id"][0], dtype=reg.frame.schema["col_id"])
+        )
+        x = Var("x", ("p", "d", "t"), frame)
+        coef = Param(
+            ("p", "d", "t"),
+            pl.DataFrame(
+                {"p": ["a"] * 4, "d": ["d1"] * 4, "t": order, "value": [vals[t] for t in order]}
+            ),
+        )
+        prob.add_cstr(
+            "cap",
+            over=pl.DataFrame({"p": ["a"], "d": ["d1"]}),
+            sense="<=",
+            lhs_terms={"x": Sum(x * coef, over=("t",))},
+            rhs_terms={"c": 100.0},
+        )
+        prob.set_objective(Sum(x * coef), sense="min")
+        cm = prob.canonicalise()
+        cells.append((float(cm.val[0]), float(cm.col_obj[reg.frame["col_id"][0]])))
+    expected = float(np.add.reduceat(np.array([vals[t] for t in STEPS]), [0])[0])
+    assert cells == [(expected, expected)] * 4

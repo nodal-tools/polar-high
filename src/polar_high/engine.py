@@ -2335,7 +2335,9 @@ def _build_sum_block_coo_plan(
         coef=pl.Series("coef", coef, dtype=pl.Float64)
     )
     group_keys = keep + ["col_id"]
-    unreduced = unreduced.sort(group_keys)
+    # A Var whose rows share columns puts several rows of one cell in a group: keep their (deterministic)
+    # accumulator order within the group so the sum's bits do not vary between runs.
+    unreduced = unreduced.sort(group_keys, maintain_order=not var_source.col_ids_unique)
     m = unreduced.height
     if m == 0:
         return _empty_block_coo_frame(seed_df, keep_dims)
@@ -2930,6 +2932,10 @@ class _Term:
     the chain in-block.  ``None`` for every other term, including
     non-block-eligible Sums and nested / re-reduced Sums (never
     propagated through later ops).  Currently INERT — read nowhere.
+
+    ``shared_cols`` — the term may hold one ``col_id`` on several rows
+    (see :attr:`Var.col_ids_unique`); propagated through every op so a
+    later :func:`Sum` reduces it in a fixed order.
     """
 
     __slots__ = (
@@ -2941,6 +2947,7 @@ class _Term:
         "where_frames",
         "where_map_frames",
         "sum_block_meta",
+        "shared_cols",
     )
 
     def __init__(
@@ -2953,6 +2960,7 @@ class _Term:
         where_frames: tuple[pl.LazyFrame, ...] | None = None,
         where_map_frames: tuple[tuple[pl.LazyFrame, frozenset[str]], ...] | None = None,
         sum_block_meta: SumBlockMeta | None = None,
+        shared_cols: bool = False,
     ):
         if isinstance(lazy, pl.DataFrame):
             lazy = lazy.lazy()
@@ -2983,6 +2991,10 @@ class _Term:
             self.where_map_frames = tuple(where_map_frames)
         # Inert Phase C-2 reconstruction recipe; read nowhere yet.
         self.sum_block_meta = sum_block_meta
+        # True when the term's columns may repeat over its rows: it comes from a Var whose rows share
+        # columns (``Var.col_ids_unique`` False), through any later op (``_term_shares_cols``).  A ``Sum``
+        # over such a term combines coefficients, so it sums them in a fixed order.
+        self.shared_cols = bool(shared_cols)
 
     @property
     def frame(self) -> pl.DataFrame:
@@ -2990,6 +3002,30 @@ class _Term:
         usually consumed once at constraint emission, so we don't
         cache."""
         return self.lazy.collect()
+
+
+def _term_shares_cols(t: _Term) -> bool:
+    """Whether ``t``'s columns may repeat over its rows (``_Term.shared_cols``)."""
+    return t.shared_cols or (t.var_source is not None and not t.var_source.col_ids_unique)
+
+
+def _sum_shared_cells(f: pl.LazyFrame, keep: list[str], reduced: list[str]) -> pl.LazyFrame:
+    """``Sum``'s reduction of a term whose columns repeat over its rows: one ``(keep…, col_id, coef)`` row per
+    group, the group's coefficients summed in a fixed order.
+
+    The rows of a group are several coefficients of one cell.  They are sorted by every dim of the term and
+    summed with ``numpy.add.reduceat`` on one contiguous array, so the bits of the sum depend neither on the
+    row order the joins before produce nor on how the frame happens to be chunked (a polars group-by sums the
+    pieces of a group per chunk)."""
+    keys = [*keep, "col_id"]
+    df = f.sort([*keys, *reduced]).collect()
+    if df.height == 0:
+        return df.select(*keys, "coef").lazy()
+    new_group = pl.any_horizontal([pl.col(c).ne_missing(pl.col(c).shift(1)) for c in keys])
+    starts = np.flatnonzero(df.select(new_group.fill_null(True))[:, 0].to_numpy())
+    sums = np.add.reduceat(df["coef"].to_numpy().astype(np.float64, copy=False), starts)
+    out = df[starts].select(keys).with_columns(coef=pl.Series("coef", sums, dtype=pl.Float64))
+    return out.lazy()
 
 
 def _to_expr(x) -> Expr:
@@ -3061,6 +3097,7 @@ class Expr:
                             if t.sum_block_meta is not None
                             else None
                         ),
+                        shared_cols=_term_shares_cols(t),
                     )
                     for t in self.terms
                 ]
@@ -3111,6 +3148,7 @@ class Expr:
                         where_frames=t.where_frames,
                         where_map_frames=out_where_map_frames,
                         sum_block_meta=fwd_meta,
+                        shared_cols=_term_shares_cols(t),
                     )
                 )
             return Expr(new)
@@ -3159,6 +3197,7 @@ class Expr:
                         where_frames=t.where_frames,
                         where_map_frames=out_where_map_frames,
                         sum_block_meta=fwd_meta,
+                        shared_cols=_term_shares_cols(t),
                     )
                 )
             return Expr(new)
@@ -3357,6 +3396,7 @@ def Lag(var, lag_frame: pl.DataFrame, time_dim: str, lag_col: str) -> Expr:
                 j.select(*[d for d in term_dims if d != time_dim], time_dim, "col_id", "coef"),
                 term_dims,
                 param_sources=t.param_sources,
+                shared_cols=_term_shares_cols(t),
             )
         )
     return Expr(new_terms)
@@ -3421,7 +3461,14 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
             if shared:
                 f, frame_lf_a = _align_enum_join_keys(f, frame_lf, shared)
                 f = f.join(frame_lf_a, on=shared, how="inner")
-            new.append(_Term(f, t.dims + extra, param_sources=t.param_sources))
+            new.append(
+                _Term(
+                    f,
+                    t.dims + extra,
+                    param_sources=t.param_sources,
+                    shared_cols=_term_shares_cols(t),
+                )
+            )
             continue
         if extra:
             # Map effect — the frame introduces new open dims (extras).
@@ -3459,6 +3506,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                     where_frames=t.where_frames,
                     where_map_frames=prev_map + ((frame_lf, frozenset(extra)),),
                     sum_block_meta=fwd_meta,
+                    shared_cols=_term_shares_cols(t),
                 )
             )
             continue
@@ -3480,6 +3528,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                     where_frames=t.where_frames,
                     where_map_frames=t.where_map_frames,
                     sum_block_meta=t.sum_block_meta,
+                    shared_cols=_term_shares_cols(t),
                 )
             )
             continue
@@ -3501,6 +3550,7 @@ def Where(expr, frame: pl.DataFrame) -> Expr:
                 where_frames=prev + (frame_lf,),
                 where_map_frames=t.where_map_frames,
                 sum_block_meta=fwd_meta,
+                shared_cols=_term_shares_cols(t),
             )
         )
     return Expr(new)
@@ -3601,7 +3651,10 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
             over_set = set(over)
             survivors = [(p, s) for (p, s) in psrc if not any(d in over_set for d in p.dims)]
             psrc = survivors if survivors else None
-        if keep:
+        shares = _term_shares_cols(t)
+        if shares:
+            f = _sum_shared_cells(f, list(keep), [d for d in term_dims if d not in keep])
+        elif keep:
             f = (
                 f.group_by(list(keep) + ["col_id"])
                 .agg(pl.col("coef").sum())
@@ -3620,7 +3673,9 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
         out_meta = (
             block_meta if block_meta is not None else (t.sum_block_meta if not over else None)
         )
-        new_terms.append(_Term(f, keep, param_sources=psrc, sum_block_meta=out_meta))
+        new_terms.append(
+            _Term(f, keep, param_sources=psrc, sum_block_meta=out_meta, shared_cols=shares)
+        )
     return Expr(new_terms)
 
 
