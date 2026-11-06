@@ -40,6 +40,7 @@ import highspy
 import numpy as np
 import polars as pl
 
+from ._collect import collect_in_join_order, collect_streaming_in_join_order
 from ._log_routing import route_highs_log_to_stdout
 from ._warm_basis import (
     NamedBasis,
@@ -552,7 +553,7 @@ class Param:
     def frame(self) -> pl.DataFrame:
         """Eager DataFrame view; collects on first read, then caches."""
         if self._frame_cache is None:
-            self._frame_cache = self.lazy.collect()
+            self._frame_cache = collect_in_join_order(self.lazy)
         return self._frame_cache
 
     @classmethod
@@ -850,17 +851,10 @@ def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
     """Collect a lazy plan via the polars streaming engine, with
     fallbacks to the legacy ``streaming=True`` kwarg and plain
     ``collect()``.  Shared by ``_build_canonical_matrix`` and
-    ``WarmProblem._initial_build``'s tracked-source second pass.
+    ``WarmProblem._initial_build``'s tracked-source second pass.  Joins
+    run in their written order (:mod:`polar_high._collect`).
     """
-    try:
-        return plan.collect(engine="streaming")
-    except TypeError:
-        try:
-            return plan.collect(streaming=True)
-        except TypeError:
-            return plan.collect()
-    except Exception:
-        return plan.collect()
+    return collect_streaming_in_join_order(plan)
 
 
 def _apply_where_frames(
@@ -1181,7 +1175,7 @@ def _verify_dense_sorted(
     the contract when the scan finds a descent.
     """
     keys = list(lead_dims) + list(dense_axes)
-    df = frame.collect() if isinstance(frame, pl.LazyFrame) else frame
+    df = collect_in_join_order(frame) if isinstance(frame, pl.LazyFrame) else frame
     if df.height <= 1:
         return
     sorted_ok = df.select(pl.struct(keys).alias("__bc_key")).to_series().is_sorted()
@@ -1508,7 +1502,7 @@ def _build_block_coo_plan_joined(
 
     # Canonical sort so the numpy multiply is deterministic and the
     # surviving-row order is pinned (independent of polars's join order).
-    acc_sorted = acc.sort(sort_keys).collect()
+    acc_sorted = collect_in_join_order(acc.sort(sort_keys))
 
     n = acc_sorted.height
     _emit_block_coo_path("joined")
@@ -1540,7 +1534,9 @@ def _build_block_coo_plan_joined(
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
+    return collect_in_join_order(
+        joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims))
+    )
 
 
 def _build_block_coo_plan(
@@ -1665,7 +1661,7 @@ def _build_block_coo_plan(
         ri_keys = row_index_lf.select(var_on).unique()
         var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
         var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
-    seed = var_lf.select(*var_dims, "col_id").collect()
+    seed = collect_in_join_order(var_lf.select(*var_dims, "col_id"))
 
     n = seed.height
     if n == 0:
@@ -1727,7 +1723,9 @@ def _build_block_coo_plan(
             # np.repeat each block value over its n_dense rows.
             atomic_lf = atomic.lazy
             lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic_lf, shared)
-            aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+            aligned = collect_in_join_order(
+                lt_a.join(at_a, on=shared, how="left", maintain_order="left")
+            )
             if aligned.height != n_lead or aligned["value"].null_count() > 0:
                 # Param duplicated a lead key (expansion) or missed one
                 # (null) ⇒ positional repeat would be wrong ⇒ fall back.
@@ -1751,7 +1749,7 @@ def _build_block_coo_plan(
                 dense_param_vectors.get(id(atomic)) if dense_param_vectors is not None else None
             )
             if dense_vals is None:
-                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                atomic_df = collect_in_join_order(atomic.lazy).sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return _build_block_coo_plan_joined(*_fallback_args)
                 dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
@@ -1775,7 +1773,9 @@ def _build_block_coo_plan(
             # genuinely dense data) but incurs NO re-sort.
             atomic_lf = atomic.lazy
             seed_a, at_a = _align_enum_join_keys(seed.lazy(), atomic_lf, shared)
-            aligned = seed_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+            aligned = collect_in_join_order(
+                seed_a.join(at_a, on=shared, how="left", maintain_order="left")
+            )
             if aligned.height != n or aligned["value"].null_count() > 0:
                 return _build_block_coo_plan_joined(*_fallback_args)
             vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1798,7 +1798,9 @@ def _build_block_coo_plan(
     )
     ri_a, res_a = _align_enum_join_keys(row_index_lf, result.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
+    return collect_in_join_order(
+        joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims))
+    )
 
 
 def _sum_is_relabel(var: Var, reduce_dims) -> bool:
@@ -2037,7 +2039,7 @@ def _build_sum_block_coo_relabel(
         ri_keys = row_index_lf.select(var_on).unique()
         var_lf_a, ri_keys_a = _align_enum_join_keys(var_lf, ri_keys, var_on)
         var_lf = var_lf_a.join(ri_keys_a, on=var_on, how="semi")
-    seed = var_lf.select(*var_dims, "col_id").collect()
+    seed = collect_in_join_order(var_lf.select(*var_dims, "col_id"))
 
     n = seed.height
     if n == 0:
@@ -2087,7 +2089,9 @@ def _build_sum_block_coo_relabel(
             # Lead-only: Param constant within each block.
             atomic_lf = atomic.lazy
             lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic_lf, shared)
-            aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+            aligned = collect_in_join_order(
+                lt_a.join(at_a, on=shared, how="left", maintain_order="left")
+            )
             if aligned.height != n_lead or aligned["value"].null_count() > 0:
                 raise _SumBlockCooFallback("relabel: lead-only mis-align")
             block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -2106,7 +2110,7 @@ def _build_sum_block_coo_relabel(
                 dense_param_vectors.get(id(atomic)) if dense_param_vectors is not None else None
             )
             if dense_vals is None:
-                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                atomic_df = collect_in_join_order(atomic.lazy).sort(dense_dims)
                 if atomic_df.height != n_dense:
                     raise _SumBlockCooFallback("relabel: dense-only sparse")
                 dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
@@ -2123,7 +2127,9 @@ def _build_sum_block_coo_relabel(
             # with maintain_order="left" (order-preserving in polars 1.40.1).
             atomic_lf = atomic.lazy
             seed_a, at_a = _align_enum_join_keys(seed.lazy(), atomic_lf, shared)
-            aligned = seed_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+            aligned = collect_in_join_order(
+                seed_a.join(at_a, on=shared, how="left", maintain_order="left")
+            )
             if aligned.height != n or aligned["value"].null_count() > 0:
                 raise _SumBlockCooFallback("relabel: lead+dense mis-align")
             vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -2154,10 +2160,16 @@ def _build_sum_block_coo_relabel(
     # --- Step 6: project to (*keep, col_id, coef) and attach _rid by
     # inner-joining row_index on ``on`` (⊆ keep).  No group-by, no reduceat:
     # single-element groups mean the relabel is the final coefficient.
+    # Steps 5 and 6 are one lazy plan and must run in this order: joining
+    # row_index first would join on ``on`` minus the map's dims (e.g. (d, t)
+    # without n), a many-to-many product of every node with every flow per
+    # timestep.  ``collect_in_join_order`` keeps polars 2.x from reordering.
     reduced = res_lf.select(*keep, "col_id", "coef")
     ri_a, res_a = _align_enum_join_keys(row_index_lf, reduced, on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
+    return collect_in_join_order(
+        joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims))
+    )
 
 
 def _build_sum_block_coo_plan(
@@ -2278,7 +2290,7 @@ def _build_sum_block_coo_plan(
     # to the accumulator and multiply in the SAME order as the polars chain.
     # We carry ``value`` columns one at a time (rename uniquely) so the
     # accumulator stays narrow.
-    acc = acc_lf.collect()
+    acc = collect_in_join_order(acc_lf)
     n = acc.height
     if n == 0:
         # Empty after filter — emit the empty (_rid, col_id, coef[, *keep])
@@ -2291,17 +2303,19 @@ def _build_sum_block_coo_plan(
         atomic_lf = atomic.lazy.rename({"value": "__sb_val"})
         if shared:
             acc_a, at_a = _align_enum_join_keys(acc.lazy(), atomic_lf, shared)
-            aligned = acc_a.join(
-                at_a.select(*shared, "__sb_val"),
-                on=shared,
-                how="left",
-                maintain_order="left",
-            ).collect()
+            aligned = collect_in_join_order(
+                acc_a.join(
+                    at_a.select(*shared, "__sb_val"),
+                    on=shared,
+                    how="left",
+                    maintain_order="left",
+                )
+            )
         else:
             # Param with no shared dim ⇒ a scalar broadcast (single row) or
             # a cross-product we won't reduce cleanly.  Only a single-row
             # Param is safe (broadcast); anything else falls back.
-            atomic_df = atomic.lazy.collect()
+            atomic_df = collect_in_join_order(atomic.lazy)
             if atomic_df.height != 1:
                 raise _SumBlockCooFallback("no-shared multi-row Param")
             aligned = acc.with_columns(pl.lit(float(atomic_df["value"][0])).alias("__sb_val"))
@@ -2365,7 +2379,9 @@ def _build_sum_block_coo_plan(
     # --- Step 6: attach _rid via row_index inner-join on ``on``.
     ri_a, res_a = _align_enum_join_keys(row_index_lf, reduced.lazy(), on)
     joined_ri = ri_a.join(res_a, on=on, how="inner")
-    return joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims)).collect()
+    return collect_in_join_order(
+        joined_ri.select("_rid", "col_id", "coef", *_block_coo_keep_cols(keep_dims))
+    )
 
 
 def _where_pushdown_disabled() -> bool:
@@ -3001,7 +3017,7 @@ class _Term:
         """Collected eager view.  Each access re-collects — terms are
         usually consumed once at constraint emission, so we don't
         cache."""
-        return self.lazy.collect()
+        return collect_in_join_order(self.lazy)
 
 
 def _term_shares_cols(t: _Term) -> bool:
@@ -3018,7 +3034,7 @@ def _sum_shared_cells(f: pl.LazyFrame, keep: list[str], reduced: list[str]) -> p
     row order the joins before produce nor on how the frame happens to be chunked (a polars group-by sums the
     pieces of a group per chunk)."""
     keys = [*keep, "col_id"]
-    df = f.sort([*keys, *reduced]).collect()
+    df = collect_in_join_order(f.sort([*keys, *reduced]))
     if df.height == 0:
         return df.select(*keys, "coef").lazy()
     new_group = pl.any_horizontal([pl.col(c).ne_missing(pl.col(c).shift(1)) for c in keys])
@@ -4792,10 +4808,7 @@ class Problem:
                     keys_lazy = ri_a.select(on).unique()
                     rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
                     _plan = ri_a.join(rf_pruned, on=on, how="left")
-                    try:
-                        j = _plan.collect(engine="streaming")
-                    except TypeError:
-                        j = _plan.collect(streaming=True)
+                    j = collect_streaming_in_join_order(_plan)
                     if j.height != row_count:
                         raise ValueError(
                             f"constraint {cname!r}: rhs Param has duplicate "
@@ -5166,15 +5179,7 @@ class Problem:
             # chain (streaming engine → streaming kwarg → plain collect)
             # write_mps' Stage A code uses.
             def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
-                try:
-                    return p.collect(engine="streaming")
-                except TypeError:
-                    try:
-                        return p.collect(streaming=True)
-                    except TypeError:
-                        return p.collect()
-                except Exception:
-                    return p.collect()
+                return collect_streaming_in_join_order(p)
 
             # Explicit loop (was a list comprehension) so we can emit
             # per-term collect_start/collected checkpoints without
@@ -5311,7 +5316,7 @@ class Problem:
             # invariant uniform across every ``term.lazy`` consumer.
             _obj_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
             _obj_lazy, _ = _apply_where_map_frames(_obj_lazy, t.dims, t.where_map_frames)
-            f = _obj_lazy.collect()
+            f = collect_in_join_order(_obj_lazy)
             if f.height == 0:
                 del f
                 continue
@@ -6009,7 +6014,7 @@ class Problem:
             # objective loop) — Sum(over=None) already bakes both slots.
             _obj_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
             _obj_lazy, _ = _apply_where_map_frames(_obj_lazy, t.dims, t.where_map_frames)
-            f = _obj_lazy.collect()
+            f = collect_in_join_order(_obj_lazy)
             cids = f["col_id"].to_numpy()
             vals = f["coef"].to_numpy()
             if _obj_rel_on:
@@ -6284,11 +6289,7 @@ class Problem:
                     keys_lazy = ri_a.select(on).unique()
                     rf_pruned = rf_a.join(keys_lazy, on=on, how="semi")
                     _plan = ri_a.join(rf_pruned, on=on, how="left")
-                    try:
-                        j = _plan.collect(engine="streaming")
-                    except TypeError:
-                        # polars < 1.x used the streaming=True kwarg.
-                        j = _plan.collect(streaming=True)
+                    j = collect_streaming_in_join_order(_plan)
                     if j.height != row_count:
                         dup_rids = (
                             j.group_by("_rid")
@@ -6600,15 +6601,7 @@ class Problem:
                 # prerequisite that lets streaming actually prune.
                 # Triple fallback for older polars / unsupported plans.
                 def _collect_one(p: pl.LazyFrame) -> pl.DataFrame:
-                    try:
-                        return p.collect(engine="streaming")
-                    except TypeError:
-                        try:
-                            return p.collect(streaming=True)
-                        except TypeError:
-                            return p.collect()
-                    except Exception:
-                        return p.collect()
+                    return collect_streaming_in_join_order(p)
 
                 # Layer 2 side-vector multiplication (off ⇒ no-op).
                 # fam_rows/cols use _local_ (0..row_count) row ids

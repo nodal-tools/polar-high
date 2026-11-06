@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.12.3] — Unreleased
+
+### Fixed
+
+- **polars 2.x: joins run in the order polar-high writes them.** polars 2.x
+  reorders runs of inner joins by estimated cardinality
+  (`QueryOptFlags.join_order`, on by default).  On the `Sum` relabel emit
+  (`result ⋈ map(p, s → n) ⋈ row_index(n, d, t)`) it joined the row index to
+  the coefficients on `(d, t)` alone first, a many-to-many product: on a
+  FlexTool model the build peaked at 25 GB instead of 9 GB, with the same LP.
+  Every collect of a plan polar-high composes (Param and Var products,
+  `Where`, the `Sum` emits, the row-index attach, the autoscale walks) now
+  runs with `join_order` off.  On polars 1.x, which has no such flag, the
+  collects are unchanged.
+
 ## [3.12.2] — 2026-11-06
 
 ### Fixed

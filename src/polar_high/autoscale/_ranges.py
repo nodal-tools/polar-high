@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from .._collect import collect_in_join_order, collect_streaming_in_join_order
 from ._config import ScalingConfig
 
 # Sentinel for "category has zero non-zero finite entries".  Reported as
@@ -454,30 +455,14 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         plan = lazy_frame.select(_pl.col(col).abs().alias("__abs")).filter(
             _pl.col("__abs").is_finite() & (_pl.col("__abs") > 0)
         )
-        try:
-            df = plan.collect(engine="streaming")
-        except TypeError:
-            try:
-                df = plan.collect(streaming=True)
-            except TypeError:
-                df = plan.collect()
-        except Exception:
-            df = plan.collect()
+        df = collect_streaming_in_join_order(plan)
         if df.height == 0:
             return None, None
         arr = df["__abs"].to_numpy()
         return float(arr.min()), float(arr.max())
 
     def _collect_streaming(plan: _pl.LazyFrame) -> _pl.DataFrame:
-        try:
-            return plan.collect(engine="streaming")
-        except TypeError:
-            try:
-                return plan.collect(streaming=True)
-            except TypeError:
-                return plan.collect()
-        except Exception:
-            return plan.collect()
+        return collect_streaming_in_join_order(plan)
 
     def _reduce_abs(vals: np.ndarray) -> tuple[float | None, float | None]:
         if vals.size == 0:
@@ -610,7 +595,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             if has_lead and not has_dense:
                 # lead-only: one value per leading block; repeat over dense.
                 lt_a, at_a = _align(lead_table.lazy(), atomic.lazy, shared)
-                aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+                aligned = collect_in_join_order(
+                    lt_a.join(at_a, on=shared, how="left", maintain_order="left")
+                )
                 if aligned.height != n_lead or aligned["value"].null_count() > 0:
                     return None
                 block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -622,7 +609,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
             elif has_dense and not has_lead and shared == dense_dims:
                 # dense-only: one dense vector shared by every block; tile.
-                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                atomic_df = collect_in_join_order(atomic.lazy).sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return None
                 dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
@@ -636,7 +623,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # lead-subset + dense: positional maintain_order left-join
                 # on the full shared dims (no re-sort), read aligned values.
                 grid_a, at_a = _align(over_grid.lazy(), atomic.lazy, shared)
-                aligned = grid_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+                aligned = collect_in_join_order(
+                    grid_a.join(at_a, on=shared, how="left", maintain_order="left")
+                )
                 if aligned.height != n or aligned["value"].null_count() > 0:
                     return None
                 vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -779,7 +768,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
             if has_lead and not has_dense:
                 lt_a, at_a = _align(lead_table.lazy(), atomic.lazy, shared)
-                aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+                aligned = collect_in_join_order(
+                    lt_a.join(at_a, on=shared, how="left", maintain_order="left")
+                )
                 if aligned.height != n_lead or aligned["value"].null_count() > 0:
                     return None
                 block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -790,7 +781,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     coef = coef / repeated
 
             elif has_dense and not has_lead and shared == dense_dims:
-                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                atomic_df = collect_in_join_order(atomic.lazy).sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return None
                 dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
@@ -802,7 +793,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
 
             elif has_dense:
                 seed_a, at_a = _align(seed.lazy(), atomic.lazy, shared)
-                aligned = seed_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+                aligned = collect_in_join_order(
+                    seed_a.join(at_a, on=shared, how="left", maintain_order="left")
+                )
                 if aligned.height != n or aligned["value"].null_count() > 0:
                     return None
                 vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1563,15 +1556,7 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         _t_lazy = _apply_where_frames(t.lazy, t.dims, t.where_frames)
         _t_lazy, _ = _apply_where_map_frames(_t_lazy, t.dims, t.where_map_frames)
         if isinstance(_t_lazy, pl.LazyFrame):
-            try:
-                f = _t_lazy.collect(engine="streaming")
-            except TypeError:
-                try:
-                    f = _t_lazy.collect(streaming=True)
-                except TypeError:
-                    f = _t_lazy.collect()
-            except Exception:
-                f = _t_lazy.collect()
+            f = collect_streaming_in_join_order(_t_lazy)
         else:
             f = _t_lazy
         if f.height == 0:

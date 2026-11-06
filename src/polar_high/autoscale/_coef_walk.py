@@ -77,6 +77,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from .._collect import collect_in_join_order, collect_streaming_in_join_order
 from ..engine import (
     Param,
     SumBlockMeta,
@@ -116,17 +117,10 @@ def _collect_streaming(plan: pl.LazyFrame) -> pl.DataFrame:
     full before the reduce (the residual peak the bounded walk exists to
     avoid).  Falls back across the polars version skew (``engine=``-kwarg →
     ``streaming=``-kwarg → plain ``collect``) so the readout works on every
-    pinned polars; a plain ``collect`` is correct, just not bounded.
+    pinned polars; a plain ``collect`` is correct, just not bounded.  Joins
+    run in their written order (:mod:`polar_high._collect`).
     """
-    try:
-        return plan.collect(engine="streaming")
-    except TypeError:
-        try:
-            return plan.collect(streaming=True)
-        except TypeError:
-            return plan.collect()
-    except Exception:
-        return plan.collect()
+    return collect_streaming_in_join_order(plan)
 
 
 # ---------------------------------------------------------------------------
@@ -823,7 +817,7 @@ def _dense_param_vectors(
             continue
         if id(atomic) in out:
             continue
-        atomic_df = atomic.lazy.collect().sort(dense_list)
+        atomic_df = collect_in_join_order(atomic.lazy).sort(dense_list)
         out[id(atomic)] = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
     return out
 
@@ -968,7 +962,7 @@ def _lhs_prune_down_collect(
         recipe.where_frames,
         recipe.where_map_frames,
     )
-    return plan.select("_rid", "col_id", "coef").collect()
+    return collect_in_join_order(plan.select("_rid", "col_id", "coef"))
 
 
 def _deferred_where_map_frames(
@@ -1078,7 +1072,7 @@ def _reduced_lazy_collect(
     on = [d for d in rdims if d in axis_cols]
     ri_a, red_a = _align_enum_join_keys(row_index_lf, reduced, on)
     plan = ri_a.join(red_a, on=on, how="inner").select("_rid", "col_id", "coef")
-    return plan.collect()
+    return collect_in_join_order(plan)
 
 
 def _column_whole_product(
@@ -1372,7 +1366,9 @@ def _param_only_positional(
 
         if has_lead and not has_dense:
             lt_a, at_a = _align_enum_join_keys(lead_table.lazy(), atomic.lazy, shared)
-            aligned = lt_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+            aligned = collect_in_join_order(
+                lt_a.join(at_a, on=shared, how="left", maintain_order="left")
+            )
             if aligned.height != n_lead or aligned["value"].null_count() > 0:
                 return None
             block_vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1389,7 +1385,7 @@ def _param_only_positional(
                 dense_param_vectors.get(id(atomic)) if dense_param_vectors is not None else None
             )
             if dense_vals is None:
-                atomic_df = atomic.lazy.collect().sort(dense_dims)
+                atomic_df = collect_in_join_order(atomic.lazy).sort(dense_dims)
                 if atomic_df.height != n_dense:
                     return None
                 dense_vals = atomic_df["value"].to_numpy().astype(np.float64, copy=False)
@@ -1403,7 +1399,9 @@ def _param_only_positional(
 
         elif has_dense:
             grid_a, at_a = _align_enum_join_keys(batch_over.lazy(), atomic.lazy, shared)
-            aligned = grid_a.join(at_a, on=shared, how="left", maintain_order="left").collect()
+            aligned = collect_in_join_order(
+                grid_a.join(at_a, on=shared, how="left", maintain_order="left")
+            )
             if aligned.height != n or aligned["value"].null_count() > 0:
                 return None
             vals = aligned["value"].to_numpy().astype(np.float64, copy=False)
@@ -1473,7 +1471,7 @@ def _param_only_prune_down(
                 acc = acc.with_columns(value=pl.col("value") * scalar_val)
             else:
                 acc = acc.with_columns(value=pl.col("value") / scalar_val)
-    out = acc.select("_rid", "value").collect()
+    out = collect_in_join_order(acc.select("_rid", "value"))
     rids = out["_rid"].to_numpy().astype(np.int64)
     coef = out["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)
     return rids, coef
@@ -1671,7 +1669,7 @@ def bounded_coefficient_walk(
     shape the per-batch slicing does not tighten; it is flagged here
     rather than producing a split-group error.
     """
-    spine_df = spine.collect() if isinstance(spine, pl.LazyFrame) else spine
+    spine_df = collect_in_join_order(spine) if isinstance(spine, pl.LazyFrame) else spine
     if batch_rows <= 0:
         raise ValueError(f"batch_rows must be positive; got {batch_rows}")
 
