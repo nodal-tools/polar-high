@@ -5,9 +5,14 @@
 # speedup on typical indexed-LP build patterns (see the benchmark
 # page); single-thread is faster *and* leaner. Users who want more
 # threads can set POLARS_MAX_THREADS before importing polar_high.
+# polars reads the variable only when it is imported: once polars is
+# loaded, setting it here would not change this process and would only
+# leak into child processes, so the default applies only before polars.
 import os as _os
+import sys as _sys
 
-_os.environ.setdefault("POLARS_MAX_THREADS", "1")
+if "polars" not in _sys.modules:
+    _os.environ.setdefault("POLARS_MAX_THREADS", "1")
 
 from polar_high._warm_basis import (
     NamedBasis,

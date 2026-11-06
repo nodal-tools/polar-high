@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.12.2] — Unreleased
+
+### Fixed
+
+- **`import polar_high` no longer sets `POLARS_MAX_THREADS` when polars is
+  already imported.** polars reads the variable only at import, so setting
+  it afterwards did not change the running process; it only leaked into
+  child processes started from it (an application that imported polars
+  first and then polar_high gave every child one polars thread).  The
+  single-thread default still applies when polar_high is imported before
+  polars and the variable is unset.
+
 ## [3.12.1] — 2026-11-04
 
 ### Fixed
