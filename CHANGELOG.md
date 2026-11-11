@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `R…` name is built when its line is written, instead of holding lists of
   all of them for the whole write (about 0.8 GB at 7 M columns and 7 M
   rows). The file is byte-for-byte the same.
+- **The log-routing tests pass with highspy 1.16.**  The two real-solve
+  tests now solve a 3-row LP and check for its solve-log lines.  Before,
+  they checked for the "Running HiGHS" version banner of an LP with no
+  rows.  HiGHS 1.16 prints that banner once per process, when `Highs()` is
+  created and before a log callback can be attached, so it no longer goes
+  through the routing.
 
 ## [3.12.3] — 2026-11-07
 

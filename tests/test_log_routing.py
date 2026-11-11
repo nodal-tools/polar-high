@@ -147,20 +147,30 @@ def _trivial_problem():
     p = Problem()
     df = pl.DataFrame({"i": [0, 1, 2]})
     v = p.add_var("x", dims=("i",), index=df, lower=0.0, upper=10.0)
+    # Real rows: HiGHS >= 1.16 takes an LP with no rows down a separate
+    # "no columns or no rows" path, so give it a genuine 3x3 LP to solve.
+    p.add_cstr("c", over=df, sense=">=", lhs_terms={"x": v}, rhs_terms={"rhs": 1.0})
     p.set_objective(v.to_expr())
     return p
 
 
+# Lines HiGHS prints while solving ``_trivial_problem`` (not the version
+# banner: HiGHS >= 1.16 prints that once per process from the ``Highs()``
+# constructor, before any log callback can be attached).
+_SOLVE_LOG_LINES = ("LP has 3 rows; 3 cols; 3 nonzeros", "Model status")
+
+
 def test_real_solve_routes_to_non_fd1_sink():
     # sys.stdout redirected to a StringIO (no fileno) => callback path; the
-    # HiGHS banner must reach the buffer.
+    # HiGHS solve log must reach the buffer.
     from polar_high.solvers import solve
 
     buf = io.StringIO()
     p = _trivial_problem()
     with contextlib.redirect_stdout(buf):
         solve(p, solver_name="highs")
-    assert "Running HiGHS" in buf.getvalue()
+    for line in _SOLVE_LOG_LINES:
+        assert line in buf.getvalue()
 
 
 def test_real_solve_uses_native_when_fd1(capfd):
@@ -170,4 +180,6 @@ def test_real_solve_uses_native_when_fd1(capfd):
 
     p = _trivial_problem()
     solve(p, solver_name="highs")
-    assert "Running HiGHS" in capfd.readouterr().out
+    out = capfd.readouterr().out
+    for line in _SOLVE_LOG_LINES:
+        assert line in out
