@@ -98,6 +98,17 @@ def basis_fingerprint(
     ``drop_synthetic_rows`` is True (the default) — they are positional,
     not stable, and must not perturb the key.  The set-side and get-side
     must pass the same flag so their fingerprints line up.
+
+    The key hashes the SORTED name set, so it does not see the order of
+    the columns and rows.  A ``.bas`` file read from a generic-name MPS
+    (``write_mps(emit_names=False)``: ``C0000001`` / ``R0000002`` ...)
+    matches statuses by POSITION, not by name.  Reusing a cached basis
+    therefore relies on the model being built in the same order every
+    run (FlexTool sorts its domain frames before ids are assigned).  A
+    model built in a different order gets the same key but a basis whose
+    statuses sit on the wrong columns; that costs speed only, because
+    HiGHS validates the basis (a rejected one means a cold solve) and
+    solves correctly from any basis it accepts.
     """
     cols = sorted(set(col_names))
     if drop_synthetic_rows:

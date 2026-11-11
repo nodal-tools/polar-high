@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a column out of place has the same name-set as the fixed model but
   its column statuses are in the wrong order, so it must not be loaded.
 
+### Changed
+
+- **`write_mps(emit_names=False)` uses less memory.** Each generic `C…` /
+  `R…` name is built when its line is written, instead of holding lists of
+  all of them for the whole write (about 0.8 GB at 7 M columns and 7 M
+  rows). The file is byte-for-byte the same.
+
 ## [3.12.3] — 2026-11-07
 
 ### Fixed

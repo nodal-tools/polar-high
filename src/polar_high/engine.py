@@ -5679,20 +5679,29 @@ class Problem:
         # below drops the row source.
         self._last_mps_fingerprint = basis_fingerprint(m.col_names, m.row_names)
 
-        # ---- Names: row 0 is "cost", indices 1.. are constraint rows.
-        # MPS row index space (used in RHS emit below) keeps the cost
-        # at absolute row 0, so we prepend "cost" to the constraint
-        # row_names from the canonical matrix.
+        # ---- Names.  ``cn(j)`` is the MPS name of column ``j`` and
+        # ``rn(i)`` the MPS name of constraint row ``i`` (0-based over the
+        # constraint rows; the objective row is always "cost").  With
+        # ``emit_names`` they index the canonical matrix's name lists.
+        # Without, each generic name is built when its line is written, so
+        # no full generic name list (~0.8 GB at 7 M cols + 7 M rows) is
+        # held for the whole write.  The cost row appears as "cost" and the
+        # constraint rows as R0000002, R0000003, ..., so the generic
+        # numbering counts rows 1-indexed the way a user would in the file.
+        def _generic_cn(j: int) -> str:
+            return f"C{j + 1:07d}"
+
+        def _generic_rn(i: int) -> str:
+            return f"R{i + 2:07d}"
+
+        cn: Callable[[int], str]
+        rn: Callable[[int], str]
         if emit_names:
-            row_names: list[str] = ["cost"] + list(m.row_names)
-            col_names: list[str] = list(m.col_names)
+            cn = m.col_names.__getitem__
+            rn = m.row_names.__getitem__
         else:
-            row_names = ["cost"] + [f"R{i + 2:07d}" for i in range(n_constraint_rows)]
-            col_names = [f"C{j + 1:07d}" for j in range(n_cols)]
-            # Note: cost row externally appears as "cost"; constraint
-            # rows are R0000002, R0000003, ... so the generic numbering
-            # gives 1-indexed sequential row ids that match how a user
-            # would count rows in the file.
+            cn = _generic_cn
+            rn = _generic_rn
 
         # ---- Integer-col set from m.col_int (1 bit per column).
         integer_cols: set[int] = set(int(c) for c in np.nonzero(m.col_int)[0].tolist())
@@ -5720,7 +5729,7 @@ class Problem:
             f.write("ROWS\n")
             f.write(" N  cost\n")
             for rid in range(n_constraint_rows):
-                f.write(f" {sense_chars[rid]}  {row_names[rid + 1]}\n")
+                f.write(f" {sense_chars[rid]}  {rn(rid)}\n")
 
             # COLUMNS section — walk CSC column-by-column and write EVERY
             # column, in col_id order.  For each column j, emit the
@@ -5748,7 +5757,7 @@ class Problem:
                 elif (not is_int) and in_integer:
                     f.write("    MARKER                 'MARKER'                 'INTEND'\n")
                     in_integer = False
-                cname = col_names[j]
+                cname = cn(j)
                 if obj_nz:
                     f.write(f"    {cname}  cost  {_fmt(obj_v)}\n")
                 elif start == end:
@@ -5762,10 +5771,10 @@ class Problem:
                     # entries but zero cost need no cost line.
                     f.write(f"    {cname}  cost  0\n")
                 # Matrix entries — row_idx is 0-based over constraint
-                # rows; MPS row name is row_names[rid + 1].
+                # rows; MPS row name is rn(rid).
                 for k in range(start, end):
                     r = int(row_idx[k])
-                    f.write(f"    {cname}  {row_names[r + 1]}  {_fmt(val[k])}\n")
+                    f.write(f"    {cname}  {rn(r)}  {_fmt(val[k])}\n")
             if in_integer:
                 f.write("    MARKER                 'MARKER'                 'INTEND'\n")
                 in_integer = False
@@ -5788,7 +5797,7 @@ class Problem:
                 rhs_arr = np.where(lb_fin, lb, ub)
                 nz = np.nonzero(np.isfinite(rhs_arr) & (rhs_arr != 0.0))[0]
                 for rid in nz.tolist():
-                    f.write(f"    rhs  {row_names[rid + 1]}  {_fmt(rhs_arr[rid])}\n")
+                    f.write(f"    rhs  {rn(rid)}  {_fmt(rhs_arr[rid])}\n")
 
             if profile:
                 _emit("rhs_emitted")
@@ -5819,7 +5828,7 @@ class Problem:
                     lo_arr = np.broadcast_to(np.asarray(v.col_lower(), dtype=np.float64), (n_v,))
                     hi_arr = np.broadcast_to(np.asarray(v.col_upper(), dtype=np.float64), (n_v,))
                     for cid, lo, hi in zip(ids.tolist(), lo_arr.tolist(), hi_arr.tolist()):
-                        f.write(_mps_col_bound_lines(col_names[int(cid)], lo, hi, _fmt))
+                        f.write(_mps_col_bound_lines(cn(int(cid)), lo, hi, _fmt))
                     continue
                 lo = float(v.lower)
                 hi = float(v.upper)
@@ -5828,24 +5837,24 @@ class Problem:
                 ids = v.frame["col_id"].to_numpy()
                 if math.isinf(lo) and lo < 0 and math.isinf(hi) and hi > 0:
                     for cid in ids.tolist():
-                        f.write(f" FR bnd  {col_names[int(cid)]}\n")
+                        f.write(f" FR bnd  {cn(int(cid))}\n")
                 elif math.isinf(lo) and lo < 0 and math.isfinite(hi):
                     for cid in ids.tolist():
-                        nm = col_names[int(cid)]
+                        nm = cn(int(cid))
                         f.write(f" MI bnd  {nm}\n")
                         f.write(f" UP bnd  {nm}  {_fmt(hi)}\n")
                 elif math.isfinite(lo) and math.isinf(hi) and hi > 0:
                     if lo != 0.0:
                         for cid in ids.tolist():
-                            f.write(f" LO bnd  {col_names[int(cid)]}  {_fmt(lo)}\n")
+                            f.write(f" LO bnd  {cn(int(cid))}  {_fmt(lo)}\n")
                 elif math.isfinite(lo) and math.isfinite(hi):
                     for cid in ids.tolist():
-                        nm = col_names[int(cid)]
+                        nm = cn(int(cid))
                         f.write(f" LO bnd  {nm}  {_fmt(lo)}\n")
                         f.write(f" UP bnd  {nm}  {_fmt(hi)}\n")
                 else:
                     for cid in ids.tolist():
-                        nm = col_names[int(cid)]
+                        nm = cn(int(cid))
                         if math.isfinite(lo):
                             f.write(f" LO bnd  {nm}  {_fmt(lo)}\n")
                         if math.isfinite(hi):
