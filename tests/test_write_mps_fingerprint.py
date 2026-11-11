@@ -4,9 +4,9 @@ on ``self._last_mps_fingerprint`` (warm-start Phase 1, Part 2).
 The fingerprint keys a downstream ``save_memory`` subprocess warm-start
 cache by the exact column / constraint-row name-set the MPS carries.  It
 must be computed BEFORE ``release`` drops ``_cstrs`` (row names are then
-unrecoverable), only when real names are emitted, and must line up with
-an independently computed :func:`polar_high.basis_fingerprint` over the
-same model's names.
+unrecoverable), always over the model's REAL names (also when the file
+carries generic C/R names), and must line up with an independently
+computed :func:`polar_high.basis_fingerprint` over the same model's names.
 """
 
 import dataclasses
@@ -58,7 +58,7 @@ def test_write_mps_stashes_fingerprint(tmp_path):
     fp = pb._last_mps_fingerprint
     assert isinstance(fp, str)
     assert fp  # non-empty
-    assert len(fp) == 16  # phbasis-v1 digest width
+    assert len(fp) == 16  # phbasis digest width
     # Released: the row source is gone, but the stashed fingerprint survives.
     assert pb._released is True
 
@@ -91,27 +91,36 @@ def test_fingerprint_differs_for_different_structure(tmp_path):
     assert pb._last_mps_fingerprint != pb_var._last_mps_fingerprint
 
 
-def test_generic_names_yield_none(tmp_path):
-    """``emit_names=False`` emits positional C/R names — useless as a
-    cross-run key — so the fingerprint is reset to None."""
+def test_generic_names_fingerprint_real_names(tmp_path):
+    """``emit_names=False`` writes positional C/R names into the file, but
+    the fingerprint is still taken over the model's real names, so it is
+    not None and equals the one a named write of the same model stashes."""
     pb = Problem()
     build_dispatch(pb, make_toy_data())
     pb.write_mps(tmp_path / "generic.mps", emit_names=False)
-    assert pb._last_mps_fingerprint is None
-
-
-def test_generic_names_reset_after_named(tmp_path):
-    """A named write stashes a fingerprint; a subsequent generic-name write
-    on a fresh Problem resets it to None (no stale key carries over)."""
-    pb = Problem()
-    build_dispatch(pb, make_toy_data())
-    pb.write_mps(tmp_path / "named.mps")
-    assert isinstance(pb._last_mps_fingerprint, str)
+    fp_generic = pb._last_mps_fingerprint
+    assert isinstance(fp_generic, str)
+    assert len(fp_generic) == 16
 
     pb2 = Problem()
     build_dispatch(pb2, make_toy_data())
-    pb2.write_mps(tmp_path / "gen.mps", emit_names=False)
-    assert pb2._last_mps_fingerprint is None
+    pb2.write_mps(tmp_path / "named.mps")
+    assert pb2._last_mps_fingerprint == fp_generic
+
+
+def test_generic_names_fingerprint_survives_release(tmp_path):
+    """A generic-name write with ``release=True`` keeps the real-name
+    fingerprint (computed before the row source is dropped)."""
+    pb = Problem()
+    build_dispatch(pb, make_toy_data())
+    pb.write_mps(tmp_path / "named.mps")
+    fp_named = pb._last_mps_fingerprint
+
+    pb2 = Problem()
+    build_dispatch(pb2, make_toy_data())
+    pb2.write_mps(tmp_path / "gen.mps", emit_names=False, release=True)
+    assert pb2._released is True
+    assert pb2._last_mps_fingerprint == fp_named
 
 
 def test_fingerprint_matches_independent_computation(tmp_path):

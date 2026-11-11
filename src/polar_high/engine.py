@@ -3846,14 +3846,13 @@ class Problem:
         # wins for an LP).
         self._primal_seed: dict[str, float] | None = None
         self._primal_seed_frame: str | None = None
-        # Structural basis-fingerprint of the most recent named-name MPS
-        # emitted by :meth:`write_mps`.  Stashed there (only when
-        # ``emit_names=True`` — generic ``C``/``R`` names are useless as a
-        # cross-run key) so a downstream ``save_memory`` subprocess
-        # warm-start arm can key a basis-cache file by the exact name-set
-        # it just wrote, BEFORE ``release`` drops ``_cstrs``.  ``None``
-        # until the first named ``write_mps`` (and reset to ``None`` by a
-        # subsequent ``emit_names=False`` write).
+        # Structural basis-fingerprint of the model written by the most
+        # recent :meth:`write_mps`.  Always taken over the REAL column /
+        # constraint-row names, also when the file carries generic
+        # ``C``/``R`` names (``emit_names=False``), so a downstream
+        # ``save_memory`` subprocess warm-start arm can key a basis-cache
+        # file by the model's name-set, BEFORE ``release`` drops
+        # ``_cstrs``.  ``None`` until the first ``write_mps``.
         self._last_mps_fingerprint: str | None = None
 
     def declare_dense_axes(self, axes: tuple[str, ...] | None) -> None:
@@ -5526,10 +5525,17 @@ class Problem:
           automatically for triple counts that don't fit in RAM.
         - Stashes ``self._last_mps_fingerprint`` — a structural
           basis-fingerprint (:func:`polar_high._warm_basis.basis_fingerprint`)
-          over the emitted column/constraint-row name-set — computed before
-          any ``release``.  ``None`` unless ``emit_names`` is True (generic
-          names are useless as a cross-run key).  Consumed by the
-          ``save_memory`` subprocess warm-start arm to key a basis-cache file.
+          over the model's real column/constraint-row name-set — computed
+          before any ``release``, and the same whether ``emit_names`` is
+          True or False (the generic names are never hashed).  Consumed by
+          the ``save_memory`` subprocess warm-start arm to key a basis-cache
+          file.
+        - Every column is written in the COLUMNS section, in ``col_id``
+          order.  A column with no matrix entry and no objective
+          coefficient gets one explicit ``cost 0`` entry, so MPS readers
+          keep it in place with its bounds and integrality (a column
+          present only in BOUNDS is moved to the end or dropped by some
+          readers, e.g. HiGHS).
         """
         import warnings
 
@@ -5661,6 +5667,18 @@ class Problem:
                     f"({bad_j}, {float(m.col_obj[bad_j])})"
                 )
 
+        # ---- Structural basis-fingerprint of the model's name-set.  Always
+        # taken over the REAL column / constraint-row names (``m.col_names``
+        # / ``m.row_names``), before any generic C/R substitution below, so
+        # a caller that writes generic names (``emit_names=False``) and maps
+        # them back by position still gets a cross-run cache key identical
+        # to the ``emit_names=True`` one.  Keyed off the CONSTRAINT rows
+        # (NOT the "cost"-prefixed ``row_names``) so it matches the set the
+        # ``.bas`` / cache file keys on.  Computed here, while ``m`` /
+        # ``_cstrs`` are still alive, i.e. before the optional ``release``
+        # below drops the row source.
+        self._last_mps_fingerprint = basis_fingerprint(m.col_names, m.row_names)
+
         # ---- Names: row 0 is "cost", indices 1.. are constraint rows.
         # MPS row index space (used in RHS emit below) keeps the cost
         # at absolute row 0, so we prepend "cost" to the constraint
@@ -5675,18 +5693,6 @@ class Problem:
             # rows are R0000002, R0000003, ... so the generic numbering
             # gives 1-indexed sequential row ids that match how a user
             # would count rows in the file.
-
-        # ---- Structural basis-fingerprint of the emitted name-set.  Only
-        # meaningful with real names (generic C/R names are positional, so
-        # useless as a cross-run cache key); reset to None otherwise.  Keyed
-        # off the CONSTRAINT rows (``m.row_names``, NOT the "cost"-prefixed
-        # ``row_names``) so it matches the set the ``.bas`` / cache file keys
-        # on.  Computed here, while ``m`` / ``_cstrs`` are still alive, i.e.
-        # before the optional ``release`` below drops the row source.
-        if emit_names:
-            self._last_mps_fingerprint = basis_fingerprint(col_names, m.row_names)
-        else:
-            self._last_mps_fingerprint = None
 
         # ---- Integer-col set from m.col_int (1 bit per column).
         integer_cols: set[int] = set(int(c) for c in np.nonzero(m.col_int)[0].tolist())
@@ -5716,9 +5722,11 @@ class Problem:
             for rid in range(n_constraint_rows):
                 f.write(f" {sense_chars[rid]}  {row_names[rid + 1]}\n")
 
-            # COLUMNS section — walk CSC column-by-column.  For each
-            # column j, emit the objective entry (if present) first then
-            # the constraint coefficients in row order.
+            # COLUMNS section — walk CSC column-by-column and write EVERY
+            # column, in col_id order.  For each column j, emit the
+            # objective entry (if present) first then the constraint
+            # coefficients in row order; an empty column gets one
+            # explicit ``cost 0`` entry so its position is kept.
             f.write("COLUMNS\n")
             in_integer = False
             int_marker_id = 0
@@ -5731,8 +5739,6 @@ class Problem:
                 end = int(col_ptr[j + 1])
                 obj_v = float(col_obj[j])
                 obj_nz = obj_v != 0.0 and math.isfinite(obj_v)
-                if start == end and not obj_nz:
-                    continue
                 # Integer-marker flip at column boundary.
                 is_int = j in integer_cols
                 if is_int and not in_integer:
@@ -5745,6 +5751,16 @@ class Problem:
                 cname = col_names[j]
                 if obj_nz:
                     f.write(f"    {cname}  cost  {_fmt(obj_v)}\n")
+                elif start == end:
+                    # Empty column (no matrix entry, no objective
+                    # coefficient): still declare it here with an
+                    # explicit zero cost.  A column that appears only in
+                    # BOUNDS (or nowhere) is moved to the end or dropped
+                    # by MPS readers such as HiGHS, which shifts every
+                    # later column's position (and loses an integer
+                    # column's integrality).  Columns with matrix
+                    # entries but zero cost need no cost line.
+                    f.write(f"    {cname}  cost  0\n")
                 # Matrix entries — row_idx is 0-based over constraint
                 # rows; MPS row name is row_names[rid + 1].
                 for k in range(start, end):

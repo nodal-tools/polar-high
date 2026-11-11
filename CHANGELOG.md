@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [3.12.4] — unreleased
+
+### Fixed
+
+- **`write_mps` writes every column, so a solution read back by position
+  lines up.** A column with no constraint coefficient and no objective
+  coefficient was left out of the COLUMNS section: it was written only
+  under BOUNDS, or not at all when its bounds were the default.  HiGHS then
+  read it at the end of the column list, or dropped it, so every later
+  column moved one place and a caller mapping the solution back by
+  position got wrong values (an integer column of this kind also lost its
+  integrality).  Such a column is now written in place with a zero
+  objective coefficient (`cost 0`), keeping its bounds and integrality.
+  Columns with constraint coefficients and a zero cost are written as
+  before.
+- **`write_mps(emit_names=False)` now records the model's fingerprint.**
+  `_last_mps_fingerprint` is taken over the real column and row names
+  also when the file carries generic `C…` / `R…` names, and equals the one
+  a named write of the same model gives.  Before, it was `None`.
+- **Warm-start basis caches written before this release are not reused.**
+  The fingerprint format moves to `phbasis-v2`: a basis saved from an MPS
+  with a column out of place has the same name-set as the fixed model but
+  its column statuses are in the wrong order, so it must not be loaded.
+
 ## [3.12.3] — 2026-11-07
 
 ### Fixed

@@ -31,7 +31,14 @@ from dataclasses import dataclass
 # Format-version tag baked into every fingerprint payload.  Bumping this
 # string changes every fingerprint, invalidating carriers persisted
 # under an older name-set layout (spec §4.5).
-_FINGERPRINT_VERSION = "phbasis-v1"
+#
+# v2 (3.12.4): ``write_mps`` now writes every column in COLUMNS.  Before,
+# a column with no matrix entry and no objective coefficient was written
+# only in BOUNDS (or not at all), and HiGHS read it at the END of the
+# column list, so a basis saved from that MPS has the same name-set (same
+# v1 key) but its column statuses are shifted against the new file.  The
+# bump makes those v1 cache entries miss instead of loading misaligned.
+_FINGERPRINT_VERSION = "phbasis-v2"
 
 # Synthetic positional row names (spec §4.5): a constraint row emitted
 # without a caller name is rendered as ``row_<i>`` where ``i`` is its
