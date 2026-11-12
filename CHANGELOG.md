@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
+## [Unreleased]
+
+### Added
+
+- **`SolveDiagnostics.mip_gap`**: the relative MIP gap HiGHS reports for
+  the solve (`info.mip_gap`), read in the same snapshot as the other
+  counters.  `inf` for an LP or a MIP without a feasible solution (HiGHS
+  reports `NaN` for a maximisation without one; that is normalised to
+  `inf`).  The field has a default, so code that builds a
+  `SolveDiagnostics` itself keeps working.
+
 ## [3.12.4] — 2026-11-11
 
 ### Fixed

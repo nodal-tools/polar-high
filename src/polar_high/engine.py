@@ -7255,6 +7255,14 @@ class SolveDiagnostics:
 
     This is a pure fact carrier: it holds no policy and no thresholds.
     The accept/reject decision (and any tolerance) lives with the caller.
+
+    ``mip_gap`` is HiGHS ``info.mip_gap``: the relative gap
+    ``|primal bound - dual bound| / |primal bound|`` of a MIP solve, as
+    HiGHS's log prints it and its ``mip_rel_gap`` stop tests it (it
+    includes the objective offset, and is unchanged by
+    ``user_objective_scale``).  ``inf`` for an LP, for a MIP without a
+    feasible solution (HiGHS's ``NaN`` there is normalised to ``inf``),
+    and when not recorded (the default).
     """
 
     model_status: highspy.HighsModelStatus
@@ -7268,6 +7276,7 @@ class SolveDiagnostics:
     max_dual_infeasibility: float
     primal_dual_objective_error: float
     objective_value: float
+    mip_gap: float = math.inf
 
 
 class Solution:
@@ -7383,6 +7392,7 @@ class Solution:
         info = h.getInfo()
         status = h.getModelStatus()
         feasible = highspy.kSolutionStatusFeasible
+        mip_gap = float(info.mip_gap)
         return SolveDiagnostics(
             model_status=status,
             model_status_name=status.name,
@@ -7395,6 +7405,7 @@ class Solution:
             max_dual_infeasibility=float(info.max_dual_infeasibility),
             primal_dual_objective_error=float(info.primal_dual_objective_error),
             objective_value=float(info.objective_function_value),
+            mip_gap=math.inf if math.isnan(mip_gap) else mip_gap,
         )
 
     def value(self, var_name: str) -> pl.DataFrame:
