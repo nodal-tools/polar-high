@@ -40,7 +40,7 @@ import highspy
 import numpy as np
 import polars as pl
 
-from ._collect import collect_in_join_order, collect_streaming_in_join_order
+from ._collect import collect_in_join_order, collect_in_memory, collect_streaming_in_join_order
 from ._log_routing import route_highs_log_to_stdout
 from ._warm_basis import (
     NamedBasis,
@@ -722,11 +722,32 @@ def _param_binop_lazy(
     return j.with_columns(value=val).select(*new_dims, "value"), new_dims
 
 
+def _reciprocal(s: float) -> float:
+    """``1 / s`` with IEEE semantics (``±inf`` for ``±0``, ``0`` for ``±inf``, ``nan`` for ``nan``).
+
+    A column divided by a scalar is computed as a multiply by this reciprocal (:func:`_div_by_scalar`)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return float(np.float64(1.0) / np.float64(s))
+
+
+def _div_by_scalar(col: pl.Expr, s: float) -> pl.Expr:
+    """``col / s`` as ``col * (1 / s)``, the same bits in every row whatever the chunk layout.
+
+    polars divides a column by a literal per chunk: a chunk of one row gets the true quotient, a longer one
+    a multiply by the reciprocal — the two differ in the last bit for about half of all values.  How a
+    collected join or a streaming query is chunked changes from run to run (and between the plain and the
+    pruned plan of the same Param), so ``pl.col(...) / s`` gave a value different bits in different runs.
+    A multiply by the reciprocal is the same in every row and every layout, and it is what polars computes
+    for every row of a chunk longer than one; ``Expr / float`` has always done it."""
+    return col * _reciprocal(s)
+
+
 def _param_scalar_lazy(lf: pl.LazyFrame, op: str, s: float) -> pl.LazyFrame:
-    """``value * s`` (``op == "smul"``) or ``value / s`` (``op == "sdiv"``)."""
+    """``value * s`` (``op == "smul"``) or ``value / s`` (``op == "sdiv"``, a multiply by ``1 / s``:
+    :func:`_div_by_scalar`)."""
     if op == "smul":
         return lf.with_columns(value=pl.col("value") * s)
-    return lf.with_columns(value=pl.col("value") / s)
+    return lf.with_columns(value=_div_by_scalar(pl.col("value"), s))
 
 
 def _param_tree(p: Param) -> tuple:
@@ -2225,14 +2246,15 @@ def _build_sum_block_coo_plan(
        ``value``) means the recipe's unreduced product is not dense over
        this accumulator ⇒ raise the fallback sentinel.
     5. **Reduce** over ``reduce_dims`` to ``keep``: sort the unreduced frame
-       by ``(*keep, col_id)`` (a FIXED canonical order) and sum ``coef``
-       per ``(*keep, col_id)`` group via ``np.add.reduceat`` over the group
-       boundaries.  The fixed sort order guarantees run-to-run determinism.
-       Where each group is a single row (e.g. nodeBalance — each flow is a
-       distinct ``col_id`` mapping to one node) the sum is a 1-element sum
-       ⇒ BIT-IDENTICAL to polars' group_by.  Multi-row groups (true coef
-       combining) are bit-EQUIVALENT (a different summation order than
-       polars' hash-group).
+       by ``(*keep, col_id, *reduce_dims, coef)`` (a FIXED canonical order)
+       and sum ``coef`` per ``(*keep, col_id)`` group via
+       ``np.add.reduceat`` over the group boundaries.  The fixed sort order
+       guarantees run-to-run determinism, and it is the order
+       :func:`_sum_cells_in_fixed_order` sums the reduced ``term.lazy`` in,
+       so a multi-row group (true coef combining) gets the same bits on
+       either path.  Where each group is a single row (e.g. nodeBalance —
+       each flow is a distinct ``col_id`` mapping to one node) the sum is a
+       1-element sum ⇒ BIT-IDENTICAL to polars' group_by.
     6. **Attach ``_rid``** by inner-joining ``row_index_lf`` on ``on``
        (Enum-aligned).  Return selecting ``_rid, col_id, coef[, *keep]``.
 
@@ -2345,13 +2367,16 @@ def _build_sum_block_coo_plan(
     # unreduced coef to the accumulator, sort by (*keep, col_id) (a FIXED
     # canonical order), and sum per (*keep, col_id) group with
     # np.add.reduceat over the group boundaries.
-    unreduced = acc.select(*keep, "col_id").with_columns(
+    reduced_dims = [d for d in acc_dims if d not in keep]
+    unreduced = acc.select(*keep, "col_id", *reduced_dims).with_columns(
         coef=pl.Series("coef", coef, dtype=pl.Float64)
     )
     group_keys = keep + ["col_id"]
-    # A Var whose rows share columns puts several rows of one cell in a group: keep their (deterministic)
-    # accumulator order within the group so the sum's bits do not vary between runs.
-    unreduced = unreduced.sort(group_keys, maintain_order=not var_source.col_ids_unique)
+    # A group holds several coefficients of one cell (a reduced dim that is not a Var dim, or a Var whose
+    # rows share columns).  Sum them in the order of every dim, then the coefficient — the order
+    # ``_sum_cells_in_fixed_order`` sums the reduced ``term.lazy`` in — not in the accumulator's order,
+    # which the map-effect join can change from run to run.
+    unreduced = unreduced.sort([*group_keys, *reduced_dims, "coef"])
     m = unreduced.height
     if m == 0:
         return _empty_block_coo_frame(seed_df, keep_dims)
@@ -3025,23 +3050,51 @@ def _term_shares_cols(t: _Term) -> bool:
     return t.shared_cols or (t.var_source is not None and not t.var_source.col_ids_unique)
 
 
-def _sum_shared_cells(f: pl.LazyFrame, keep: list[str], reduced: list[str]) -> pl.LazyFrame:
-    """``Sum``'s reduction of a term whose columns repeat over its rows: one ``(keep…, col_id, coef)`` row per
-    group, the group's coefficients summed in a fixed order.
+def _sum_groups_are_single_rows(t: _Term, reduced: list[str]) -> bool:
+    """Whether a ``Sum`` of ``t`` over ``reduced`` leaves one row in every ``(keep…, col_id)`` group, so the
+    reduction adds no coefficients and polars' hash ``group_by`` gives the same bits in every run.
 
-    The rows of a group are several coefficients of one cell.  They are sorted by every dim of the term and
-    summed with ``numpy.add.reduceat`` on one contiguous array, so the bits of the sum depend neither on the
-    row order the joins before produce nor on how the frame happens to be chunked (a polars group-by sums the
-    pieces of a group per chunk)."""
+    True for a pure relabel (:func:`_sum_is_relabel`: every reduced dim is a dim of a Var whose rows have
+    their own columns) and for a Sum that reduces none of the term's dims; a term whose columns repeat over
+    its rows (:func:`_term_shares_cols`) never qualifies.  (A group of rows equal in every dim — a Param with
+    a repeated key — is not a relabel either way; a group of two adds the same in any order.)"""
+    if _term_shares_cols(t):
+        return False
+    if not reduced:
+        return True
+    return t.var_source is not None and _sum_is_relabel(t.var_source, reduced)
+
+
+def _sum_cells_in_fixed_order(f: pl.LazyFrame, keep: list[str], reduced: list[str]) -> pl.LazyFrame:
+    """``Sum``'s reduction of a term whose ``(keep…, col_id)`` groups may hold several rows: one
+    ``(keep…, col_id, coef)`` row per group, the group's coefficients summed in a fixed order.
+
+    The rows of a group are several coefficients of one cell (a reduced dim that is not a Var dim, or a Var
+    whose rows share columns).  Three or more of them give different bits when added in a different order —
+    ``1e16 + 1 - 1e16`` is ``0`` or ``1`` — and neither the order the joins before produce nor the way a
+    polars ``group_by`` splits a group into partial sums (per chunk, per thread, per streaming morsel) is the
+    same from run to run.  So the rows are sorted by every dim of the term, then the coefficient (rows equal
+    in every dim come from a repeated key and are then added smallest first), and each group is summed left
+    to right with ``numpy.add.reduceat`` on one contiguous array.  The plan stays lazy: the reduction runs
+    when it is collected, on the whole frame at once (``map_batches``, not streamed in pieces)."""
     keys = [*keep, "col_id"]
-    df = collect_in_join_order(f.sort([*keys, *reduced]))
-    if df.height == 0:
-        return df.select(*keys, "coef").lazy()
-    new_group = pl.any_horizontal([pl.col(c).ne_missing(pl.col(c).shift(1)) for c in keys])
-    starts = np.flatnonzero(df.select(new_group.fill_null(True))[:, 0].to_numpy())
-    sums = np.add.reduceat(df["coef"].to_numpy().astype(np.float64, copy=False), starts)
-    out = df[starts].select(keys).with_columns(coef=pl.Series("coef", sums, dtype=pl.Float64))
-    return out.lazy()
+    in_schema = f.collect_schema()
+    out_schema = {k: in_schema[k] for k in keys}
+    out_schema["coef"] = pl.Float64
+
+    def _reduce(df: pl.DataFrame) -> pl.DataFrame:
+        if df.height == 0:
+            return df.select(*keys, pl.col("coef").cast(pl.Float64))
+        # ``col_id`` first: it nearly always tells two groups apart, so the sort rarely compares strings.
+        # One chunk, in memory: polars sorts a join's many small chunks, or on its streaming engine, several
+        # times slower.
+        df = collect_in_memory(df.rechunk().lazy().sort(["col_id", *keep, *reduced, "coef"]))
+        new_group = pl.any_horizontal([pl.col(c).ne_missing(pl.col(c).shift(1)) for c in keys])
+        starts = np.flatnonzero(df.select(new_group.fill_null(True))[:, 0].to_numpy())
+        sums = np.add.reduceat(df["coef"].to_numpy().astype(np.float64, copy=False), starts)
+        return df[starts].select(keys).with_columns(coef=pl.Series("coef", sums, dtype=pl.Float64))
+
+    return f.select(*keys, *reduced, "coef").map_batches(_reduce, schema=out_schema)
 
 
 def _to_expr(x) -> Expr:
@@ -3668,8 +3721,9 @@ def Sum(expr, over: tuple[str, ...] | str | None = None, where: pl.DataFrame | N
             survivors = [(p, s) for (p, s) in psrc if not any(d in over_set for d in p.dims)]
             psrc = survivors if survivors else None
         shares = _term_shares_cols(t)
-        if shares:
-            f = _sum_shared_cells(f, list(keep), [d for d in term_dims if d not in keep])
+        reduced = [d for d in term_dims if d not in keep]
+        if not _sum_groups_are_single_rows(t, reduced):
+            f = _sum_cells_in_fixed_order(f, list(keep), reduced)
         elif keep:
             f = (
                 f.group_by(list(keep) + ["col_id"])
@@ -4775,7 +4829,9 @@ class Problem:
                             if direction >= 0:
                                 acc = acc.with_columns(value=pl.col("value") * scalar_val)
                             else:
-                                acc = acc.with_columns(value=pl.col("value") / scalar_val)
+                                acc = acc.with_columns(
+                                    value=_div_by_scalar(pl.col("value"), scalar_val)
+                                )
                     if _profile:
                         _cm_emit(
                             "family_rhs_pruned_down",

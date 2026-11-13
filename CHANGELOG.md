@@ -18,6 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inf`).  The field has a default, so code that builds a
   `SolveDiagnostics` itself keeps working.
 
+### Fixed
+
+- **The same model gives the same coefficient bits in every run.** Two
+  operations depended on how polars happened to lay the data out, which
+  changes from run to run with the thread count, and on polars 2.x's
+  default streaming engine with its scheduling:
+  - *A Param divided by a scalar* (`Param / 2.5`, and a scalar divisor
+    in the RHS / autoscale Param-chain folds): polars divides a column
+    by a literal per chunk — the true quotient for a one-row chunk, a
+    multiply by the reciprocal for a longer one — so about half of the
+    values could differ in the last bit between runs.  It is now always
+    a multiply by the reciprocal (what polars did for every row of a
+    longer chunk, and what `Expr / float` has always done).
+  - *A `Sum` that adds several coefficients of one cell* (a reduced dim
+    that is not a dim of the Var, e.g. `Sum(x[p] · b[t], over="t")`):
+    the hash `group_by` added a group in the order its rows arrived, on
+    polars 1.x too.  A group of three or more is now added in the order
+    of the term's dims (`numpy.add.reduceat` on the sorted rows, as a Var
+    with shared columns already was), lazily when the plan is collected;
+    a group of nearly cancelling entries such as `1e16, 1, −1e16` could
+    come out `0` or `1`.  The block-COO combining reduce sums in the same
+    order, so both paths give the same bits.  A Sum over Var dims only (a
+    relabel, one coefficient per group) keeps the hash `group_by`.
+
 ## [3.12.4] — 2026-11-11
 
 ### Fixed

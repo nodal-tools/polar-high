@@ -90,6 +90,7 @@ from ..engine import (
     _build_block_coo_plan,
     _build_lhs_pruned_plan,
     _build_sum_block_coo_plan,
+    _div_by_scalar,
     _emit_block_coo_path,
     _sum_block_coo_classify,
     _sum_is_relabel,
@@ -1470,7 +1471,7 @@ def _param_only_prune_down(
             if direction >= 0:
                 acc = acc.with_columns(value=pl.col("value") * scalar_val)
             else:
-                acc = acc.with_columns(value=pl.col("value") / scalar_val)
+                acc = acc.with_columns(value=_div_by_scalar(pl.col("value"), scalar_val))
     out = collect_in_join_order(acc.select("_rid", "value"))
     rids = out["_rid"].to_numpy().astype(np.int64)
     coef = out["value"].fill_null(0.0).to_numpy().astype(np.float64, copy=False)

@@ -58,6 +58,17 @@ def collect_in_join_order(plan: pl.LazyFrame) -> pl.DataFrame:
     return plan.collect(**_opt_kwargs())
 
 
+def collect_in_memory(plan: pl.LazyFrame) -> pl.DataFrame:
+    """``plan.collect()`` on the in-memory engine (a plain collect where polars has no ``engine=`` keyword).
+
+    For a step on a frame already in memory, such as a sort: polars 2.x runs an eager ``DataFrame.sort`` on
+    its default (streaming) engine, several times slower than in memory."""
+    try:
+        return plan.collect(engine="in-memory", **_opt_kwargs())
+    except TypeError:
+        return plan.collect(**_opt_kwargs())
+
+
 def collect_streaming_in_join_order(plan: pl.LazyFrame) -> pl.DataFrame:
     """Collect ``plan`` with the streaming engine and joins in written order.
 
