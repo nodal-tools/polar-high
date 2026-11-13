@@ -98,8 +98,8 @@ def solve(
     **solver_options
         Forwarded to the underlying solver.  Objective-valued options
         (targets, bounds, cutoffs, absolute gaps; see
-        :mod:`polar_high.objective_options`) are read in the caller's
-        objective units and sense and mapped to the solver's (the
+        :mod:`polar_high.objective_options`) are read in user units and in
+        the objective's sense and mapped to the solver's (the
         ``model``'s :meth:`~polar_high.engine.Problem.objective_transform`);
         every other option is passed as given.
 
@@ -162,7 +162,7 @@ def solve(
         )
 
     # Objective-valued options (targets, bounds, cutoffs, absolute gaps) are
-    # given in the caller's objective units; map them to what the chosen
+    # given in user units; map them to what the chosen
     # solver compares (see :mod:`polar_high.objective_options`).  New dicts:
     # the caller's options and the Problem's stored options are unchanged.
     if solver_name != "highs":

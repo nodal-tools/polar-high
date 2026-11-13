@@ -304,8 +304,8 @@ def _highs_objective_factor(options: dict | None) -> float:
 
 
 def _highs_objective_options(problem: Problem, options: dict | None, n_options: dict | None = None):
-    """``options`` with HiGHS' objective-valued options mapped from the
-    caller's objective units to what HiGHS compares (see
+    """``options`` with HiGHS' objective-valued options mapped from user
+    units to what HiGHS compares (see
     :mod:`polar_high.objective_options`).
 
     ``n_options``: the dict whose ``user_objective_scale`` HiGHS will run
@@ -3779,9 +3779,9 @@ class Problem:
         self._obj_sense = "min"
         self._obj_offset: float = 0.0
         # The objective given to ``set_objective`` / ``add_obj_constant`` is
-        # this factor times the objective in the caller's units (see
+        # this factor times the objective in user units (see
         # :meth:`set_objective_scale`).  Objective-valued solver options are
-        # read in the caller's units.
+        # read in user units.
         self._obj_scale: float = 1.0
         # Generic small-coefficient cutoff.  When > 0.0, any constraint-
         # matrix coefficient OR row-bound (RHS) term whose absolute value
@@ -4307,13 +4307,13 @@ class Problem:
 
     def set_objective_scale(self, factor: float) -> None:
         """Declare that the objective given to :meth:`set_objective` and
-        :meth:`add_obj_constant` is ``factor`` times the objective in the
-        caller's units (e.g. ``1e-6`` for a cost in currency built as
+        :meth:`add_obj_constant` is ``factor`` times the objective in user
+        units, the units the caller thinks in (e.g. ``1e-6`` for a cost in currency built as
         million currency).
 
         Objective-valued solver options (targets, bounds, cutoffs, absolute
-        gaps; see :mod:`polar_high.objective_options`) are then read in the
-        caller's units: polar-high multiplies them by ``factor`` (and by
+        gaps; see :mod:`polar_high.objective_options`) are then read in user
+        units: polar-high multiplies them by ``factor`` (and by
         HiGHS' ``2**user_objective_scale``) before they reach HiGHS, and
         :meth:`objective_transform` gives the same mapping for other
         solvers.  ``Solution.objective_in_user_units`` is ``Solution.obj /
@@ -4336,7 +4336,7 @@ class Problem:
         options: dict | None = None,
     ):
         """The :class:`~polar_high.objective_options.ObjectiveTransform` that
-        maps an objective value in the caller's units to ``solver``'s value
+        maps an objective value in user units to ``solver``'s value
         for this Problem.
 
         ``solver``: ``"highs"``, ``"gurobi"``, ``"cplex"``, ``"xpress"`` or
@@ -4358,7 +4358,7 @@ class Problem:
             factor = _highs_objective_factor(opts)
         offset = float(self._obj_offset)
         return ObjectiveTransform(
-            unit_scale=self._obj_scale,
+            objective_scale=self._obj_scale,
             solver_factor=factor,
             offset=offset,
             solver_offset=offset if keeps else 0.0,
@@ -4461,8 +4461,8 @@ class Problem:
         options
             Per-call HiGHS options dict (overrides ``set_solver_options``).
             Objective-valued options (``objective_target``,
-            ``objective_bound``, ``mip_abs_gap``) are read in the caller's
-            objective units and sense and mapped to HiGHS' (see
+            ``objective_bound``, ``mip_abs_gap``) are read in user units and
+            in the objective's sense and mapped to HiGHS' (see
             :meth:`set_objective_scale` and
             :mod:`polar_high.objective_options`); the dict is not changed.
         keep_solver
@@ -7480,7 +7480,7 @@ class Solution:
 
     @property
     def objective_in_user_units(self) -> float:
-        """``obj`` in the caller's objective units: ``obj`` divided by the
+        """``obj`` in user units: ``obj`` divided by the
         Problem's :meth:`~Problem.set_objective_scale` factor."""
         return self.obj / self.objective_scale
 
@@ -9165,8 +9165,8 @@ class WarmProblem:
         optimal or not: the caller decides what a still-failing fallback
         means.
 
-        Objective-valued fallback options are read in the caller's
-        objective units (as at the build), with the ``user_objective_scale``
+        Objective-valued fallback options are read in user units (as at
+        the build), with the ``user_objective_scale``
         the retry runs under: the fallback's own value, else the live
         handle's.
 

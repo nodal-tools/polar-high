@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes for existing users
+
+These affect a `Problem` with an objective constant (`add_obj_constant`)
+or with objective-valued solver options:
+
+- **`objective_bound` on a maximisation is now given in the objective's
+  own sense.**  Before, HiGHS got it as given and read it in its
+  minimisation space, so a bound on a maximisation had to be passed
+  negated; polar-high now negates it.  A caller that negated it itself
+  must drop its own negation, or the bound flips (e.g. a bound that was
+  feasible becomes infeasible).
+- **HiGHS' relative MIP gap is measured without the objective constant.**
+  The constant no longer reaches HiGHS, so `mip_rel_gap` (and the gap
+  HiGHS reports) is relative to the variable part of the objective: a
+  solve with a constant stops at a different point than before.
+- **The HiGHS objective value no longer includes the constant.**  A raw
+  `Solution.highs.getObjectiveValue()` / `getInfo()` (and the LP's
+  `offset_`) exclude it; add `Solution.obj_offset` to a raw HiGHS read.
+  `Solution.obj`, `SolverResult.objective` and
+  `SolveDiagnostics.objective_value` still include it.
+- **The `build_only` MPS file no longer carries the constant.**  Before,
+  `build_only` wrote its MPS with HiGHS `writeModel` and the constant was
+  in it; it is not now (it warns when the constant is non-zero).  Every
+  MPS polar-high writes (`write_mps`, `build_only`, the file-based
+  fallback) now leaves the constant out; add the constant you passed to
+  `add_obj_constant` to an objective read from such a file.
+
 ### Added
 
 - **`SolveDiagnostics.mip_gap`**: the relative MIP gap HiGHS reports for
@@ -17,14 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports `NaN` for a maximisation without one; that is normalised to
   `inf`).  The field has a default, so code that builds a
   `SolveDiagnostics` itself keeps working.
-- **Objective-valued solver options in the caller's units:
+- **Objective-valued solver options in user units:
   `Problem.set_objective_scale(factor)` and
   `polar_high.objective_options`.**  A caller that builds its objective
   scaled (the objective given to `set_objective` / `add_obj_constant` is
   `factor` × its own objective) declares the factor once.  Objective
-  targets, bounds, cutoffs and absolute gaps are then written in the
-  caller's units and in the sense of its objective, and polar-high maps
-  them to what the solver compares: levels `q = f·(k·v − O) + O_solver`,
+  targets, bounds, cutoffs and absolute gaps are then written in user
+  units (the units the caller thinks in) and in the sense of its
+  objective, and polar-high maps them to what the solver compares: levels `q = f·(k·v − O) + O_solver`,
   absolute gaps `q = f·k·g`, with `k` the factor, `f = 2**N` for HiGHS'
   `user_objective_scale = N` (1 for every other solver), `O` the objective
   constant and `O_solver` the constant the solver holds itself.  HiGHS
@@ -36,12 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MIP gap, objective difference, pool absolute gap, polish-after absolute
   gap, barrier objective range; Xpress `MIPABSCUTOFF`, `MIPADDCUTOFF`,
   `MIPABSSTOP`; COPT `AbsGap`.  Relative gaps, non-numbers, non-finite
-  values and `|v| >= 1e20` pass unchanged; values are rounded to 15
-  significant digits (a string comes back as the `repr` of the float).
+  values, `|v| >= 1e20` and options whose mapping is the identity pass
+  unchanged; translated values are rounded to 15 significant digits (a
+  string comes back as the `repr` of the float).
   Applied to every in-process HiGHS solve (`Problem.solve`,
   `WarmProblem.solve`, `WarmProblem.solve_with_fallback`) and to
   `polar_high.solvers.solve` for every solver, always in a new dict: the
-  stored options keep the caller's values, so a re-solve or retry never
+  stored options keep the values as written, so a re-solve or retry never
   translates twice.  For a solver that reads a `write_mps` file,
   `Problem.objective_transform(solver, "mps")` and
   `translate_objective_options(solver, options, transform)` give the
@@ -52,26 +80,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Objective-valued HiGHS options are now read in the caller's units.**
+- **Objective-valued HiGHS options are now read in user units.**
   Before, `objective_target`, `objective_bound` and `mip_abs_gap` reached
   HiGHS as given, and HiGHS compared them in its `2**user_objective_scale`
-  scaled space, so with Layer 3 autoscaling on they were off by `2**N`; an
-  `objective_bound` on a maximisation had to be given negated.  With factor
-  1, no `user_objective_scale`, no objective constant and a minimisation,
-  nothing changes.
+  scaled space, so with Layer 3 autoscaling on they were off by `2**N`.
+  When the mapping is the identity (factor 1, no `user_objective_scale`,
+  and for a level no constant to take off and no negation) the value
+  passes untouched, exactly as written.
 - **The objective constant (`add_obj_constant`) is kept out of every
   solver that would not report it consistently, and added to the reported
   objective.**  In-process HiGHS (streaming, `streaming=False`,
-  `WarmProblem`) no longer gets the constant as its objective offset;
-  `Solution.obj` and `SolveDiagnostics.objective_value` still include it,
-  and the new `Solution.obj_offset` holds it.  A raw
-  `Solution.highs.getObjectiveValue()` / `getInfo()` now excludes it, and
-  HiGHS' relative MIP gap is measured on the objective without the
-  constant.  `Problem.build_only` warns that its MPS file does not carry a
-  non-zero constant (as `write_mps` already did).  The file-based solver
-  fallback (`io_api=IOMode.MPS`, and COPT whenever `highspy` is loaded) no
-  longer writes the constant into the MPS file, whose objective-row
-  constant solvers read differently, and adds it to the parsed objective.
+  `WarmProblem`) no longer gets the constant as its objective offset; the
+  new `Solution.obj_offset` holds it.  The file-based solver fallback
+  (`io_api=IOMode.MPS`, and COPT whenever `highspy` is loaded) no longer
+  writes the constant into the MPS file, whose objective-row constant
+  solvers read differently, and adds it to the parsed objective.
 
 ### Fixed
 

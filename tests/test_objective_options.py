@@ -1,4 +1,4 @@
-"""Objective-valued solver options in the caller's objective units.
+"""Objective-valued solver options in user units.
 
 Expected values are hand-computed from ``q = f * (k * v - O) + O_solver``
 (levels; negated for HiGHS ``objective_bound`` under ``max``) and
@@ -13,6 +13,7 @@ import types
 from typing import NamedTuple
 
 import highspy
+import numpy as np
 import polars as pl
 import pytest
 
@@ -109,7 +110,7 @@ def test_sequence_of_named_tuples_keeps_type_and_fields() -> None:
         value: str
         layer: str
 
-    tr = ObjectiveTransform(unit_scale=1e-6)
+    tr = ObjectiveTransform(objective_scale=1e-6)
     items = [Opt("TimeLimit", "60", "cli"), Opt("BestObjStop", "1.5e9", "db")]
     out, recs = translate_objective_options("gurobi", items, tr)
     assert out[0] is items[0]
@@ -146,6 +147,40 @@ def test_maximisation_sign() -> None:
     tr_g = p.objective_transform("gurobi", "direct")
     out_g, _ = translate_objective_options("gurobi", {"Cutoff": 10.0}, tr_g)
     assert out_g == {"Cutoff": 10.0}
+
+
+def test_identity_mapping_passes_values_untouched() -> None:
+    # k = f = 1 and no constant: the values reach the solver as written (no
+    # 15-digit rounding, no string rewrite), and nothing is recorded.
+    tr = ObjectiveTransform()
+    gap = 0.30000000000000004
+    opts = {"objective_target": "1e-7", "mip_abs_gap": gap, "objective_bound": 3}
+    out, recs = translate_objective_options("highs", opts, tr)
+    assert out == opts and out is not opts
+    assert out["objective_target"] == "1e-7"
+    assert out["mip_abs_gap"] is gap
+    assert out["objective_bound"] == 3 and isinstance(out["objective_bound"], int)
+    assert recs == []
+    # Under max, HiGHS objective_bound is negated: not the identity; the
+    # other two still pass untouched.
+    out, recs = translate_objective_options("highs", opts, ObjectiveTransform(sense="max"))
+    assert out["objective_bound"] == -3.0
+    assert out["objective_target"] == "1e-7" and out["mip_abs_gap"] is gap
+    assert [r.name for r in recs] == ["objective_bound"]
+    # A constant the solver holds itself (Gurobi direct, O = O_solver = 5):
+    # levels are the identity.  Under "mps" (O_solver = 0) they are not.
+    p = _scaled_problem(1.0, offset=5.0)
+    out, recs = translate_objective_options(
+        "gurobi", {"Cutoff": "1e-7"}, p.objective_transform("gurobi", "direct")
+    )
+    assert out == {"Cutoff": "1e-7"} and recs == []
+    out, _ = translate_objective_options(
+        "gurobi", {"Cutoff": "1e-7"}, p.objective_transform("gurobi", "mps")
+    )
+    assert out == {"Cutoff": repr(1e-7 - 5.0)}
+    # Any objective scale (k != 1) or HiGHS factor (f != 1) translates.
+    assert not ObjectiveTransform(objective_scale=2.0).is_identity("diff")
+    assert not ObjectiveTransform(solver_factor=2.0).is_identity("diff")
 
 
 def test_set_objective_scale_validation() -> None:
@@ -197,7 +232,7 @@ def test_highs_objective_bound_in_user_units(n: int | None, streaming: bool) -> 
     assert not sol.optimal
 
 
-def test_highs_objective_bound_with_unit_scale() -> None:
+def test_highs_objective_bound_with_objective_scale() -> None:
     # k = 1e-3: HiGHS sees 16 * 1e-3 * x = 0.08 at the optimum; 106 → 0.096
     # (optimal), 104 → 0.064 (infeasible).
     sol = _one_var(4, 106.0, k=1e-3).solve()
@@ -215,6 +250,99 @@ def test_highs_objective_bound_under_max(n: int | None) -> None:
     sol = _one_var(n, 94.0, sense="max").solve()
     assert sol.optimal and sol.obj == pytest.approx(95.0)
     assert not _one_var(n, 96.0, sense="max").solve().optimal
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_highs_objective_bound_with_save_memory(streaming: bool) -> None:
+    # The save_memory streaming solve (MPS round trip inside HiGHS, options
+    # re-applied) gets the translated bound: 106 → 96 > 80 optimal,
+    # 104 → 64 < 80 infeasible.  ``streaming=False`` ignores save_memory
+    # with a warning and must translate the same way.
+    def solve(bound: float):
+        p = _one_var(4, bound)
+        if streaming:
+            return p.solve(save_memory=True)
+        with pytest.warns(UserWarning, match="save_memory"):
+            return p.solve(save_memory=True, streaming=False)
+
+    sol = solve(106.0)
+    assert sol.optimal and sol.obj == pytest.approx(105.0)
+    assert not solve(104.0).optimal
+
+
+# ---------------------------------------------------------------------------
+# Real HiGHS objective_target: max sum(v_i x_i) + 100 over a 60-item binary
+# knapsack, optimum 1797 (variable part 1697); the first incumbent HiGHS
+# finds is 1792 (1692).  objective_target is read in the objective's own
+# sense (HiGHS stops at an incumbent at least as good as the target) and
+# compared in HiGHS' 2**N scaled space without the constant:
+# q = 2**N * (k * T - k * 100).
+# ---------------------------------------------------------------------------
+
+
+def _knapsack(target: float, n: int | None, *, k: float = 1.0) -> fp.Problem:
+    from polar_high.engine import Param, Sum
+
+    rng = np.random.default_rng(0)
+    m = 60
+    w = rng.integers(20, 80, m).astype(float)
+    v = w + rng.integers(0, 10, m)
+    items = list(range(m))
+    p = fp.Problem()
+    x = p.add_var("x", "i", pl.DataFrame({"i": items}), lower=0, upper=1, integer=True)
+    weight = Param(("i",), pl.DataFrame({"i": items, "value": w}))
+    value = Param(("i",), pl.DataFrame({"i": items, "value": v * k}))
+    p.add_cstr(
+        "cap",
+        over=None,
+        sense="<=",
+        lhs_terms={"l": Sum(weight * x, over=("i",))},
+        rhs_terms={"r": float(np.floor(w.sum() / 2)) + 0.5},
+    )
+    p.set_objective(Sum(value * x, over=("i",)), sense="max")
+    p.add_obj_constant(100.0 * k)
+    p.set_objective_scale(k)
+    opts: dict = {
+        "output_flag": False,
+        "threads": 1,
+        "random_seed": 0,
+        "mip_rel_gap": 0.0,
+        "objective_target": target,
+    }
+    if n is not None:
+        opts["user_objective_scale"] = n
+    p.set_solver_options(opts)
+    return p
+
+
+def _target_reached(sol) -> bool:
+    h = sol.highs
+    return h.getModelStatus() == highspy.HighsModelStatus.kObjectiveTarget
+
+
+@pytest.mark.parametrize("n", [None, 4])
+@pytest.mark.parametrize("streaming", [True, False])
+def test_highs_objective_target_under_max(n: int | None, streaming: bool) -> None:
+    # 1750 → 2**N * 1650, below the first incumbent 2**N * 1692: reached
+    # (were the constant left in, 2**N * 1750 is above the optimum 2**N *
+    # 1697 and the solve would run to optimality).
+    sol = _knapsack(1750.0, n).solve(keep_solver=True, streaming=streaming)
+    assert _target_reached(sol) and not sol.optimal
+    # 1798 and 1900 are above the optimum 1797: the solve runs to optimality.
+    # Under N = 4, 1900 untranslated would be below 16 * 1697 and stop at the
+    # first incumbent; negated (minimisation space) it would too.
+    for target in (1798.0, 1900.0):
+        sol = _knapsack(target, n).solve(keep_solver=True, streaming=streaming)
+        assert sol.optimal and sol.obj == pytest.approx(1797.0)
+
+
+def test_highs_objective_target_with_objective_scale() -> None:
+    # k = 1e-3: the objective passed is 1e-3 x the user objective (opt
+    # 1.797); targets stay in user units.
+    sol = _knapsack(1750.0, 4, k=1e-3).solve(keep_solver=True)
+    assert _target_reached(sol)
+    sol = _knapsack(1798.0, 4, k=1e-3).solve(keep_solver=True)
+    assert sol.optimal and sol.objective_in_user_units == pytest.approx(1797.0)
 
 
 def test_constant_is_kept_out_of_highs_and_added_back() -> None:

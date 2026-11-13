@@ -1,4 +1,4 @@
-"""Objective-valued solver options in the caller's objective units.
+"""Objective-valued solver options in user units.
 
 Public home of :mod:`polar_high.solvers._objective_options`; see there for
 the rules.  Typical use for a solver polar-high does not drive itself (e.g.

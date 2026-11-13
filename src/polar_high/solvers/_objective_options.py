@@ -1,4 +1,4 @@
-"""Objective-valued solver options, read in the caller's objective units.
+"""Objective-valued solver options, read in user units.
 
 Some solver options are objective values: a target or bound that stops the
 solve (HiGHS ``objective_target``, Gurobi ``BestObjStop``), a cutoff, or an
@@ -6,8 +6,8 @@ absolute gap.  The solver compares them with the objective it works on,
 which is not always the objective the caller thinks in:
 
 * the caller may build the objective scaled (``Problem.set_objective_scale``:
-  the objective handed to polar-high is ``factor`` times the objective in the
-  caller's units, e.g. currency × 1e-6);
+  the objective handed to polar-high is ``factor`` times the objective in
+  user units, e.g. currency × 1e-6);
 * HiGHS ``user_objective_scale = N`` multiplies the costs by ``2**N`` and
   compares ``objective_target`` / ``objective_bound`` / ``mip_abs_gap`` in
   that scaled space;
@@ -16,8 +16,10 @@ which is not always the objective the caller thinks in:
 * HiGHS compares ``objective_bound`` in its internal minimisation space, so
   for a maximisation the bound has the opposite sign.
 
-This module maps a value the caller writes, in the caller's units and in the
-sense of the objective, to the value the solver needs.  Two kinds of option:
+*User units* are the units of the objective as the caller thinks of it:
+the objective given to polar-high divided by the objective scale ``k``.
+This module maps a value the caller writes, in user units and in the sense
+of the objective, to the value the solver needs.  Two kinds of option:
 
 ``"value"``
     An objective level (target, bound, cutoff, objective limit).  Affine:
@@ -32,7 +34,10 @@ sense of the objective, to the value the solver needs.  Two kinds of option:
 ``O_solver`` the constant the solver itself adds to its objective.  A value
 that is not finite, or whose magnitude is ``1e20`` or more (every solver's
 "infinity" or "off"), passes unchanged.  Relative gaps and tolerances are
-not objective values and are never changed.
+not objective values and are never changed.  When the mapping is the
+identity for an option (``k = f = 1``; for a level also ``O = O_solver`` and
+no minimisation-space negation), its value passes untouched (same object,
+no rounding).
 
 Generic: no knowledge of any caller's model.  ``Problem.objective_transform``
 builds the transform for a :class:`~polar_high.engine.Problem`.
@@ -189,24 +194,24 @@ def _finite_user_value(v: float) -> bool:
 
 @dataclass(frozen=True)
 class ObjectiveTransform:
-    """How a value in the caller's objective units maps to a solver's value.
+    """How a value in user units maps to a solver's value.
 
-    ``unit_scale`` (``k``): the objective given to polar-high is ``k`` times
-    the caller's objective.  ``solver_factor`` (``f``): the solver's own
+    ``objective_scale`` (``k``): the objective given to polar-high is ``k``
+    times the objective in user units.  ``solver_factor`` (``f``): the solver's own
     objective multiplier (HiGHS ``2**user_objective_scale``).  ``offset``
     (``O``): the objective constant in polar-high's units.
     ``solver_offset`` (``O_solver``): the constant the solver adds itself
     (``O`` or 0).  ``sense``: ``"min"`` or ``"max"``.
     """
 
-    unit_scale: float = 1.0
+    objective_scale: float = 1.0
     solver_factor: float = 1.0
     offset: float = 0.0
     solver_offset: float = 0.0
     sense: str = "min"
 
     def __post_init__(self) -> None:
-        for name in ("unit_scale", "solver_factor"):
+        for name in ("objective_scale", "solver_factor"):
             val = getattr(self, name)
             if not (math.isfinite(val) and val > 0.0):
                 raise ValueError(f"ObjectiveTransform.{name} must be finite and > 0; got {val!r}")
@@ -214,23 +219,33 @@ class ObjectiveTransform:
             raise ValueError(f"sense must be 'min' or 'max'; got {self.sense!r}")
 
     def value(self, v: float, *, min_space: bool = False) -> float:
-        """The solver value of objective level ``v`` (caller's units and
+        """The solver value of objective level ``v`` (user units and
         sense).  ``min_space``: the solver reads the option in its internal
         minimisation space (negated under ``sense="max"``).  A non-finite
         ``v`` or ``|v| >= 1e20`` is returned unchanged."""
         v = float(v)
         if not _finite_user_value(v):
             return v
-        q = self.solver_factor * (self.unit_scale * v - self.offset) + self.solver_offset
+        q = self.solver_factor * (self.objective_scale * v - self.offset) + self.solver_offset
         return -q if (min_space and self.sense == "max") else q
 
     def diff(self, g: float) -> float:
-        """The solver value of objective difference ``g`` (caller's units).
+        """The solver value of objective difference ``g`` (user units).
         A non-finite ``g`` or ``|g| >= 1e20`` is returned unchanged."""
         g = float(g)
         if not _finite_user_value(g):
             return g
-        return self.solver_factor * self.unit_scale * g
+        return self.solver_factor * self.objective_scale * g
+
+    def is_identity(self, kind: str, *, min_space: bool = False) -> bool:
+        """Whether the mapping of an option of ``kind`` (``"value"`` or
+        ``"diff"``) is the identity: ``k = f = 1`` and, for a level, ``O =
+        O_solver`` and no negation (``min_space`` under ``sense="max"``)."""
+        if self.objective_scale != 1.0 or self.solver_factor != 1.0:
+            return False
+        if kind == "diff":
+            return True
+        return self.offset == self.solver_offset and not (min_space and self.sense == "max")
 
 
 class Translated(NamedTuple):
@@ -273,8 +288,12 @@ def _translate_one(solver: str, name: str, val: Any, transform: ObjectiveTransfo
     user = _as_float(val)
     if user is None or not _finite_user_value(user):
         return val, None
+    min_space = _min_space(solver, str(name))
+    if transform.is_identity(kind, min_space=min_space):
+        # Nothing to map: the value reaches the solver exactly as written.
+        return val, None
     if kind == "value":
-        q = transform.value(user, min_space=_min_space(solver, str(name)))
+        q = transform.value(user, min_space=min_space)
     else:
         q = transform.diff(user)
     q = _round15(q)
@@ -302,10 +321,12 @@ def translate_objective_options(
     ``options`` is a dict (a new dict is returned, same order) or a sequence
     of ``(name, value, ...)`` tuples (a new list is returned; a named tuple
     keeps its type and its other fields).  The input is never changed.  A
-    string value comes back as the ``repr`` of the float; a number comes
-    back as a float.  Values are rounded to 15 significant digits.  Options
-    that are not objective-valued, values that are not numbers, non-finite
-    values and values with ``|v| >= 1e20`` pass unchanged.  The second
+    translated string value comes back as the ``repr`` of the float; a
+    translated number comes back as a float.  Translated values are rounded
+    to 15 significant digits.  Options that are not objective-valued, values
+    that are not numbers, non-finite values, values with ``|v| >= 1e20``
+    and options whose mapping is the identity
+    (:meth:`ObjectiveTransform.is_identity`) pass unchanged.  The second
     element lists the translated options in order.
     """
     _check_solver(solver)

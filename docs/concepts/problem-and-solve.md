@@ -101,13 +101,13 @@ lowercutoff`/`uppercutoff`, `mip limits lowerobjstop`/`upperobjstop`,
 `simplex limits lowerobj`/`upperobj`, `mip tolerances absmipgap`/
 `objdifference`, `mip pool absgap`, `mip polishafter absmipgap`, `barrier
 limits objrange`; Xpress `MIPABSCUTOFF`, `MIPADDCUTOFF`, `MIPABSSTOP`;
-COPT `AbsGap` — are written in **your** objective units and in the sense
-of your objective, including the constant from `add_obj_constant`.
+COPT `AbsGap` — are written in **user units** (the units of your objective
+as you think of it) and in the sense of your objective, including the constant from `add_obj_constant`.
 polar-high maps them to what the solver compares:
 
 - if you build the objective scaled, declare it with
   `p.set_objective_scale(factor)` (the objective you pass is `factor` ×
-  your objective, e.g. `1e-6` for currency built as million currency);
+  the objective in user units, e.g. `1e-6` for currency built as million currency);
   levels and absolute gaps are multiplied by `factor`;
 - HiGHS' `user_objective_scale = N` multiplies them by `2**N` (HiGHS
   compares them in its scaled space);
@@ -118,8 +118,10 @@ polar-high maps them to what the solver compares:
   the lowest objective you accept.
 
 Relative gaps (`mip_rel_gap`, `MIPGap`, …) and values that are not finite
-or have `|v| >= 1e20` pass unchanged.  The stored options are never
-rewritten.  This applies to every in-process HiGHS solve (`Problem.solve`,
+or have `|v| >= 1e20` pass unchanged.  So does an option whose mapping is
+the identity (factor 1, no `user_objective_scale`, and for a level no
+constant to take off and no negation): its value reaches the solver exactly
+as you wrote it.  The stored options are never rewritten.  This applies to every in-process HiGHS solve (`Problem.solve`,
 `WarmProblem.solve`, `WarmProblem.solve_with_fallback`) and to
 `polar_high.solvers.solve`.  For a solver that reads a file from
 `write_mps`, translate the options yourself:
