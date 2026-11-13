@@ -3074,8 +3074,8 @@ def _sum_cells_in_fixed_order(f: pl.LazyFrame, keep: list[str], reduced: list[st
     ``1e16 + 1 - 1e16`` is ``0`` or ``1`` — and neither the order the joins before produce nor the way a
     polars ``group_by`` splits a group into partial sums (per chunk, per thread, per streaming morsel) is the
     same from run to run.  So the rows are sorted by every dim of the term, then the coefficient (rows equal
-    in every dim come from a repeated key and are then added smallest first), and each group is summed left
-    to right with ``numpy.add.reduceat`` on one contiguous array.  The plan stays lazy: the reduction runs
+    in every dim come from a repeated key and are then added smallest first), and each group is summed with
+    ``numpy.add.reduceat`` on one contiguous array (one fixed association, whatever the chunking).  The plan stays lazy: the reduction runs
     when it is collected, on the whole frame at once (``map_batches``, not streamed in pieces)."""
     keys = [*keep, "col_id"]
     in_schema = f.collect_schema()
@@ -3091,10 +3091,20 @@ def _sum_cells_in_fixed_order(f: pl.LazyFrame, keep: list[str], reduced: list[st
         df = collect_in_memory(df.rechunk().lazy().sort(["col_id", *keep, *reduced, "coef"]))
         new_group = pl.any_horizontal([pl.col(c).ne_missing(pl.col(c).shift(1)) for c in keys])
         starts = np.flatnonzero(df.select(new_group.fill_null(True))[:, 0].to_numpy())
-        sums = np.add.reduceat(df["coef"].to_numpy().astype(np.float64, copy=False), starts)
+        # A null coefficient is skipped, as polars' ``sum`` skips it (an all-null group sums to 0).
+        coef = df["coef"].cast(pl.Float64).fill_null(0.0).to_numpy()
+        sums = np.add.reduceat(coef, starts)
         return df[starts].select(keys).with_columns(coef=pl.Series("coef", sums, dtype=pl.Float64))
 
-    return f.select(*keys, *reduced, "coef").map_batches(_reduce, schema=out_schema)
+    # The pushdowns stay off (polars 2.x's default, not 1.x's): a filter or projection after the Sum pushed
+    # into the input would act on the unsummed rows, or drop a column ``_reduce`` needs.
+    return f.select(*keys, *reduced, "coef").map_batches(
+        _reduce,
+        schema=out_schema,
+        predicate_pushdown=False,
+        projection_pushdown=False,
+        slice_pushdown=False,
+    )
 
 
 def _to_expr(x) -> Expr:

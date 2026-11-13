@@ -10,6 +10,10 @@
 
 from __future__ import annotations
 
+import io
+import itertools
+import sys
+
 import numpy as np
 import polars as pl
 import pytest
@@ -89,3 +93,125 @@ def test_sum_relabel_keeps_single_row_groups() -> None:
     df = collect_in_join_order(fp.Sum(x * c, over=("t",)).terms[0].lazy).sort("col_id")
     assert df.columns == ["p", "col_id", "coef"]
     assert df["coef"].to_list() == [0.1, 0.2, 0.3]
+
+
+def test_sum_skips_a_null_coefficient() -> None:
+    """A null coefficient in a multi-row group is skipped, as polars' ``sum`` skips it; an all-null group
+    sums to 0."""
+    b = fp.Param(
+        ("p", "t"),
+        pl.DataFrame(
+            {
+                "p": ["p0", "p0", "p0", "p1", "p1"],
+                "t": ["t0", "t1", "t2", "t0", "t1"],
+                "value": [1.0, None, 2.5, None, None],
+            },
+            schema={"p": pl.String, "t": pl.String, "value": pl.Float64},
+        ),
+    )
+    prob = fp.Problem()
+    x = prob.add_var("x", ("p",), pl.DataFrame({"p": ["p0", "p1"]}))
+    df = collect_in_join_order(fp.Sum(x * b, over=("t",)).terms[0].lazy)
+    got = dict(zip(df["col_id"].replace_strict(x.frame["col_id"], x.frame["p"]), df["coef"]))
+    assert got == {"p0": 3.5, "p1": 0.0}
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# Block-COO combining reduce vs the reduced ``term.lazy`` (block-COO off): the same bits                    #
+# --------------------------------------------------------------------------------------------------------- #
+
+_P = ["a", "b"]
+_S = ["s2", "s0", "s1"]
+_T = ["t1", "t2", "t3", "t4"]
+# Values that cancel: the bits of a group's sum depend on the order its entries are added in.
+_VALS = [1e16, -1e16, 1.0, 3.0, -7.0, 1e-3]
+
+
+def _enum_cast(frame: pl.DataFrame, enum: bool) -> pl.DataFrame:
+    if not enum:
+        return frame
+    # Categories in reverse lexical order: an Enum sorts by its physical order, a String lexically.
+    return frame.with_columns(
+        pl.col("s").cast(pl.Enum(sorted(_S, reverse=True))),
+        pl.col("t").cast(pl.Enum(sorted(_T, reverse=True))),
+    )
+
+
+def _shared_col_cstr(seed: int, enum: bool) -> fp.Problem:
+    """``Sum(x[p,s,d,t] · c[t,s,p,d], over=(s, t))`` on a Var whose rows share one column per ``p``: each
+    constraint cell adds 12 coefficients, drawn from ``_VALS``, Param rows shuffled and its dims in another
+    order than the Var's."""
+    rng = np.random.default_rng(seed)
+    prob = fp.Problem(dense_axes=("d", "t"))
+    reg = prob.add_var(
+        "x",
+        ("p", "s", "d", "t"),
+        pl.DataFrame({"p": _P, "s": ["s0"] * 2, "d": ["d1"] * 2, "t": ["t1"] * 2}),
+    )
+    cid = dict(zip(reg.frame["p"].to_list(), reg.frame["col_id"].to_list()))
+    rows = list(itertools.product(_P, _S, ["d1"], _T))
+    frame = pl.DataFrame(rows, schema=["p", "s", "d", "t"], orient="row").with_columns(
+        col_id=pl.Series([cid[r[0]] for r in rows], dtype=reg.frame.schema["col_id"])
+    )
+    x = fp.Var("x", ("p", "s", "d", "t"), _enum_cast(frame, enum).sort(["p", "s", "d", "t"]))
+    perm = rng.permutation(len(rows))
+    cf = pl.DataFrame([rows[i] for i in perm], schema=["p", "s", "d", "t"], orient="row")
+    cf = cf.with_columns(value=pl.Series(rng.choice(_VALS, len(rows))))
+    c = fp.Param(("t", "s", "p", "d"), _enum_cast(cf.select("t", "s", "p", "d", "value"), enum))
+    prob.add_cstr(
+        "cap",
+        over=pl.DataFrame({"p": _P, "d": ["d1", "d1"]}),
+        sense="<=",
+        lhs_terms={"x": fp.Sum(x * c, over=("s", "t"))},
+        rhs_terms={"c": 100.0},
+    )
+    return prob
+
+
+def _reduceat(vals: list[float]) -> float:
+    """``numpy.add.reduceat`` of one group, the reduction both paths use (not left to right: numpy fixes its
+    own association)."""
+    return float(np.add.reduceat(np.asarray(vals, dtype=np.float64), [0])[0])
+
+
+def _cell_entries(seed: int, enum: bool, s_first: bool = True) -> list[list[float]]:
+    """Each ``p``'s 12 coefficients of :func:`_shared_col_cstr`, in ``(s, t)`` (or ``(t, s)``) sort order."""
+    rng = np.random.default_rng(seed)
+    rows = list(itertools.product(_P, _S, ["d1"], _T))
+    perm = rng.permutation(len(rows))
+    vals = rng.choice(_VALS, len(rows))
+    by_row = {rows[k]: v for k, v in zip(perm.tolist(), vals.tolist())}
+    s_order = sorted(_S, reverse=enum)
+    t_order = sorted(_T, reverse=enum)
+    if s_first:
+        return [[by_row[(p, s, "d1", t)] for s in s_order for t in t_order] for p in _P]
+    return [[by_row[(p, s, "d1", t)] for t in t_order for s in s_order] for p in _P]
+
+
+@pytest.mark.parametrize("enum", [False, True])
+def test_block_coo_combining_reduce_same_bits_as_lazy_sum(monkeypatch, enum) -> None:
+    monkeypatch.setenv("POLAR_HIGH_BLOCK_COO_MIN_DENSE", "1")
+    monkeypatch.delenv("POLAR_HIGH_DISABLE_BLOCK_COO", raising=False)
+    order_matters = False
+    for seed in range(8):
+        monkeypatch.setenv("POLAR_HIGH_BLOCK_COO_PROFILE", "1")
+        buf = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", buf)
+        on = np.asarray(_shared_col_cstr(seed, enum).canonicalise().val, dtype=np.float64)
+        monkeypatch.setattr(sys, "stderr", sys.__stderr__)
+        monkeypatch.delenv("POLAR_HIGH_BLOCK_COO_PROFILE")
+        assert "kind=sum\tpath=combining" in buf.getvalue(), (
+            "the block-COO combining reduce must fire"
+        )
+        monkeypatch.setenv("POLAR_HIGH_DISABLE_BLOCK_COO", "1")
+        off = np.asarray(_shared_col_cstr(seed, enum).canonicalise().val, dtype=np.float64)
+        monkeypatch.delenv("POLAR_HIGH_DISABLE_BLOCK_COO")
+        assert on.shape == off.shape == (2,)
+        assert np.array_equal(on.view(np.int64), off.view(np.int64)), (seed, on, off)
+        # an independent reference: each cell's entries in the term's dim order (s, t) — an Enum by its
+        # categories, a String lexically — not the Param's (t, s); and that order does change a sum somewhere
+        ref = [_reduceat(cell) for cell in _cell_entries(seed, enum)]
+        assert on.tolist() == ref
+        if ref != [_reduceat(cell) for cell in _cell_entries(seed, enum, s_first=False)]:
+            order_matters = True
+    assert order_matters

@@ -40,7 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a group of nearly cancelling entries such as `1e16, 1, −1e16` could
     come out `0` or `1`.  The block-COO combining reduce sums in the same
     order, so both paths give the same bits.  A Sum over Var dims only (a
-    relabel, one coefficient per group) keeps the hash `group_by`.
+    relabel, one coefficient per group) keeps the hash `group_by`.  A
+    null coefficient is skipped, as polars' `sum` skips it.
+    *Cost:* such a Sum no longer streams — its unsummed rows are sorted
+    in memory when the plan is collected (about +36 bytes per unsummed
+    row at peak, and a sort: a few seconds for tens of millions of rows).
+    A Sum with one coefficient per cell is not affected.
+  - *The autoscale log2 histogram* (`Log2HistogramReducer`, the
+    coefficient-bucket walk): a bucket's `sum log2` was a running float
+    sum over the walk's rows, whose order (hash joins in the prune-down
+    backstop) changes from run to run.  A batch's sum is now correctly
+    rounded (`math.fsum`), the same bits whatever the row order (about
+    40 ns per coefficient).
 
 ## [3.12.4] — 2026-11-11
 
