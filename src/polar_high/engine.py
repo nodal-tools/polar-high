@@ -288,6 +288,42 @@ def _check_highs_names(mode: str) -> str:
     return mode
 
 
+def _highs_objective_factor(options: dict | None) -> float:
+    """``2**N`` for the HiGHS ``user_objective_scale = N`` in ``options``
+    (1.0 when it is not set).  ``N`` may be given as an int, a float or a
+    numeric string, as HiGHS accepts it."""
+    if not options or "user_objective_scale" not in options:
+        return 1.0
+    raw = options["user_objective_scale"]
+    try:
+        n = int(float(raw))
+    except (TypeError, ValueError):
+        # HiGHS rejects the value itself at setOptionValue; no factor.
+        return 1.0
+    return 2.0**n
+
+
+def _highs_objective_options(problem: Problem, options: dict | None, n_options: dict | None = None):
+    """``options`` with HiGHS' objective-valued options mapped from user
+    units to what HiGHS compares (see
+    :mod:`polar_high.objective_options`).
+
+    ``n_options``: the dict whose ``user_objective_scale`` HiGHS will run
+    with (default ``options``, the dict being applied).  Returns a new dict
+    when an option changed, else ``options`` itself; never writes back into
+    the Problem, so a re-solve translates the stored options afresh.
+    """
+    from .solvers._objective_options import has_objective_options, translate_objective_options
+
+    if not has_objective_options("highs", options):
+        return options
+    transform = problem.objective_transform(
+        "highs", "direct", n_options if n_options is not None else options
+    )
+    translated, _records = translate_objective_options("highs", options, transform)
+    return translated
+
+
 def highs_options_need_names(h: highspy.Highs) -> bool:
     """``True`` when an option in :data:`HIGHS_NAME_OPTIONS` is on in ``h``.
 
@@ -3806,6 +3842,11 @@ class Problem:
         self._obj_terms: list[_Term] = []
         self._obj_sense = "min"
         self._obj_offset: float = 0.0
+        # The objective given to ``set_objective`` / ``add_obj_constant`` is
+        # this factor times the objective in user units (see
+        # :meth:`set_objective_scale`).  Objective-valued solver options are
+        # read in user units.
+        self._obj_scale: float = 1.0
         # Generic small-coefficient cutoff.  When > 0.0, any constraint-
         # matrix coefficient OR row-bound (RHS) term whose absolute value
         # is strictly LESS THAN this threshold is floored to exactly
@@ -4315,12 +4356,78 @@ class Problem:
         return _floor_small_coefs(col_obj, floor, uns)
 
     def add_obj_constant(self, value: float) -> None:
-        """Accumulate a constant into the objective offset.  HiGHS adds
-        this to the reported ``getObjectiveValue()`` after solve, so it
-        shows up in ``Solution.obj`` even though no decision variable
-        carries it.  Used for pure-Param objective terms like the §8.1
-        existing-entity fixed cost."""
+        """Accumulate a constant into the objective offset.
+
+        The constant is in the same units as the objective given to
+        :meth:`set_objective` (scaled by :meth:`set_objective_scale` like
+        the rest of the objective).  It shows up in ``Solution.obj`` even
+        though no decision variable carries it.  polar-high keeps it out of
+        HiGHS and adds it to the objective HiGHS reports, so HiGHS'
+        ``user_objective_scale`` and its MIP gaps see only the variable part
+        of the objective (a raw ``Solution.highs.getObjectiveValue()``
+        excludes it).  Used for pure-Param objective terms like an existing
+        entity's fixed cost."""
         self._obj_offset += float(value)
+
+    def set_objective_scale(self, factor: float) -> None:
+        """Declare that the objective given to :meth:`set_objective` and
+        :meth:`add_obj_constant` is ``factor`` times the objective in user
+        units, the units the caller thinks in (e.g. ``1e-6`` for a cost in currency built as
+        million currency).
+
+        Objective-valued solver options (targets, bounds, cutoffs, absolute
+        gaps; see :mod:`polar_high.objective_options`) are then read in user
+        units: polar-high multiplies them by ``factor`` (and by
+        HiGHS' ``2**user_objective_scale``) before they reach HiGHS, and
+        :meth:`objective_transform` gives the same mapping for other
+        solvers.  ``Solution.objective_in_user_units`` is ``Solution.obj /
+        factor``.  ``factor`` must be finite and > 0; the default is 1.0.
+        """
+        f = float(factor)
+        if not (math.isfinite(f) and f > 0.0):
+            raise ValueError(f"set_objective_scale: factor must be finite and > 0; got {factor!r}")
+        self._obj_scale = f
+
+    @property
+    def objective_scale(self) -> float:
+        """The factor set by :meth:`set_objective_scale` (1.0 by default)."""
+        return self._obj_scale
+
+    def objective_transform(
+        self,
+        solver: str,
+        io: str = "direct",
+        options: dict | None = None,
+    ):
+        """The :class:`~polar_high.objective_options.ObjectiveTransform` that
+        maps an objective value in user units to ``solver``'s value
+        for this Problem.
+
+        ``solver``: ``"highs"``, ``"gurobi"``, ``"cplex"``, ``"xpress"`` or
+        ``"copt"``.  ``io``: ``"direct"`` (the solver gets the model through
+        its API, e.g. in-process HiGHS or ``polar_high.solvers.solve``) or
+        ``"mps"`` (the solver reads a file from :meth:`write_mps`, which
+        does not carry the objective constant).  ``options``: the option
+        dict the solver gets; for HiGHS its ``user_objective_scale = N``
+        gives the factor ``2**N`` (``None`` reads the options stored with
+        :meth:`set_solver_options`).  Every other solver has factor 1,
+        whatever the options hold.
+        """
+        from .solvers._objective_options import ObjectiveTransform, solver_keeps_offset
+
+        keeps = solver_keeps_offset(solver, io)
+        factor = 1.0
+        if solver == "highs":
+            opts = options if options is not None else self._solver_options
+            factor = _highs_objective_factor(opts)
+        offset = float(self._obj_offset)
+        return ObjectiveTransform(
+            objective_scale=self._obj_scale,
+            solver_factor=factor,
+            offset=offset,
+            solver_offset=offset if keeps else 0.0,
+            sense=self._obj_sense,
+        )
 
     # -- release ---------------------------------------------------------
 
@@ -4417,6 +4524,11 @@ class Problem:
         ----------
         options
             Per-call HiGHS options dict (overrides ``set_solver_options``).
+            Objective-valued options (``objective_target``,
+            ``objective_bound``, ``mip_abs_gap``) are read in user units and
+            in the objective's sense and mapped to HiGHS' (see
+            :meth:`set_objective_scale` and
+            :mod:`polar_high.objective_options`); the dict is not changed.
         keep_solver
             When ``True``, the live HiGHS instance is kept on the returned
             :class:`Solution` so callers can inspect it post-solve (e.g.
@@ -4560,7 +4672,11 @@ class Problem:
         if _sp_on_ns:
             _sp_emit_ns("nonstreaming_lpview_built")
         # Per-call ``options`` wins over what was stored on the Problem.
-        opts = options if options is not None else self._solver_options
+        # Objective-valued options are mapped to HiGHS' units (a new dict;
+        # the stored options keep the caller's values).
+        opts = _highs_objective_options(
+            self, options if options is not None else self._solver_options
+        )
         result = _highs_run(
             view,
             options=opts,
@@ -4598,6 +4714,8 @@ class Problem:
             highs=sol_highs,
             highs_names_passed=result._highs_names_passed,
             highs_name_passer=result._highs_name_passer if sol_highs is not None else None,
+            obj_offset=float(view.obj_offset),
+            objective_scale=self._obj_scale,
         )
 
     def build_only(
@@ -4644,6 +4762,17 @@ class Problem:
             raise RuntimeError(
                 "Problem.build_only() called on an already-released "
                 "Problem.  Construct a fresh Problem.",
+            )
+        if self._obj_offset:
+            import warnings
+
+            warnings.warn(
+                f"Problem.build_only: the MPS file does not carry the objective "
+                f"constant {self._obj_offset!r} (polar-high keeps it out of "
+                f"HiGHS).  Objectives read from the external solve are off by "
+                f"this amount; add it back.",
+                UserWarning,
+                stacklevel=2,
             )
         self._solve_streaming(
             options=options,
@@ -6136,7 +6265,13 @@ class Problem:
         # Apply solver options BEFORE any model state is established —
         # mirrors the non-streaming path (``presolve`` and friends must
         # be set before HiGHS sees the LP to take effect on run()).
-        opts = options if options is not None else self._solver_options
+        # Objective-valued options are mapped to HiGHS' units here, once, in
+        # a new dict (the stored options keep the caller's values, so a
+        # re-solve translates them afresh); the save_memory re-apply below
+        # reuses this dict.
+        opts = _highs_objective_options(
+            self, options if options is not None else self._solver_options
+        )
         # HiGHS lazily initialises a process-global thread scheduler on
         # the first Highs construction with whatever ``threads`` default
         # is in force (typically ``getRunningHardwareThreads()`` =
@@ -6185,12 +6320,13 @@ class Problem:
         # Jupyter / Spine-Toolbox on Windows where fd 1 is not forwarded.
         route_highs_log_to_stdout(h)
 
-        # Objective sense + offset up front; column data comes next.
+        # Objective sense up front; column data comes next.  The objective
+        # constant (``add_obj_constant``) is NOT passed to HiGHS: HiGHS does
+        # not scale it with ``user_objective_scale``, which corrupts its MIP
+        # bounds and gap.  It is added to the reported objective instead.
         h.changeObjectiveSense(
             highspy.ObjSense.kMaximize if self._obj_sense == "max" else highspy.ObjSense.kMinimize
         )
-        if self._obj_offset:
-            h.changeObjectiveOffset(float(self._obj_offset))
 
         if _sp_on:
             _sp_emit("obj_meta_set")
@@ -7261,7 +7397,9 @@ class Problem:
 
         sol = h.getSolution()
         status_ok = h.getModelStatus() == highspy.HighsModelStatus.kOptimal
-        obj_val = h.getObjectiveValue()
+        # The objective constant was kept out of HiGHS (see the sense set-up).
+        obj_offset = float(self._obj_offset)
+        obj_val = h.getObjectiveValue() + obj_offset
         col_value = np.asarray(sol.col_value, dtype=np.float64)
         row_dual = np.asarray(sol.row_dual, dtype=np.float64) if sol.row_dual else np.zeros(n_rows)
         col_dual = np.asarray(sol.col_dual, dtype=np.float64) if sol.col_dual else np.zeros(n_cols)
@@ -7300,6 +7438,8 @@ class Problem:
             streamed_lp_ranges=streamed_lp_ranges,
             highs_names_passed=names_passed,
             highs_name_passer=name_passer,
+            obj_offset=obj_offset,
+            objective_scale=self._obj_scale,
         )
 
 
@@ -7364,9 +7504,18 @@ class Solution:
         streamed_lp_ranges: dict | None = None,
         highs_names_passed: bool = True,
         highs_name_passer: Callable[[], None] | None = None,
+        obj_offset: float = 0.0,
+        objective_scale: float = 1.0,
     ):
         self.optimal = optimal
         self.obj = obj
+        # The objective constant (``Problem.add_obj_constant``) that
+        # polar-high kept out of HiGHS and added to ``obj``.  A raw
+        # ``highs.getObjectiveValue()`` excludes it;
+        # :meth:`solve_diagnostics` adds it to ``objective_value``.
+        self.obj_offset = float(obj_offset)
+        # ``Problem.set_objective_scale`` factor of the solved Problem.
+        self.objective_scale = float(objective_scale)
         self.col_value = col_value
         self.row_dual = row_dual
         # Reduced-cost duals (per-column).  ``None`` keeps backwards
@@ -7394,6 +7543,12 @@ class Solution:
         # writes) and ``col_names`` / ``row_names`` above are the names.
         self.highs_names_passed = highs_names_passed
         self._highs_name_passer = highs_name_passer
+
+    @property
+    def objective_in_user_units(self) -> float:
+        """``obj`` in user units: ``obj`` divided by the
+        Problem's :meth:`~Problem.set_objective_scale` factor."""
+        return self.obj / self.objective_scale
 
     def pass_names_to_highs(self) -> None:
         """Pass the LP names to the kept HiGHS instance, if the solve left
@@ -7470,7 +7625,7 @@ class Solution:
             max_relative_primal_infeasibility=float(info.max_relative_primal_infeasibility),
             max_dual_infeasibility=float(info.max_dual_infeasibility),
             primal_dual_objective_error=float(info.primal_dual_objective_error),
-            objective_value=float(info.objective_function_value),
+            objective_value=float(info.objective_function_value) + self.obj_offset,
             mip_gap=math.inf if math.isnan(mip_gap) else mip_gap,
         )
 
@@ -7713,6 +7868,9 @@ class WarmProblem:
         self._highs_names_passed = False
         # Lazy state — populated on first solve()
         self._h: highspy.Highs | None = None
+        # The objective constant of the build, kept out of HiGHS and added
+        # to every Solution's ``obj`` (set at the first build).
+        self._obj_offset: float = 0.0
         self._n_cols: int = 0
         self._n_rows: int = 0
         self._col_names: list[str] | None = None
@@ -9000,6 +9158,21 @@ class WarmProblem:
         if highs_options_need_names(self._h):
             self.pass_names_to_highs()
 
+    def _live_highs_option(self, name: str, default):
+        """The live HiGHS handle's value of option ``name`` (``default``
+        when it cannot be read)."""
+        try:
+            got = self._h.getOptionValue(name)
+        except Exception:  # noqa: BLE001 — an unknown option reads as default
+            return default
+        if isinstance(got, tuple):
+            status, val = got
+            ok_status = getattr(highspy.HighsStatus, "kOk", None)
+            if ok_status is not None and status != ok_status:
+                return default
+            return val
+        return got
+
     def _repin_scheduler(self) -> None:
         """``resetGlobalScheduler`` before a re-solve when this instance sets ``threads`` (> 0): the next
         ``run()`` initialises the process-global scheduler with this instance's count."""
@@ -9025,7 +9198,7 @@ class WarmProblem:
         )
         return Solution(
             optimal=status_ok,
-            obj=h.getObjectiveValue(),
+            obj=h.getObjectiveValue() + self._obj_offset,
             col_value=col_value,
             row_dual=row_dual,
             col_dual=col_dual,
@@ -9035,6 +9208,8 @@ class WarmProblem:
             highs=h,
             highs_names_passed=self._highs_names_passed,
             highs_name_passer=self._solution_name_passer(),
+            obj_offset=self._obj_offset,
+            objective_scale=self._p._obj_scale,
         )
 
     def solve_with_fallback(self, fallback_options: dict) -> tuple[Solution, str]:
@@ -9056,6 +9231,11 @@ class WarmProblem:
         optimal or not: the caller decides what a still-failing fallback
         means.
 
+        Objective-valued fallback options are read in user units (as at
+        the build), with the ``user_objective_scale``
+        the retry runs under: the fallback's own value, else the live
+        handle's.
+
         Raises ``ValueError`` on an unknown option name or a rejected
         option value; any options already changed are restored first.
         """
@@ -9064,6 +9244,15 @@ class WarmProblem:
             return sol, "primary"
         h = self._h
         ok_status = getattr(highspy.HighsStatus, "kOk", None)
+        # Objective-valued fallback options in HiGHS' units, with the
+        # ``user_objective_scale`` the retry runs under: the fallback's own
+        # value, else the live handle's.
+        fallback_options = _highs_objective_options(
+            self._p,
+            fallback_options,
+            {"user_objective_scale": self._live_highs_option("user_objective_scale", 0)}
+            | dict(fallback_options or {}),
+        )
         prior: dict = {}
         try:
             for key, val in fallback_options.items():
@@ -9712,8 +9901,9 @@ class WarmProblem:
         lp.sense_ = (
             highspy.ObjSense.kMaximize if p._obj_sense == "max" else highspy.ObjSense.kMinimize
         )
-        if p._obj_offset:
-            lp.offset_ = float(p._obj_offset)
+        # The objective constant is kept out of HiGHS (as in
+        # ``Problem._solve_streaming``) and added to the reported objective.
+        self._obj_offset = float(p._obj_offset)
         if m.col_int.any():
             kCont = highspy.HighsVarType.kContinuous
             kInt = highspy.HighsVarType.kInteger
@@ -9736,7 +9926,9 @@ class WarmProblem:
         h = highspy.Highs()
         if _sp_on:
             _sp_emit("highs_constructed")
-        opts = options if options is not None else p._solver_options
+        # Objective-valued options mapped to HiGHS' units, in a new dict
+        # (never written back: a later fallback translates its own options).
+        opts = _highs_objective_options(p, options if options is not None else p._solver_options)
         # See the streaming-solve block — tear the global scheduler
         # down before re-applying ``threads`` / ``parallel`` on the
         # warm-built Highs.

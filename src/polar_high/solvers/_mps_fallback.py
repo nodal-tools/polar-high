@@ -77,8 +77,10 @@ def _write_mps(view: LpView, path: str) -> None:
     lp.a_matrix_.index_ = view.a_index
     lp.a_matrix_.value_ = view.a_value
     lp.sense_ = highspy.ObjSense.kMaximize if view.sense == "max" else highspy.ObjSense.kMinimize
-    if view.obj_offset:
-        lp.offset_ = float(view.obj_offset)
+    # The objective constant is not written: whether a CLI reads the MPS
+    # objective-row RHS as a constant differs by solver, so
+    # :func:`run_via_file` adds ``view.obj_offset`` to the objective it
+    # parses instead (the solver's options never see the constant).
     if view.integrality is not None:
         kCont = highspy.HighsVarType.kContinuous
         kInt = highspy.HighsVarType.kInteger
@@ -639,6 +641,9 @@ def run_via_file(
                 f"parse at {sol_path}.\n--- stdout ---\n{stdout}\n"
                 f"--- stderr ---\n{stderr}"
             )
+
+        if objective is not None:
+            objective = float(objective) + float(view.obj_offset)
 
         result = SolverResult(
             status=status,

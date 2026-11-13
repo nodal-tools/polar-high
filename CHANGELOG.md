@@ -9,6 +9,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.0] — 2026-11-13
+
+### Behaviour changes for existing users
+
+These affect a `Problem` with an objective constant (`add_obj_constant`)
+or with objective-valued solver options:
+
+- **`objective_bound` on a maximisation is now given in the objective's
+  own sense.**  Before, HiGHS got it as given and read it in its
+  minimisation space, so a bound on a maximisation had to be passed
+  negated; polar-high now negates it.  A caller that negated it itself
+  must drop its own negation, or the bound flips (e.g. a bound that was
+  feasible becomes infeasible).
+- **HiGHS' relative MIP gap is measured without the objective constant.**
+  The constant no longer reaches HiGHS, so `mip_rel_gap` (and the gap
+  HiGHS reports) is relative to the variable part of the objective: a
+  solve with a constant stops at a different point than before.
+- **The HiGHS objective value no longer includes the constant.**  A raw
+  `Solution.highs.getObjectiveValue()` / `getInfo()` (and the LP's
+  `offset_`) exclude it; add `Solution.obj_offset` to a raw HiGHS read.
+  `Solution.obj`, `SolverResult.objective` and
+  `SolveDiagnostics.objective_value` still include it.
+- **The `build_only` MPS file no longer carries the constant.**  Before,
+  `build_only` wrote its MPS with HiGHS `writeModel` and the constant was
+  in it; it is not now (it warns when the constant is non-zero).  Every
+  MPS polar-high writes (`write_mps`, `build_only`, the file-based
+  fallback) now leaves the constant out; add the constant you passed to
+  `add_obj_constant` to an objective read from such a file.
+
+### Added
+
+- **Objective-valued solver options in user units:
+  `Problem.set_objective_scale(factor)` and
+  `polar_high.objective_options`.**  A caller that builds its objective
+  scaled (the objective given to `set_objective` / `add_obj_constant` is
+  `factor` × its own objective) declares the factor once.  Objective
+  targets, bounds, cutoffs and absolute gaps are then written in user
+  units (the units the caller thinks in) and in the sense of its
+  objective, and polar-high maps them to what the solver compares: levels `q = f·(k·v − O) + O_solver`,
+  absolute gaps `q = f·k·g`, with `k` the factor, `f = 2**N` for HiGHS'
+  `user_objective_scale = N` (1 for every other solver), `O` the objective
+  constant and `O_solver` the constant the solver holds itself.  HiGHS
+  `objective_bound`, which HiGHS reads in its minimisation space, is
+  negated for a maximisation.  The options known: HiGHS `objective_target`,
+  `objective_bound`, `mip_abs_gap`; Gurobi `BestObjStop`, `BestBdStop`,
+  `Cutoff`, `MIPGapAbs`, `PoolGapAbs`; CPLEX lower/upper cutoff, MIP
+  lower/upper objective stop, simplex lower/upper objective limit, absolute
+  MIP gap, objective difference, pool absolute gap, polish-after absolute
+  gap, barrier objective range; Xpress `MIPABSCUTOFF`, `MIPADDCUTOFF`,
+  `MIPABSSTOP`; COPT `AbsGap`.  Relative gaps, non-numbers, non-finite
+  values, `|v| >= 1e20` and options whose mapping is the identity pass
+  unchanged; translated values are rounded to 15 significant digits (a
+  string comes back as the `repr` of the float).
+  Applied to every in-process HiGHS solve (`Problem.solve`,
+  `WarmProblem.solve`, `WarmProblem.solve_with_fallback`) and to
+  `polar_high.solvers.solve` for every solver, always in a new dict: the
+  stored options keep the values as written, so a re-solve or retry never
+  translates twice.  For a solver that reads a `write_mps` file,
+  `Problem.objective_transform(solver, "mps")` and
+  `translate_objective_options(solver, options, transform)` give the
+  mapping (a dict, or a sequence of `(name, value, ...)` tuples; named
+  tuples keep their type); `objective_option_kind(solver, name)` says
+  whether an option is a level (`"value"`), a difference (`"diff"`) or
+  neither.  `Solution.objective_in_user_units` is `obj / factor`.
+
+### Changed
+
+- **Objective-valued HiGHS options are now read in user units.**
+  Before, `objective_target`, `objective_bound` and `mip_abs_gap` reached
+  HiGHS as given, and HiGHS compared them in its `2**user_objective_scale`
+  scaled space, so with Layer 3 autoscaling on they were off by `2**N`.
+  When the mapping is the identity (factor 1, no `user_objective_scale`,
+  and for a level no constant to take off and no negation) the value
+  passes untouched, exactly as written.
+- **The objective constant (`add_obj_constant`) is kept out of every
+  solver that would not report it consistently, and added to the reported
+  objective.**  In-process HiGHS (streaming, `streaming=False`,
+  `WarmProblem`) no longer gets the constant as its objective offset; the
+  new `Solution.obj_offset` holds it.  The file-based solver fallback
+  (`io_api=IOMode.MPS`, and COPT whenever `highspy` is loaded) no longer
+  writes the constant into the MPS file, whose objective-row constant
+  solvers read differently, and adds it to the parsed objective.
+
+### Fixed
+
+- **HiGHS MIP bound and gap with an objective constant and
+  `user_objective_scale`.**  HiGHS scales the costs by `2**N` but not the
+  objective offset, so the dual bound mixed scaled and unscaled parts and
+  the reported relative gap could be far too small (e.g. 2.8e-6 against a
+  true 0.42 %), stopping a `mip_rel_gap` solve early with a false
+  optimum.  The constant no longer reaches HiGHS (see Changed), so Layer 3
+  autoscaling stays correct with any constant.
+
 ## [3.13.0] — 2026-11-13
 
 ### Added

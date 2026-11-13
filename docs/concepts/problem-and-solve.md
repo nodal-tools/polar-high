@@ -62,7 +62,7 @@ when you need to look up row indices for warm updates or duals.
 ```python
 sol = p.solve()
 sol.optimal              # bool
-sol.obj                  # float — objective value (with offset applied)
+sol.obj                  # float — objective value (with the add_obj_constant constant)
 sol.value("v")             # polars frame: (*dims, value)
 sol.value_wide("v", …)    # wide-form frame for time-indexed vars
 sol.constraint_dual("balance")   # polars frame: (key, dual)
@@ -91,6 +91,55 @@ sol = p.solve(options={"time_limit": 60.0})
 The per-call `options` overrides the stored options. Keys must match
 HiGHS canonical names; values must be the type HiGHS expects
 (`str`/`int`/`float`/`bool`).
+
+### Objective-valued options
+
+Options that are objective values — HiGHS `objective_target`,
+`objective_bound` and `mip_abs_gap`; Gurobi `BestObjStop`, `BestBdStop`,
+`Cutoff`, `MIPGapAbs`, `PoolGapAbs`; CPLEX `mip tolerances
+lowercutoff`/`uppercutoff`, `mip limits lowerobjstop`/`upperobjstop`,
+`simplex limits lowerobj`/`upperobj`, `mip tolerances absmipgap`/
+`objdifference`, `mip pool absgap`, `mip polishafter absmipgap`, `barrier
+limits objrange`; Xpress `MIPABSCUTOFF`, `MIPADDCUTOFF`, `MIPABSSTOP`;
+COPT `AbsGap` — are written in **user units** (the units of your objective
+as you think of it) and in the sense of your objective, including the constant from `add_obj_constant`.
+polar-high maps them to what the solver compares:
+
+- if you build the objective scaled, declare it with
+  `p.set_objective_scale(factor)` (the objective you pass is `factor` ×
+  the objective in user units, e.g. `1e-6` for currency built as million currency);
+  levels and absolute gaps are multiplied by `factor`;
+- HiGHS' `user_objective_scale = N` multiplies them by `2**N` (HiGHS
+  compares them in its scaled space);
+- the objective constant is taken off a level when the solver does not
+  hold the constant itself;
+- HiGHS reads `objective_bound` in its minimisation space, so under
+  `sense="max"` polar-high passes it negated: a bound on a maximisation is
+  the lowest objective you accept.
+
+Relative gaps (`mip_rel_gap`, `MIPGap`, …) and values that are not finite
+or have `|v| >= 1e20` pass unchanged.  So does an option whose mapping is
+the identity (factor 1, no `user_objective_scale`, and for a level no
+constant to take off and no negation): its value reaches the solver exactly
+as you wrote it.  The stored options are never rewritten.  This applies to every in-process HiGHS solve (`Problem.solve`,
+`WarmProblem.solve`, `WarmProblem.solve_with_fallback`) and to
+`polar_high.solvers.solve`.  For a solver that reads a file from
+`write_mps`, translate the options yourself:
+
+```python
+from polar_high.objective_options import translate_objective_options
+
+transform = p.objective_transform("gurobi", "mps")
+options, translated = translate_objective_options("gurobi", options, transform)
+```
+
+The objective constant is never passed to HiGHS (HiGHS would not scale
+it with `user_objective_scale`, which makes its MIP bound and gap wrong);
+it is added to `sol.obj` and `solve_diagnostics().objective_value`.  A raw
+`sol.highs.getObjectiveValue()` therefore excludes it (`sol.obj_offset`
+holds it), and HiGHS' relative MIP gap is measured on the objective
+without the constant.  `sol.objective_in_user_units` is `sol.obj /
+factor`.
 
 ## See also
 

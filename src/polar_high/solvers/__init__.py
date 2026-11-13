@@ -49,6 +49,28 @@ for _name, _import in [
         pass
 
 
+def _objective_options_for(model, solver_name: str, io: str, options):
+    """``options`` with the objective-valued options of ``solver_name``
+    translated for ``model`` (unchanged when ``model`` has no
+    ``objective_transform`` or ``options`` holds none)."""
+    from ._objective_options import (
+        OBJECTIVE_OPTIONS,
+        has_objective_options,
+        translate_objective_options,
+    )
+
+    transform_of = getattr(model, "objective_transform", None)
+    if (
+        transform_of is None
+        or solver_name not in OBJECTIVE_OPTIONS
+        or not has_objective_options(solver_name, options)
+    ):
+        return options
+    transform = transform_of(solver_name, io, options if solver_name == "highs" else None)
+    translated, _records = translate_objective_options(solver_name, options, transform)
+    return translated
+
+
 def solve(
     model,
     solver_name: str | None = None,
@@ -74,7 +96,12 @@ def solve(
         creds). Pass-through only — polar-high does not inspect or construct
         this.
     **solver_options
-        Forwarded as-is to the underlying solver.
+        Forwarded to the underlying solver.  Objective-valued options
+        (targets, bounds, cutoffs, absolute gaps; see
+        :mod:`polar_high.objective_options`) are read in user units and in
+        the objective's sense and mapped to the solver's (the
+        ``model``'s :meth:`~polar_high.engine.Problem.objective_transform`);
+        every other option is passed as given.
 
     Returns
     -------
@@ -134,6 +161,15 @@ def solve(
             "in-memory adapter."
         )
 
+    # Objective-valued options (targets, bounds, cutoffs, absolute gaps) are
+    # given in user units; map them to what the chosen
+    # solver compares (see :mod:`polar_high.objective_options`).  New dicts:
+    # the caller's options and the Problem's stored options are unchanged.
+    if solver_name != "highs":
+        solver_options = _objective_options_for(
+            model, solver_name, "mps" if io_api == IOMode.MPS else "direct", solver_options
+        )
+
     if io_api == IOMode.MPS:
         # HiGHS: refuse loudly rather than silently round-trip through a
         # temp MPS file (would lose names and incur a write/read cost
@@ -189,6 +225,7 @@ def solve(
         opts = solver_options.pop("options", None)
         if opts is None:
             opts = getattr(model, "_solver_options", None)
+        opts = _objective_options_for(model, "highs", "direct", opts)
         keep_solver = solver_options.pop("keep_solver", False)
         return run(view, env=env, options=opts, keep_solver=keep_solver, **solver_options)
     else:
