@@ -62,10 +62,12 @@ Reducer ordering / parity
   BYTE-IDENTICAL to a whole-collect min/max for every ``batch_rows``.
 * **log2 histogram** (:class:`Log2HistogramReducer`) accumulates per
   bucket ``(sum log2|coef|, count, min, max)``.  ``count``, ``min`` and
-  ``max`` combine exactly across batches; the ``sum log2`` summation
-  ORDER differs from a single whole-collect sum, so the histogram matches
-  a whole-collect histogram only to within floating-point reassociation
-  (exactly for a single batch).  Documented; min/max stays exact.
+  ``max`` combine exactly across batches.  A batch's ``sum log2`` is
+  correctly rounded (``math.fsum``: the same bits whatever order the
+  batch's rows are emitted in); the per-batch sums are added in batch
+  order, so the histogram matches a whole-collect histogram to within
+  floating-point reassociation (and is the correctly rounded sum for a
+  single batch).  min/max stays exact.
 """
 
 from __future__ import annotations
@@ -540,6 +542,30 @@ class ArrayClassifier:
         return out
 
 
+def _bucket_fsums(row_bidx: np.ndarray, logs: np.ndarray, cnt: np.ndarray) -> np.ndarray:
+    """Per bucket the correctly rounded sum (:func:`math.fsum`) of its ``logs``.
+
+    The order the walk emits a batch's triples in is not fixed: the
+    prune-down backstop's hash joins and ``unique`` hand rows over in an
+    order that changes from run to run with the thread scheduling.  A
+    running float sum (``np.bincount`` with weights) then gave a bucket's
+    ``sum log2`` different last bits in different runs.  ``fsum`` is exact
+    before its one rounding, so the sum depends only on which values the
+    batch holds, not on their order (and, unlike numpy's pairwise sum, not
+    on the CPU's SIMD width either)."""
+    if cnt.size == 1:
+        return np.array([math.fsum(logs.tolist())], dtype=np.float64)
+    # A stable sort of small ints is a radix sort: group the rows by bucket.
+    key = row_bidx.astype(np.int16) if cnt.size <= np.iinfo(np.int16).max else row_bidx
+    sorted_logs = logs[np.argsort(key, kind="stable")]
+    ends = np.cumsum(cnt)
+    starts = ends - cnt
+    return np.array(
+        [math.fsum(sorted_logs[s:e].tolist()) for s, e in zip(starts.tolist(), ends.tolist())],
+        dtype=np.float64,
+    )
+
+
 class Log2HistogramReducer(Reducer):
     """Per-bucket ``(sum log2|scaled coef|, count, abs_min, abs_max)``
     accumulator, keyed by a caller-supplied ``col_id -> bucket-key``
@@ -561,10 +587,13 @@ class Log2HistogramReducer(Reducer):
 
     Batch combination
     ------------------
-    ``count`` / ``min`` / ``max`` combine exactly across batches.  The
-    ``sum log2`` is the sum of per-batch partial sums — associative, so it
-    matches a whole-collect histogram to within floating-point
-    reassociation (and EXACTLY for a single batch).  See module docstring.
+    ``count`` / ``min`` / ``max`` combine exactly across batches.  A
+    batch's ``sum log2`` is correctly rounded (:func:`math.fsum`), so it
+    does not depend on the order the batch's rows come in; the result is
+    the per-batch partial sums added in batch order — the same bits in
+    every run, within floating-point reassociation of a whole-collect
+    histogram, and the correctly rounded sum for a single batch.  See
+    module docstring.
     """
 
     def __init__(
@@ -617,12 +646,12 @@ class Log2HistogramReducer(Reducer):
             row_bidx = row_bidx[keep]
             logs = logs[keep]
             a = a[keep]
-        # Segmented reduction over dense bucket indices.  bincount (count,
-        # log2-sum) and minimum/maximum.at (abs-min/max) are order-free, so
+        # Segmented reduction over dense bucket indices.  bincount (count)
+        # and minimum/maximum.at (abs-min/max) are order-free, so
         # count/min/max stay byte-identical to the per-uniq loop; the
-        # log2-sum differs only by FP reassociation.
-        slog = np.bincount(row_bidx, weights=logs, minlength=nb)
+        # log2-sum is correctly rounded per bucket (``_bucket_fsums``).
         cnt = np.bincount(row_bidx, minlength=nb).astype(np.int64)
+        slog = _bucket_fsums(row_bidx, logs, cnt)
         bmin = np.full(nb, np.inf, dtype=np.float64)
         bmax = np.full(nb, -np.inf, dtype=np.float64)
         np.minimum.at(bmin, row_bidx, a)

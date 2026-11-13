@@ -110,6 +110,24 @@ def _ref_minmax_column(term, scale) -> tuple[float | None, float | None]:
     return _reduce_abs(_scale_vals(rids, cids, coef, scale))
 
 
+def _histogram(vals: np.ndarray, cids: np.ndarray, classify) -> dict:
+    """Per bucket ``(sum log2, count, min, max)`` of the finite positive ``vals``; the log2 sum is
+    correctly rounded (``math.fsum``), so it does not depend on the order the (join-ordered) rows come
+    in — the reducer's per-batch sum is correctly rounded too."""
+    logs: dict = {}
+    acc: dict = {}
+    for v, c in zip(vals.tolist(), cids.tolist()):
+        if not math.isfinite(v) or v <= 0:
+            continue
+        bkey = classify(int(c))
+        if bkey is None:
+            continue
+        logs.setdefault(bkey, []).append(math.log2(v))
+        pn, pmin, pmax = acc.get(bkey, (0, math.inf, 0.0))
+        acc[bkey] = (pn + 1, min(pmin, v), max(pmax, v))
+    return {k: (math.fsum(logs[k]), *acc[k]) for k in acc}
+
+
 def _ref_histogram_column(term, scale, classify):
     """Whole-collect log2 histogram over a column-spine (objective) term —
     the reference for the column-mode :class:`Log2HistogramReducer`."""
@@ -118,17 +136,7 @@ def _ref_histogram_column(term, scale, classify):
     coef = df["coef"].to_numpy().astype(np.float64)
     rids = np.full(cids.size, -1, dtype=np.int64)
     vals = np.abs(_scale_vals(rids, cids, coef, scale))
-    acc: dict = {}
-    for v, c in zip(vals.tolist(), cids.tolist()):
-        if not math.isfinite(v) or v <= 0:
-            continue
-        bkey = classify(int(c))
-        if bkey is None:
-            continue
-        lv = math.log2(v)
-        ps, pn, pmin, pmax = acc.get(bkey, (0.0, 0, math.inf, 0.0))
-        acc[bkey] = (ps + lv, pn + 1, min(pmin, v), max(pmax, v))
-    return acc
+    return _histogram(vals, cids, classify)
 
 
 def _ref_histogram_constraint(term, over, scale, classify):
@@ -146,17 +154,7 @@ def _ref_histogram_constraint(term, over, scale, classify):
     cids = df["col_id"].to_numpy().astype(np.int64)
     coef = df["coef"].to_numpy().astype(np.float64)
     vals = np.abs(_scale_vals(rids, cids, coef, scale))
-    acc: dict = {}
-    for v, c in zip(vals.tolist(), cids.tolist()):
-        if not math.isfinite(v) or v <= 0:
-            continue
-        bkey = classify(int(c))
-        if bkey is None:
-            continue
-        lv = math.log2(v)
-        ps, pn, pmin, pmax = acc.get(bkey, (0.0, 0, math.inf, 0.0))
-        acc[bkey] = (ps + lv, pn + 1, min(pmin, v), max(pmax, v))
-    return acc
+    return _histogram(vals, cids, classify)
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +283,7 @@ def test_vpp_histogram_single_batch_exact():
         gs, gn, gmin, gmax = got[k]
         assert gn == rn
         assert gmin == rmin and gmax == rmax
-        assert gs == rs  # single batch ⇒ identical summation order ⇒ exact
+        assert gs == rs  # single batch ⇒ both correctly rounded ⇒ exact, whatever the row order
 
 
 def test_vpp_histogram_batched_fp_tol():
