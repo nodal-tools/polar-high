@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.0] — 2026-11-13
+
 ### Added
 
 - **`SolveDiagnostics.mip_gap`**: the relative MIP gap HiGHS reports for
