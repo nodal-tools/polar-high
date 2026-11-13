@@ -152,8 +152,10 @@ def run(
     lp.a_matrix_.index_ = view.a_index
     lp.a_matrix_.value_ = view.a_value
     lp.sense_ = highspy.ObjSense.kMaximize if view.sense == "max" else highspy.ObjSense.kMinimize
-    if view.obj_offset:
-        lp.offset_ = float(view.obj_offset)
+    # The objective constant is kept out of HiGHS (HiGHS does not scale it
+    # with ``user_objective_scale``, which corrupts its MIP bounds and gap)
+    # and added to the objective HiGHS reports.
+    obj_offset = float(view.obj_offset)
     if view.integrality is not None:
         kCont = highspy.HighsVarType.kContinuous
         kInt = highspy.HighsVarType.kInteger
@@ -208,7 +210,7 @@ def run(
     sol = h.getSolution()
     model_status = h.getModelStatus()
     status = _map_status(model_status)
-    obj_val_raw = h.getObjectiveValue()
+    obj_val_raw = h.getObjectiveValue() + obj_offset
     col_value = np.asarray(sol.col_value, dtype=np.float64)
     row_dual = (
         np.asarray(sol.row_dual, dtype=np.float64)

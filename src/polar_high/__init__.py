@@ -14,6 +14,7 @@ import sys as _sys
 if "polars" not in _sys.modules:
     _os.environ.setdefault("POLARS_MAX_THREADS", "1")
 
+from polar_high import objective_options
 from polar_high._warm_basis import (
     NamedBasis,
     basis_fingerprint,
@@ -53,6 +54,7 @@ from polar_high.engine import (
     WarmProblem,
     Where,
 )
+from polar_high.objective_options import ObjectiveTransform, translate_objective_options
 from polar_high.parallel import (
     prewarm_global_scheduler,
     resolve_worker_count,
@@ -92,6 +94,9 @@ __all__ = [
     "WarmProblem",
     "Solution",
     "SolveDiagnostics",
+    "ObjectiveTransform",
+    "objective_options",
+    "translate_objective_options",
     "NamedBasis",
     "basis_fingerprint",
     "CstrRecord",

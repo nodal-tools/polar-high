@@ -106,6 +106,15 @@ _INSTALL_HINT = (
 )
 
 
+def routes_via_file() -> bool:
+    """Whether :func:`run` routes the solve through the ``copt_cmd`` file
+    path: it does whenever ``highspy`` is loaded in this interpreter (see
+    the coexistence guard in :func:`run`)."""
+    import sys
+
+    return "highspy" in sys.modules
+
+
 def run(
     view: LpView,
     *,
@@ -157,9 +166,8 @@ def run(
     # highspy's symbols.
     # ------------------------------------------------------------------
     import shutil
-    import sys
 
-    if "highspy" in sys.modules:
+    if routes_via_file():
         if shutil.which("copt_cmd") is None:
             raise SolverNotAvailableError(
                 "COPT cannot be used in-process when ``highspy`` is loaded "
