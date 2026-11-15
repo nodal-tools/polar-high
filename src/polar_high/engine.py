@@ -7447,6 +7447,148 @@ class Problem:
 # Solution
 
 
+def _primal_infeasibilities(
+    lower: np.ndarray, value: np.ndarray, upper: np.ndarray, tolerance: float
+) -> np.ndarray:
+    """Per-entry primal infeasibility as HiGHS (1.15) measures it in
+    ``getKktFailures`` (its ``infeasibility()`` helper): the bound residual
+    ``lower - value`` or ``value - upper``, capped at ``tolerance`` when the
+    entry is within the tolerance (the residual can exceed the tolerance by a
+    rounding error there).  Zero for a feasible entry."""
+    below = value < lower
+    above = value > upper
+    residual = np.where(above, value - upper, np.where(below, lower - value, 0.0))
+    infeasible = (value < lower - tolerance) | (value > upper + tolerance)
+    if tolerance > 0:
+        return np.where(infeasible, residual, np.minimum(residual, tolerance))
+    # A zero tolerance makes the residual the infeasibility itself.
+    return np.where(infeasible, residual, 0.0)
+
+
+def _dual_infeasibilities(
+    lower: np.ndarray,
+    value: np.ndarray,
+    upper: np.ndarray,
+    dual: np.ndarray,
+    primal_tolerance: float,
+) -> np.ndarray:
+    """Per-entry dual infeasibility as HiGHS (1.15) measures it in
+    ``getVariableKktFailures``; ``dual`` is already multiplied by the
+    objective sense (+1 minimise, -1 maximise).
+
+    A free entry: ``|dual|``.  An entry whose bound interval is longer than
+    ``sqrt(primal_tolerance)``: below the interval's midpoint the dual must
+    be ``>= 0``, at or above it ``<= 0``; the shortfall is the
+    infeasibility.  A fixed entry, or one with a shorter interval: zero."""
+    with np.errstate(invalid="ignore", over="ignore"):
+        free = np.isneginf(lower) & np.isposinf(upper)
+        length = upper - lower
+        meaningful = (lower < upper) & ~free & (length * length > primal_tolerance)
+        middle = (lower + upper) * 0.5
+        sided = np.where(value < middle, np.maximum(-dual, 0.0), np.maximum(dual, 0.0))
+    out = np.where(meaningful, sided, 0.0)
+    return np.where(free, np.abs(dual), out)
+
+
+def _count_and_max(infeasibility: np.ndarray, tolerance: float) -> tuple[int, float]:
+    """HiGHS' ``num`` (entries above ``tolerance``) and ``max`` of an
+    infeasibility vector (``max`` 0 for an empty vector)."""
+    if infeasibility.size == 0:
+        return 0, 0.0
+    return int(np.count_nonzero(infeasibility > tolerance)), float(infeasibility.max())
+
+
+def user_scaled_kkt_failures(
+    *,
+    col_lower: np.ndarray,
+    col_upper: np.ndarray,
+    col_value: np.ndarray,
+    row_lower: np.ndarray,
+    row_upper: np.ndarray,
+    row_value: np.ndarray,
+    col_continuous: np.ndarray,
+    user_bound_scale: int,
+    user_objective_scale: int,
+    primal_feasibility_tolerance: float,
+    dual_feasibility_tolerance: float,
+    col_dual: np.ndarray | None = None,
+    row_dual: np.ndarray | None = None,
+    sense: int = 1,
+) -> tuple[int, float, int | None, float | None]:
+    """Primal and dual infeasibility counts and maxima of a solution in the
+    user-scaled space HiGHS solved, from the unscaled model and solution it
+    returns.
+
+    HiGHS' ``user_bound_scale = N`` multiplies the bounds and values of the
+    continuous columns and of every row by ``2**N`` (integer columns keep
+    theirs), and ``user_objective_scale = M`` multiplies the duals by
+    ``2**M``.  After the solve it divides them back and recomputes its info
+    counters on the unscaled numbers, while its feasibility tolerance stays
+    as it was.  Multiplying by a power of two is exact in floating point, so
+    this rebuilds the user-scaled numbers exactly and applies HiGHS' own
+    per-entry tests to them.
+
+    ``sense`` is the objective sense (+1 minimise, -1 maximise).  The dual
+    pair is ``None`` when no dual solution is given.  Returns
+    ``(num_primal, max_primal, num_dual, max_dual)``.
+    """
+    bound_factor = 2.0 ** int(user_bound_scale)
+    col_factor = np.where(np.asarray(col_continuous, dtype=bool), bound_factor, 1.0)
+    cl = np.asarray(col_lower, dtype=np.float64) * col_factor
+    cu = np.asarray(col_upper, dtype=np.float64) * col_factor
+    cv = np.asarray(col_value, dtype=np.float64) * col_factor
+    rl = np.asarray(row_lower, dtype=np.float64) * bound_factor
+    ru = np.asarray(row_upper, dtype=np.float64) * bound_factor
+    rv = np.asarray(row_value, dtype=np.float64) * bound_factor
+    p_tol = float(primal_feasibility_tolerance)
+    primal = np.concatenate(
+        [_primal_infeasibilities(cl, cv, cu, p_tol), _primal_infeasibilities(rl, rv, ru, p_tol)]
+    )
+    num_p, max_p = _count_and_max(primal, p_tol)
+    if col_dual is None or row_dual is None:
+        return num_p, max_p, None, None
+    dual_factor = 2.0 ** int(user_objective_scale) * float(sense)
+    cd = np.asarray(col_dual, dtype=np.float64) * dual_factor
+    rd = np.asarray(row_dual, dtype=np.float64) * dual_factor
+    dual = np.concatenate(
+        [_dual_infeasibilities(cl, cv, cu, cd, p_tol), _dual_infeasibilities(rl, rv, ru, rd, p_tol)]
+    )
+    num_d, max_d = _count_and_max(dual, float(dual_feasibility_tolerance))
+    return num_p, max_p, num_d, max_d
+
+
+def _highs_int_option(h, name: str, default: int = 0) -> int:
+    """An integer HiGHS option off a live handle (``default`` when the
+    HiGHS build does not know it)."""
+    try:
+        got = h.getOptionValue(name)
+    except Exception:  # noqa: BLE001 — an older HiGHS without the option
+        return default
+    val = got[1] if isinstance(got, tuple) else got
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _highs_float_option(h, name: str, default: float) -> float:
+    """A float HiGHS option off a live handle (``default`` when unknown)."""
+    try:
+        got = h.getOptionValue(name)
+    except Exception:  # noqa: BLE001 — an older HiGHS without the option
+        return default
+    val = got[1] if isinstance(got, tuple) else got
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+# HiGHS' ``kkt_tolerance`` default: a different value replaces the primal
+# and dual feasibility tolerances in its KKT measures.
+_HIGHS_DEFAULT_KKT_TOLERANCE = 1e-7
+
+
 @dataclass(frozen=True)
 class SolveDiagnostics:
     """Normalised snapshot of a solve's HiGHS status + info counters.
@@ -7469,6 +7611,21 @@ class SolveDiagnostics:
     ``user_objective_scale``).  ``inf`` for an LP, for a MIP without a
     feasible solution (HiGHS's ``NaN`` there is normalised to ``inf``),
     and when not recorded (the default).
+
+    The plain infeasibility counters are HiGHS' own, and HiGHS measures them
+    on the solution it returns: after it has removed any user scaling
+    (``user_bound_scale`` / ``user_objective_scale``).  Its feasibility
+    tolerance is not rescaled, so with ``user_bound_scale = N < 0`` a primal
+    residual within the tolerance in the space HiGHS solved reads ``2**-N``
+    times larger after unscaling.  The ``user_scaled_*`` fields give the
+    counters in the user-scaled space HiGHS solved — rebuilt exactly from
+    the unscaled solution, see :func:`user_scaled_kkt_failures` — and equal
+    the plain ones when no user scaling was applied.
+    ``user_bound_scale`` / ``user_objective_scale`` are the exponents the
+    handle held at snapshot time (0 = none).  The ``user_scaled_*`` fields
+    are ``None`` when not recorded (the default); the dual pair is also
+    ``None`` when the solve has no dual solution.  The relative primal
+    infeasibility stays HiGHS' unscaled one.
     """
 
     model_status: highspy.HighsModelStatus
@@ -7483,6 +7640,12 @@ class SolveDiagnostics:
     primal_dual_objective_error: float
     objective_value: float
     mip_gap: float = math.inf
+    user_bound_scale: int = 0
+    user_objective_scale: int = 0
+    user_scaled_num_primal_infeasibilities: int | None = None
+    user_scaled_max_primal_infeasibility: float | None = None
+    user_scaled_num_dual_infeasibilities: int | None = None
+    user_scaled_max_dual_infeasibility: float | None = None
 
 
 class Solution:
@@ -7614,6 +7777,9 @@ class Solution:
         status = h.getModelStatus()
         feasible = highspy.kSolutionStatusFeasible
         mip_gap = float(info.mip_gap)
+        bound_scale = _highs_int_option(h, "user_bound_scale")
+        objective_scale = _highs_int_option(h, "user_objective_scale")
+        user_scaled = self._user_scaled_counters(h, info, bound_scale, objective_scale)
         return SolveDiagnostics(
             model_status=status,
             model_status_name=status.name,
@@ -7627,6 +7793,73 @@ class Solution:
             primal_dual_objective_error=float(info.primal_dual_objective_error),
             objective_value=float(info.objective_function_value) + self.obj_offset,
             mip_gap=math.inf if math.isnan(mip_gap) else mip_gap,
+            user_bound_scale=bound_scale,
+            user_objective_scale=objective_scale,
+            user_scaled_num_primal_infeasibilities=user_scaled[0],
+            user_scaled_max_primal_infeasibility=user_scaled[1],
+            user_scaled_num_dual_infeasibilities=user_scaled[2],
+            user_scaled_max_dual_infeasibility=user_scaled[3],
+        )
+
+    def _user_scaled_counters(
+        self, h, info, bound_scale: int, objective_scale: int
+    ) -> tuple[int, float, int | None, float | None]:
+        """The ``user_scaled_*`` counters of :meth:`solve_diagnostics`.
+
+        HiGHS' own counters when no user scaling was applied (they are in
+        the space it solved) or when there is no primal solution to measure
+        (they then say "not known").  Otherwise rebuilt from the handle's
+        unscaled model and solution with :func:`user_scaled_kkt_failures`,
+        reading the integrality off the model only when a variable is
+        integer (polar-high declares integrality per variable family)."""
+        own_dual = (int(info.num_dual_infeasibilities), float(info.max_dual_infeasibility))
+        if info.dual_solution_status == highspy.kSolutionStatusNone:
+            own_dual = (None, None)
+        own = (
+            int(info.num_primal_infeasibilities),
+            float(info.max_primal_infeasibility),
+            *own_dual,
+        )
+        if bound_scale == 0 and objective_scale == 0:
+            return own
+        hs = h.getSolution()
+        if not hs.value_valid:
+            return own
+        n_cols = int(h.getNumCol())
+        n_rows = int(h.getNumRow())
+        _st, _n, _cost, col_lower, col_upper, _nnz = h.getCols(
+            n_cols, np.arange(n_cols, dtype=np.int32)
+        )
+        _st, _n, row_lower, row_upper, _nnz = h.getRows(n_rows, np.arange(n_rows, dtype=np.int32))
+        continuous = np.ones(n_cols, dtype=bool)
+        if any(getattr(v, "integer", False) for v in self._vars.values()):
+            integrality = h.getLp().integrality_
+            if len(integrality):
+                k_cont = highspy.HighsVarType.kContinuous
+                continuous = np.array([t == k_cont for t in integrality], dtype=bool)
+        tol_p = _highs_float_option(h, "primal_feasibility_tolerance", 1e-7)
+        tol_d = _highs_float_option(h, "dual_feasibility_tolerance", 1e-7)
+        kkt_tol = _highs_float_option(h, "kkt_tolerance", _HIGHS_DEFAULT_KKT_TOLERANCE)
+        if kkt_tol != _HIGHS_DEFAULT_KKT_TOLERANCE:
+            tol_p = tol_d = kkt_tol
+        _st, obj_sense = h.getObjectiveSense()
+        sense = -1 if obj_sense == highspy.ObjSense.kMaximize else 1
+        dual_valid = bool(hs.dual_valid)
+        return user_scaled_kkt_failures(
+            col_lower=np.asarray(col_lower, dtype=np.float64),
+            col_upper=np.asarray(col_upper, dtype=np.float64),
+            col_value=np.asarray(hs.col_value, dtype=np.float64),
+            row_lower=np.asarray(row_lower, dtype=np.float64),
+            row_upper=np.asarray(row_upper, dtype=np.float64),
+            row_value=np.asarray(hs.row_value, dtype=np.float64),
+            col_continuous=continuous,
+            user_bound_scale=bound_scale,
+            user_objective_scale=objective_scale,
+            primal_feasibility_tolerance=tol_p,
+            dual_feasibility_tolerance=tol_d,
+            col_dual=np.asarray(hs.col_dual, dtype=np.float64) if dual_valid else None,
+            row_dual=np.asarray(hs.row_dual, dtype=np.float64) if dual_valid else None,
+            sense=sense,
         )
 
     def value(self, var_name: str) -> pl.DataFrame:

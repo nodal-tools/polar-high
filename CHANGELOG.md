@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SolveDiagnostics` reports the infeasibility counters in the space
+  HiGHS solved.**  HiGHS measures its info counters after it has removed
+  `user_bound_scale` / `user_objective_scale`, without rescaling its
+  tolerance, so with `user_bound_scale = N < 0` a residual within the
+  tolerance in the solved space reads `2**-N` times larger.  The new
+  fields `user_scaled_num_primal_infeasibilities`,
+  `user_scaled_max_primal_infeasibility`,
+  `user_scaled_num_dual_infeasibilities` and
+  `user_scaled_max_dual_infeasibility` give the counts and maxima in the
+  user-scaled space (rebuilt exactly from the unscaled solution, as the
+  scaling is by powers of two), and `user_bound_scale` /
+  `user_objective_scale` the exponents in effect.  Without user scaling
+  the new counters equal the plain ones.  `engine.user_scaled_kkt_failures`
+  is the array-level function.
+
 ## [3.14.0] — 2026-11-13
 
 ### Behaviour changes for existing users

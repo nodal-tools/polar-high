@@ -208,3 +208,161 @@ def test_solve_diagnostics_mip_gap_defaults_to_inf() -> None:
         objective_value=0.0,
     )
     assert diag.mip_gap == math.inf
+    # No user-scaled counters recorded either.
+    assert diag.user_bound_scale == 0
+    assert diag.user_objective_scale == 0
+    assert diag.user_scaled_num_primal_infeasibilities is None
+    assert diag.user_scaled_max_primal_infeasibility is None
+    assert diag.user_scaled_num_dual_infeasibilities is None
+    assert diag.user_scaled_max_dual_infeasibility is None
+
+
+# --- user-scaled counters ----------------------------------------------------
+
+
+def _user_scaled_case(**overrides):
+    """Hand-built unscaled model + solution (all numbers exact in binary).
+
+    Columns (lower, upper, value, continuous, dual):
+      c0 [0, 10]      10.5        cont   0.5
+      c1 [0, inf)     -3e-8       int   -0.25
+      c2 free         5           cont   1e-8
+      c3 [0, 1]       1 + 2e-7    cont   0
+    Row r0 fixed at 5, activity 5.25, dual 3.
+    """
+    case = dict(
+        col_lower=np.array([0.0, 0.0, -np.inf, 0.0]),
+        col_upper=np.array([10.0, np.inf, np.inf, 1.0]),
+        col_value=np.array([10.5, -3e-8, 5.0, 1.0 + 2e-7]),
+        row_lower=np.array([5.0]),
+        row_upper=np.array([5.0]),
+        row_value=np.array([5.25]),
+        col_continuous=np.array([True, False, True, True]),
+        user_bound_scale=-2,
+        user_objective_scale=1,
+        primal_feasibility_tolerance=1e-7,
+        dual_feasibility_tolerance=1e-7,
+        col_dual=np.array([0.5, -0.25, 1e-8, 0.0]),
+        row_dual=np.array([3.0]),
+        sense=1,
+    )
+    case.update(overrides)
+    return case
+
+
+def test_user_scaled_primal_counters_by_hand() -> None:
+    """``user_bound_scale = -2`` multiplies continuous columns and rows by
+    1/4.  c0: 10.5 vs 10 → 2.625 vs 2.5, residual 0.125 (counted).  c1 is
+    integer, so unscaled: -3e-8 is within 1e-7 of 0, residual 3e-8 (not
+    counted).  c2 is free.  c3: residual 2e-7 unscaled (would count) →
+    5e-8 scaled (does not).  r0: 5.25 vs 5 → 1.3125 vs 1.25, residual
+    0.0625 (counted).  So num 2, max 0.125."""
+    num_p, max_p, _num_d, _max_d = fp.engine.user_scaled_kkt_failures(**_user_scaled_case())
+    assert num_p == 2
+    assert max_p == 0.125
+
+
+def test_user_scaled_dual_counters_by_hand() -> None:
+    """``user_objective_scale = 1`` doubles the duals; minimising.
+    c0 (2.625, above the midpoint 1.25 of [0, 2.5]) needs dual <= 0:
+    1.0 → infeasibility 1.0.  c1 ([0, inf), below the infinite midpoint)
+    needs dual >= 0: -0.5 → 0.5.  c2 free: |2e-8| (not counted).  c3 dual
+    0.  r0 is fixed → 0.  So num 2, max 1.0."""
+    _num_p, _max_p, num_d, max_d = fp.engine.user_scaled_kkt_failures(**_user_scaled_case())
+    assert num_d == 2
+    assert max_d == 1.0
+
+
+def test_user_scaled_dual_counters_maximising() -> None:
+    """Maximising flips the dual signs: c0 -1.0 and c1 0.5 now satisfy
+    their conditions; only the free c2 has |2e-8| left: num 0, max 2e-8."""
+    _num_p, _max_p, num_d, max_d = fp.engine.user_scaled_kkt_failures(**_user_scaled_case(sense=-1))
+    assert num_d == 0
+    assert max_d == 2e-8
+
+
+def test_user_scaled_without_dual_solution() -> None:
+    num_p, max_p, num_d, max_d = fp.engine.user_scaled_kkt_failures(
+        **_user_scaled_case(col_dual=None, row_dual=None)
+    )
+    assert (num_p, max_p) == (2, 0.125)
+    assert num_d is None and max_d is None
+
+
+# An LP with equality rows that a truncated interior-point solve leaves
+# primal and dual infeasible: random integer A (8 x 20), b = A @ x* for an
+# interior x*, 0 <= x <= 10.
+_RNG = np.random.default_rng(1)
+_A = _RNG.integers(1, 9, (8, 20)).astype(float)
+_RHS = _A @ _RNG.uniform(1, 5, 20)
+_COST = _RNG.uniform(1, 9, 20)
+_TRUNCATED_IPM = {
+    "solver": "ipm",
+    "ipm_iteration_limit": 1,
+    "presolve": "off",
+    "run_crossover": "off",
+}
+
+
+def _equality_lp(bound_factor: float, cost_factor: float, solver_options: dict) -> fp.Problem:
+    p = fp.Problem()
+    cols = pl.DataFrame({"j": list(range(20))})
+    rows = pl.DataFrame({"k": list(range(8))})
+    x = p.add_var("x", "j", cols, lower=0.0, upper=10.0 * bound_factor)
+    a = fp.Param(
+        ("k", "j"),
+        pl.DataFrame(
+            {
+                "k": np.repeat(np.arange(8), 20).tolist(),
+                "j": np.tile(np.arange(20), 8).tolist(),
+                "value": _A.ravel().tolist(),
+            }
+        ),
+    )
+    b = fp.Param(
+        ("k",), pl.DataFrame({"k": list(range(8)), "value": (_RHS * bound_factor).tolist()})
+    )
+    p.add_cstr(
+        "bal", over=rows, sense="==", lhs_terms={"ax": fp.Sum(a * x, over="j")}, rhs_terms={"b": b}
+    )
+    c = fp.Param(
+        ("j",), pl.DataFrame({"j": list(range(20)), "value": (_COST * cost_factor).tolist()})
+    )
+    p.set_objective(fp.Sum(c * x, over="j"), sense="min")
+    p.set_solver_options({"output_flag": False, **solver_options})
+    return p
+
+
+def test_user_scaled_counters_match_highs_on_the_prescaled_model() -> None:
+    """With ``user_bound_scale = -4`` / ``user_objective_scale = 3`` HiGHS
+    solves the LP whose bounds are 1/16 and costs 8 times the given ones.
+    Solving that LP directly, without user scaling, gives HiGHS' own
+    counters in that space: the user-scaled counters must equal them
+    exactly, while the plain (unscaled) counters differ."""
+    scaled = _equality_lp(
+        1.0, 1.0, {**_TRUNCATED_IPM, "user_bound_scale": -4, "user_objective_scale": 3}
+    )
+    diag = scaled.solve(keep_solver=True).solve_diagnostics()
+    oracle = (
+        _equality_lp(2.0**-4, 2.0**3, _TRUNCATED_IPM).solve(keep_solver=True).solve_diagnostics()
+    )
+    assert diag is not None and oracle is not None
+    assert (diag.user_bound_scale, diag.user_objective_scale) == (-4, 3)
+    assert diag.user_scaled_num_primal_infeasibilities == oracle.num_primal_infeasibilities
+    assert diag.user_scaled_max_primal_infeasibility == oracle.max_primal_infeasibility
+    assert diag.user_scaled_num_dual_infeasibilities == oracle.num_dual_infeasibilities
+    assert diag.user_scaled_max_dual_infeasibility == oracle.max_dual_infeasibility
+    # The truncated solve is primal infeasible, and the unscaled residual
+    # reads 2**4 times the scaled one.
+    assert oracle.max_primal_infeasibility > 0.0
+    assert diag.max_primal_infeasibility == 16.0 * diag.user_scaled_max_primal_infeasibility
+
+
+def test_user_scaled_counters_equal_plain_ones_without_user_scaling() -> None:
+    diag = _equality_lp(1.0, 1.0, _TRUNCATED_IPM).solve(keep_solver=True).solve_diagnostics()
+    assert diag is not None
+    assert (diag.user_bound_scale, diag.user_objective_scale) == (0, 0)
+    assert diag.user_scaled_num_primal_infeasibilities == diag.num_primal_infeasibilities
+    assert diag.user_scaled_max_primal_infeasibility == diag.max_primal_infeasibility
+    assert diag.user_scaled_num_dual_infeasibilities == diag.num_dual_infeasibilities
+    assert diag.user_scaled_max_dual_infeasibility == diag.max_dual_infeasibility
