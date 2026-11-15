@@ -138,8 +138,8 @@ Per-axis precedence (independent for objective and bound):
 
 1. **Caller-set on the Problem** — `Problem.get_solver_option("user_bound_scale")` returns non-`None`. The recommender preserves it. `Layer3Plan.bound_skipped_external = True`.
 2. **Caller-set on the config** — `config.user_bound_scale is not None`. The recommender uses your value verbatim. Reasoning string mentions `"manual override"`.
-3. **Default auto** — power-of-two exponent that pulls `max(|b|)` into HiGHS' `[1e-4, 1e+6]` comfort zone. Outer-rounded `log2`. Same conservative rule HiGHS' own `suggestScaling` uses. On a severe overshoot (`max_b >= 1e9`) whose clamp would crush the small end, the clamp is kept ("smallest-side", see *Why* below).
-4. **Tolerance window** — the automatic bound exponent is then clipped into `bound_scale_window(b_lo*, b_hi, tol)`: the exponents that keep the scaled pool inside `[10·tol, 1e18·tol]` (`[1e-6, 1e11]` at HiGHS' default `tol = 1e-7`, 17 decades at any tolerance), with the small end at `100·tol` or more whenever the large end still fits. `tol` is the explicit `primal_feasibility_tolerance` on the Problem (`kkt_tolerance` replaces it when set to anything but `1e-7`, as in HiGHS), or the `primal_feasibility_tolerance=` keyword. No exponent fits → the tier exponent is kept and tagged `unscalable`. Manual and external exponents are not clipped.
+3. **Default auto** — power-of-two exponent that pulls `max(|b|)` into HiGHS' `[1e-4, 1e+6]` comfort zone. The bound / RHS pool is `RangeReport.bound_rhs_meaningful` when the report has it (no values at or above `infinite_bound`, no residue, no integer-column bounds), else the raw `bound` ∪ `rhs` range. Outer-rounded `log2`. Same conservative rule HiGHS' own `suggestScaling` uses. On a severe overshoot (`max_b >= 1e9`) whose clamp would crush the small end, the clamp is kept ("smallest-side", see *Why* below).
+4. **Tolerance window** — the automatic bound exponent is then clipped into `bound_scale_window(b_lo*, b_hi, tol)`: the exponents that keep the scaled pool inside `[10·tol, 1e18·tol]` (`[1e-6, 1e11]` at HiGHS' default `tol = 1e-7`, 17 decades at any tolerance). Only in the "smallest-side" tier, where the range forces a choice anyway, the small end is put at `100·tol` or more whenever the large end still fits; the other tiers (in-zone, clamp, refuse) keep the `10·tol` edge, so a pool like `[1e-6, 1e3]` stays at `N = 0`. `tol` is the explicit `primal_feasibility_tolerance` on the Problem — the tolerance the simplex enforces on the bounds; `kkt_tolerance` does not replace it here (the solve diagnostics keep HiGHS' `kkt_tolerance` rule) — or the `primal_feasibility_tolerance=` keyword. No exponent fits → `N` keeps the smallest meaningful limit at `10·tol` or more (`n_min_hard`), capped so the largest stays below `infinite_bound`, clamped to `[-30, 30]`; tag `unscalable+smallest-side`. Manual and external exponents are not clipped.
 
 The resulting `Layer3Plan`:
 
@@ -153,7 +153,7 @@ class Layer3Plan:
     objective_skipped_external: bool    # was the objective axis precedence-respected?
     bound_skipped_external: bool        # was the bound axis precedence-respected?
     bound_source: str                   # "auto" / "manual" / "external"
-    bound_tag: str                      # tier tag, "+raised"/"+lowered" by the window, or "unscalable"
+    bound_tag: str                      # tier tag, "+raised"/"+lowered" by the window, or "unscalable+smallest-side"
     bound_window: ScaleWindow | None    # the window the automatic exponent was clipped into
     primal_feasibility_tolerance: float # the tolerance the window used
 ```
@@ -172,7 +172,7 @@ A pure judgement of the LP HiGHS will receive (`ranges`, before `user_*_scale`) 
 |---|---|---|
 | `bound_rhs` | spread above `warn_decades` | the scaled pool leaves `[10·tol, 1e18·tol]` (kind `spread` / `scale_option_limit` when no exponent fits, or the manual / external / unscaled exponent is outside the window) |
 | `cost` | spread above `warn_decades`, or the smallest scaled cost below `10·dual_tol` | — |
-| `matrix` | a scaled term at or below `small_matrix` (`1e-9`: HiGHS drops it) | one at or above `large_matrix` (`1e15`: HiGHS refuses the model) |
+| `matrix` | a scaled term at or below `small_matrix` (`1e-9`: HiGHS drops it); one at or above `large_matrix` (`1e15`, kind `refused`: HiGHS will refuse the model and report it itself) | — |
 | `info` | residue left out, values beyond `infinite_bound`, integer bounds | — |
 
 Integer columns are scaled as HiGHS scales them (matrix terms `× 2**N_bnd`, costs `× 2**(N_obj+N_bnd)`). `apply_user_scale=False` judges the LP at `N = 0` (a solver that gets no `user_*_scale`). `ranges_pre` (the readout before a Layer 2 rewrite) sets `Finding.caused_by_prescale` when only the rewritten LP fails. Each finding carries `numbers` (spread, scaled ends, `r_lo` = the fraction of the smallest limit HiGHS may violate, its model-unit amount, the window, and what fitting the largest value would cost the smallest limit) and the `extremes` holding each end.
@@ -181,7 +181,7 @@ Integer columns are scaled as HiGHS scales them (matrix terms `× 2**N_bnd`, cos
 
 ## Checking each solve — `pre_run_check`
 
-`Problem.solve(pre_run_check=fn)` calls `fn(ranges, highs)` once, right before `HiGHS.run()`, with `streamed_lp_ranges` plus `col_bound_meaningful` / `row_bound_meaningful` (the pool of the LP actually built, with the residue floor applied), `bound_rhs_residue`, `bound_rhs_beyond_infinite`, `residue_floor` and `infinite_bound`. It may set options on `highs` (e.g. `user_bound_scale`), return a dict of options to set, or raise (no solve runs). Streaming path only; `build_only` and `WarmProblem` solves do not call it.
+`Problem.solve(pre_run_check=fn)` calls `fn(ranges, highs)` once, right before `HiGHS.run()`, with `streamed_lp_ranges` plus `col_bound_meaningful` / `row_bound_meaningful` (the pool of the LP actually built, with the residue floor applied), `bound_rhs_residue`, `bound_rhs_beyond_infinite`, `residue_floor`, `infinite_bound`, and the `(min, max)` pairs `matrix_continuous` / `integer_matrix`, `cost_continuous` / `integer_cost` and `integer_bound` (HiGHS multiplies an integer column's matrix entries and cost by `2**user_bound_scale`). It may set options on `highs` (e.g. `user_bound_scale`), return a dict of options to set, or raise (no solve runs). The `highs_names="auto"` names decision is taken after it. Streaming path only (`ValueError` with `streaming=False`). `WarmProblem.solve(pre_run_check=fn)` calls it on the first build (same keys, from the canonical matrix); a re-solve of the built instance does not. `build_only(path, pre_run_check=fn)` calls it before writing the MPS file and returns the options it returned or set on the handle, since the file carries none.
 
 ## Apply — wiring back onto the Problem
 
@@ -226,7 +226,7 @@ HiGHS' built-in recommendation looks at `max(bound_max, rhs_max)` and picks a de
 
 - **Example 1 model from FlexTool** has `RHS = (1.84e-3, 2.02e+8)`. HiGHS' formula picks `N=-8`, scaled RHS min becomes `7.2e-6`, which is below `_HIGHS_SMALL_BOUND` (`1e-4`). Presolve then mis-handles those near-zero rows and the LP comes back **infeasible** — even though solving with `N=0` and presolve off finds the optimum cleanly. **Min-floor guard**: when the proposed `N` would drag the scaled min below `1e-4`, `recommend_scaling` refuses to recommend that `N` and returns the current scale unchanged (reasoning tag `"refuse"`).
 
-- **Example 2 model from FlexTool** has bounds spanning so many decades that *every* power-of-two clamp crushes one end. For those — when `max_b >= 1e+9` (a "severe overshoot") — refusing is worse, so the clamp is kept (reasoning tag `"smallest-side"`) and the **tolerance window** decides where the range lands: HiGHS checks `primal_feasibility_tolerance` as an absolute amount on the *scaled* bounds, so the smallest meaningful limit must stay well above it. The window lifts the exponent until the smallest limit sits at `100·tol` (or at least `10·tol`) and gives the excess to the large end, up to `1e18·tol`. (Up to 3.14 this branch centred the range geometrically on the comfort band, tag `"escape"`; with a tolerance of `1e-7` that could leave the smallest limit below the tolerance itself.)
+- **Example 2 model from FlexTool** has bounds spanning so many decades that *every* power-of-two clamp crushes one end. For those — when `max_b >= 1e+9` (a "severe overshoot") — refusing is worse, so the clamp is kept (reasoning tag `"smallest-side"`) and the **tolerance window** decides where the range lands: HiGHS checks `primal_feasibility_tolerance` as an absolute amount on the *scaled* bounds, so the smallest meaningful limit must stay well above it. The window lifts the exponent until the smallest limit sits at `100·tol` (or at least `10·tol`) and gives the excess to the large end, up to `1e18·tol`. This branch is the only one that aims for `100·tol`. (Up to 3.14 this branch centred the range geometrically on the comfort band, tag `"escape"`; with a tolerance of `1e-7` that could leave the smallest limit below the tolerance itself.)
 
 Both behaviours are baked into `_recommend_bound_scale` + the window. The `Layer3Plan.reasoning` string (and `bound_tag`) surfaces which branch fired:
 
@@ -236,7 +236,7 @@ Both behaviours are baked into `_recommend_bound_scale` + the window. The `Layer
 - `"smallest-side"` — severe overshoot; the window lifts the small end.
 - `"refuse"` — min-floor guard tripped; recommendation skipped.
 - `"+raised"` / `"+lowered"` suffix — the tolerance window moved the exponent.
-- `"unscalable"` — no exponent fits the window; `assess_scaling` reports an error.
+- `"unscalable+smallest-side"` — no exponent fits the window; the smallest meaningful limit is kept enforceable and `assess_scaling` reports an error.
 
 ## Migration from `auto_user_bound_scale=True`
 

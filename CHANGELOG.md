@@ -20,15 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1e-7` that could leave the smallest limit below the tolerance itself,
   so HiGHS did not enforce it.  It now keeps the large-end clamp (tag
   `smallest-side`) and clips every automatic `user_bound_scale` into the
-  window that keeps the bound / RHS pool inside `[10·tol, 1e18·tol]`,
-  with the smallest meaningful limit at `100·tol` or more whenever the
-  largest still fits (tag suffix `+raised` / `+lowered`; `unscalable` when
-  no exponent fits).  **`N` in that tier now depends on the primal
-  feasibility tolerance**: e.g. a pool `1e-3 … 1e12` gets `N = -6` at
-  `1e-7` (it got `-12`); a pool `2.1e-5 … 1.4e9` gets `-1` at `1e-7` and
-  `-4` at `1e-8`.  Other tiers keep their exponent unless it leaves the
-  window (a smallest limit below `100·tol` at that exponent).  Manual and
-  external exponents are unchanged.
+  window that keeps the bound / RHS pool inside `[10·tol, 1e18·tol]`
+  (tag suffix `+raised` / `+lowered`).  In the smallest-side tier only,
+  where the range forces a choice, the smallest meaningful limit is put at
+  `100·tol` or more whenever the largest still fits.  **`N` in that tier
+  now depends on the primal feasibility tolerance**: e.g. a pool
+  `1e-3 … 1e12` gets `N = -6` at `1e-7` (it got `-12`); a pool
+  `2.1e-5 … 1.4e9` gets `-1` at `1e-7` and `-4` at `1e-8`.  Other tiers
+  (in-zone, clamp, refuse) keep their exponent unless it leaves the hard
+  window (a smallest limit below `10·tol` at that exponent), so a pool
+  like `[1e-6, 1e3]` stays at `N = 0`.  When no exponent fits, `N` keeps
+  the smallest meaningful limit at `10·tol` or more, capped so the largest
+  stays below `infinite_bound` and clamped to `[-30, 30]` (tag
+  `unscalable+smallest-side`; e.g. `0.5 … 1e18` at `1e-7` → `-18`).
+  **The tier reads the meaningful pool** (`bound_rhs_meaningful`: no values
+  at or above `infinite_bound`, no residue, no integer-column bounds) when
+  the report has it; the raw bound ∪ RHS range only without it.  The
+  window and the residue floor use `primal_feasibility_tolerance` (the
+  tolerance the simplex enforces); `kkt_tolerance` no longer replaces it
+  there (the solve diagnostics keep that HiGHS rule).  Manual and external
+  exponents are unchanged.
 
 ### Added
 
@@ -47,25 +58,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`assess_scaling(ranges, plan, *, primal_tol, dual_tol, ...)`** →
   `ScalingVerdict`: bound / RHS outside the tolerance window is an error,
   a spread above `warn_decades` (default 13) a warning; costs warn only;
-  matrix terms HiGHS would drop warn, ones it would refuse are an error;
+  matrix terms HiGHS would drop warn, and so do ones at or above `1e15`
+  (kind `refused`: HiGHS will refuse the model and report it itself);
   integer columns judged as HiGHS scales them; `apply_user_scale=False`
   judges at `N = 0`; `ranges_pre` marks findings caused by a pre-scaling
   rewrite.  Policy (raise or warn) stays with the caller.
   `bound_scale_window` gives the window of exponents for a pool;
   `Layer3Plan` gains `bound_source`, `bound_tag`, `bound_window` and
   `primal_feasibility_tolerance`; `recommend_scaling` takes
-  `primal_feasibility_tolerance=` (default: the Problem's, as HiGHS
-  applies it with `kkt_tolerance`).
+  `primal_feasibility_tolerance=` (default: the Problem's explicit
+  `primal_feasibility_tolerance`, else `1e-7`).
 - **`locate_extremes(problem, family, group, side, *, k=5)`** names the
   `k` smallest / largest entries of one family (dimension values decoded,
   count within a factor) with the bounded walk (`TopKAbsReducer`).
 - **`Problem.solve(pre_run_check=fn)`** calls `fn(ranges, highs)` right
   before `HiGHS.run()` with the streamed ranges plus the floored pool of
   the LP actually built (`col_bound_meaningful`, `row_bound_meaningful`,
-  …); it may set options (e.g. `user_bound_scale`), return options to set,
-  or raise so that no solve runs.  Streaming path only.
+  …) and the integer / continuous matrix, cost and integer-bound pairs
+  (`integer_matrix`, `integer_cost`, `matrix_continuous`, …); it may set
+  options (e.g. `user_bound_scale`), return options to set, or raise so
+  that no solve runs.  The `highs_names="auto"` names decision follows
+  it.  Streaming path only.  Also `WarmProblem.solve(pre_run_check=fn)`
+  (first build only, the same keys) and `build_only(path,
+  pre_run_check=fn)` (before the MPS file is written; returns the options
+  the hook returned or set on the handle, as the file carries none).
 - `resolve_feasibility_tolerances`, `resolve_infinite_bound` (and their
-  `*_from_options` forms) read those options as HiGHS applies them.
+  `*_from_options` forms) read those options as HiGHS applies them;
+  `kkt_override=False` gives the tolerances the simplex enforces.
+- `Solution.solve_diagnostics()` is cached on the Solution (a second call
+  is free), and the MIP user-scaled rebuild takes its integrality from the
+  variable families instead of copying HiGHS' LP.
 - **`SolveDiagnostics` reports the infeasibility counters in the space
   HiGHS solved.**  HiGHS measures its info counters after it has removed
   `user_bound_scale` / `user_objective_scale`, without rescaling its
