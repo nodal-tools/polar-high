@@ -69,12 +69,17 @@ def _as_float(value: Any, default: float) -> float:
     return out if out == out else default  # NaN -> default
 
 
-def feasibility_tolerances_from_options(options: Mapping[str, Any] | None) -> tuple[float, float]:
-    """``(primal, dual)`` feasibility tolerances HiGHS will use for an
-    options mapping: the explicit ``primal_feasibility_tolerance`` /
-    ``dual_feasibility_tolerance`` (else HiGHS' default ``1e-7``), both
+def feasibility_tolerances_from_options(
+    options: Mapping[str, Any] | None, *, kkt_override: bool = True
+) -> tuple[float, float]:
+    """``(primal, dual)`` feasibility tolerances for an options mapping: the
+    explicit ``primal_feasibility_tolerance`` / ``dual_feasibility_tolerance``
+    (else HiGHS' default ``1e-7``).  With ``kkt_override`` (default) both are
     replaced by ``kkt_tolerance`` when that is set to anything other than its
-    default — HiGHS' own rule."""
+    default — HiGHS' rule for its KKT checks, which the solve diagnostics
+    follow.  ``kkt_override=False`` gives the tolerances the simplex enforces
+    on the bounds, which the scaling checks (Layer 3 window, residue floor)
+    use."""
     opts = options or {}
     p = opts.get("primal_feasibility_tolerance")
     d = opts.get("dual_feasibility_tolerance")
@@ -88,7 +93,7 @@ def feasibility_tolerances_from_options(options: Mapping[str, Any] | None) -> tu
         if d is None
         else _as_float(d, HIGHS_DEFAULT_FEASIBILITY_TOLERANCE)
     )
-    k = opts.get("kkt_tolerance")
+    k = opts.get("kkt_tolerance") if kkt_override else None
     if k is not None:
         kkt = _as_float(k, HIGHS_DEFAULT_KKT_TOLERANCE)
         if kkt != HIGHS_DEFAULT_KKT_TOLERANCE:
@@ -114,15 +119,19 @@ def _explicit_options(problem: Any, names: tuple[str, ...]) -> dict[str, Any]:
     return out
 
 
-def resolve_feasibility_tolerances(problem: Any) -> tuple[float, float]:
+def resolve_feasibility_tolerances(
+    problem: Any, *, kkt_override: bool = True
+) -> tuple[float, float]:
     """``(primal, dual)`` feasibility tolerances set on ``problem`` (see
-    :func:`feasibility_tolerances_from_options`); HiGHS' defaults when
-    ``problem`` is ``None`` or sets none."""
+    :func:`feasibility_tolerances_from_options`, including
+    ``kkt_override``); HiGHS' defaults when ``problem`` is ``None`` or sets
+    none."""
     return feasibility_tolerances_from_options(
         _explicit_options(
             problem,
             ("primal_feasibility_tolerance", "dual_feasibility_tolerance", "kkt_tolerance"),
-        )
+        ),
+        kkt_override=kkt_override,
     )
 
 

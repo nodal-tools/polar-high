@@ -589,9 +589,10 @@ class FlooredMinMax:
       empty).
     * ``meaningful`` — the continuous-column entries that are limits the
       solver keeps: ``|scaled| < infinite`` (larger is "no limit" to the
-      solver).  ``meaningful.hi`` is the largest of them; ``meaningful.lo``
-      the smallest whose model-unit magnitude ``|coef|`` is at least
-      ``floor`` (smaller ones are *residue*).
+      solver) whose model-unit magnitude ``|coef|`` is at least ``floor``
+      (smaller ones are *residue*, left out of both ends).
+      ``meaningful.lo`` / ``meaningful.hi`` are the smallest / largest of
+      them.
     * ``residue_count`` / ``residue`` — entries left out of the small end
       by the floor; ``residue`` ranks them by model-unit magnitude
       (``residue.hi`` is the largest one left out).
@@ -688,7 +689,9 @@ def fold_pools(
     multiplicity: int = 1,
 ) -> None:
     """Fold paired ``|reported|`` / ``|model|`` magnitudes into ``out``'s
-    pools (everything except ``out.all``).  ``rid`` / ``col_id`` may be
+    pools (everything except ``out.all``).  Residue (model-unit magnitude
+    below ``floor``) is counted and left out of both meaningful ends; values
+    at or above ``infinite`` are counted as no limit.  ``rid`` / ``col_id`` may be
     ``None`` (reported as ``-1``).  ``multiplicity`` counts each entry that
     many times in the residue / beyond-infinite counts (a single value
     broadcast over many rows or columns)."""
@@ -712,18 +715,9 @@ def fold_pools(
         mask &= ~beyond
     if not mask.any():
         return
-    # The largest kept limit: residue never sets it (it is tiny).
-    i_hi = np.flatnonzero(mask)
-    p_keep = post[i_hi]
-    j = int(np.argmax(p_keep))
-    k = int(i_hi[j])
-    if out.meaningful.hi is None or p_keep[j] > out.meaningful.hi.post:
-        out.meaningful.hi = PoolEnd(
-            float(post[k]),
-            float(model[k]),
-            -1 if rid is None else int(rid[k]),
-            -1 if col_id is None else int(col_id[k]),
-        )
+    # Residue (model-unit magnitude below the floor) is left out of both
+    # ends: it is noise, not a limit, even when a large pre-scaling factor
+    # makes its reported magnitude large.
     residue = mask & (model < floor)
     n_res = int(np.count_nonzero(residue))
     if n_res:
@@ -737,17 +731,29 @@ def fold_pools(
         mask &= ~residue
     if not mask.any():
         return
-    i_lo = np.flatnonzero(mask)
-    p_lo = post[i_lo]
-    j = int(np.argmin(p_lo))
-    k = int(i_lo[j])
-    if out.meaningful.lo is None or p_lo[j] < out.meaningful.lo.post:
-        out.meaningful.lo = PoolEnd(
-            float(post[k]),
-            float(model[k]),
-            -1 if rid is None else int(rid[k]),
-            -1 if col_id is None else int(col_id[k]),
-        )
+    i_keep = np.flatnonzero(mask)
+    p_keep = post[i_keep]
+    k_hi = int(i_keep[int(np.argmax(p_keep))])
+    k_lo = int(i_keep[int(np.argmin(p_keep))])
+    if out.meaningful.hi is None or post[k_hi] > out.meaningful.hi.post:
+        out.meaningful.hi = _pool_end(post, model, rid, col_id, k_hi)
+    if out.meaningful.lo is None or post[k_lo] < out.meaningful.lo.post:
+        out.meaningful.lo = _pool_end(post, model, rid, col_id, k_lo)
+
+
+def _pool_end(
+    post: np.ndarray,
+    model: np.ndarray,
+    rid: np.ndarray | None,
+    col_id: np.ndarray | None,
+    k: int,
+) -> PoolEnd:
+    return PoolEnd(
+        float(post[k]),
+        float(model[k]),
+        -1 if rid is None else int(rid[k]),
+        -1 if col_id is None else int(col_id[k]),
+    )
 
 
 class TopKAbsReducer(Reducer):

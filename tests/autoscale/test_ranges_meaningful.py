@@ -214,3 +214,38 @@ def test_ranges_from_arrays_new_fields() -> None:
     assert r.cost_continuous == (1.0, 1.0)
     assert r.integer_cost == (5.0, 5.0)
     assert r.extremes["bound_rhs"]["min"].family is None
+
+
+def test_residue_never_sets_the_large_end() -> None:
+    """Reported magnitudes [1e9, 5, 0.1] with model magnitudes [1e-9, 5,
+    0.1] (the first entry was pre-scaled by 1e18): at floor 1e-6 the first
+    is residue, so the meaningful pool is (0.1, 5), not (0.1, 1e9)."""
+    from polar_high.autoscale._coef_walk import FlooredMinMax, fold_pools
+
+    out = FlooredMinMax()
+    fold_pools(
+        out,
+        np.array([1e9, 5.0, 0.1]),
+        np.array([1e-9, 5.0, 0.1]),
+        None,
+        None,
+        floor=1e-6,
+        infinite=1e20,
+        integer_cols=None,
+    )
+    assert out.meaningful.pair() == (0.1, 5.0)
+    assert out.residue_count == 1
+    assert out.residue.hi.post == 1e9
+    # Only residue: no meaningful end at all.
+    only = FlooredMinMax()
+    fold_pools(
+        only,
+        np.array([1e9]),
+        np.array([1e-9]),
+        None,
+        None,
+        floor=1e-6,
+        infinite=1e20,
+        integer_cols=None,
+    )
+    assert only.meaningful.pair() is None and only.residue_count == 1

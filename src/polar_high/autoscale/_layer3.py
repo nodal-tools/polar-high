@@ -43,15 +43,21 @@ limit must stay well above ``tol`` after scaling, and the largest must stay
 small enough for its rows to be checked at all.  Every automatic
 ``user_bound_scale`` is clipped into the window of exponents that keeps the
 pool (:attr:`RangeReport.bound_rhs_meaningful`) inside ``[10·tol,
-1e18·tol]`` — preferring the narrower ``[100·tol, 1e18·tol]`` (the smallest
-limit enforced to 1 %) whenever an exponent fits it — and the large end
-takes whatever is left (:func:`bound_scale_window`).  ``10·tol`` follows from
-the tolerance (the smallest limit enforced to 10 %); ``1e18·tol`` is
-calibrated (the largest scaled value of a solve that worked was 2.3e10 at
-``tol = 1e-7``), so it is a keyword.  When no exponent fits, the plan is
-tagged ``unscalable`` and :func:`assess_scaling` reports an error.
-:func:`assess_scaling` judges any plan (automatic, manual or external)
-against the same window.
+1e18·tol]`` (:func:`bound_scale_window`).  Only in the "smallest-side" tier,
+where the range forces a choice anyway, the window prefers the narrower
+``[100·tol, 1e18·tol]`` (the smallest limit enforced to 1 %) whenever an
+exponent fits it, and the large end takes whatever is left; the other tiers
+keep ``10·tol``, so a model that needed no scaling still gets none.
+``10·tol`` follows from the tolerance (the smallest limit enforced to 10 %);
+``1e18·tol`` is calibrated (the largest scaled value of a solve that worked
+was 2.3e10 at ``tol = 1e-7``), so it is a keyword.  ``tol`` is the primal
+feasibility tolerance the simplex enforces (``kkt_tolerance`` does not
+replace it here).  When no exponent fits, the plan is tagged
+``unscalable+smallest-side``: the exponent keeps the smallest meaningful
+limit at ``10·tol`` or more (capped so the largest stays below the solver
+infinity, and clamped to HiGHS' ``[-30, 30]``), and :func:`assess_scaling`
+reports an error.  :func:`assess_scaling` judges any plan (automatic, manual
+or external) against the hard window.
 """
 
 from __future__ import annotations
@@ -69,9 +75,11 @@ from ._config import (
 )
 from ._precedence import (
     HIGHS_DEFAULT_FEASIBILITY_TOLERANCE,
+    HIGHS_DEFAULT_INFINITE_BOUND,
     get_explicit_option,
     has_explicit_option,
     resolve_feasibility_tolerances,
+    resolve_infinite_bound,
 )
 from ._ranges import Extreme, RangeReport
 
@@ -113,8 +121,8 @@ _SIMPLEX_SCALE_STRATEGY_DEFAULT = 2
 # Tolerance window for the scaled bound / RHS pool: ``[10·tol, 1e18·tol]``
 # (17 decades at any tolerance).  The lower edge enforces the smallest limit
 # to 10 %; the upper edge is calibrated (see the module docstring).
-# ``_PREFERRED_LO_FACTOR`` is the small-end target used whenever an exponent
-# fits it (1 %).
+# ``_PREFERRED_LO_FACTOR`` is the small-end target of the "smallest-side"
+# tier whenever an exponent fits it (1 %).
 _WINDOW_LO_FACTOR = 10.0
 _WINDOW_HI_FACTOR = 1e18
 _PREFERRED_LO_FACTOR = 100.0
@@ -237,6 +245,14 @@ def _finite_pos(x: Any) -> bool:
     return x is not None and isinstance(x, (int, float)) and math.isfinite(x) and x > 0.0
 
 
+def _below_infinite_exponent(b_hi: float, infinite: float) -> int:
+    """Largest integer ``n`` with ``b_hi · 2**n < infinite`` (exact)."""
+    n = _floor_exponent(infinite, b_hi)
+    while math.ldexp(b_hi, n) >= infinite:
+        n -= 1
+    return n
+
+
 @dataclass(frozen=True)
 class Layer3Plan:
     """HiGHS-native scaling decisions for one solve.
@@ -276,7 +292,8 @@ class Layer3Plan:
     bound_source: str = "auto"
     #: The bound tier tag (``in-zone``, ``clamp-large``, ``clamp-small``,
     #: ``smallest-side``, ``refuse``; ``+raised`` / ``+lowered`` when the
-    #: tolerance window moved it; ``unscalable`` when no exponent fits).
+    #: tolerance window moved it; ``unscalable+smallest-side`` when no
+    #: exponent fits and the smallest meaningful limit was kept enforceable).
     bound_tag: str = ""
     #: The tolerance window the automatic exponent was clipped into
     #: (``None`` for a manual / external exponent or an empty pool).
@@ -419,7 +436,8 @@ def recommend_scaling(
     """Compute the three HiGHS-native scaling values for one solve.
 
     Pulls ``max(|c|)`` from ``ranges.cost`` and ``max(|b|)``, ``min(|b|)``
-    from the union of ``ranges.bound`` and ``ranges.rhs``.
+    from the bound / RHS pool: ``ranges.bound_rhs_meaningful`` when present,
+    else the union of ``ranges.bound`` and ``ranges.rhs``.
 
     Precedence rules (per axis, independent):
 
@@ -434,15 +452,22 @@ def recommend_scaling(
        is set, the plan uses that integer verbatim.  Reasoning
        string surfaces "manual override ...".
     3. **Default auto** — power-of-two exponents that pull the worst
-       end into the HiGHS comfort zone; on a severe overshoot
-       (``max_b >= 1e+9``) the large-end clamp is kept even when the small
-       end leaves the zone ("smallest-side").
+       end of the bound / RHS pool (:attr:`RangeReport.bound_rhs_meaningful`
+       when the report has it, else the raw ``bound`` ∪ ``rhs`` range) into
+       the HiGHS comfort zone; on a severe overshoot (``max_b >= 1e+9``) the
+       large-end clamp is kept even when the small end leaves the zone
+       ("smallest-side").
     4. **Tolerance window** — an automatic bound exponent is then clipped
-       into :func:`bound_scale_window` of the bound / RHS pool, at
-       ``primal_feasibility_tolerance`` (``None``: the tolerance set on
-       ``problem``, as HiGHS applies it, else ``1e-7``).  No exponent fits →
-       the tier exponent is kept and tagged ``unscalable``.  Manual and
-       external exponents are not clipped (:func:`assess_scaling` judges
+       into :func:`bound_scale_window` of the same pool, at
+       ``primal_feasibility_tolerance`` (``None``: the
+       ``primal_feasibility_tolerance`` set on ``problem``, else ``1e-7``;
+       ``kkt_tolerance`` does not replace it).  The 100·tol small-end
+       preference applies in the smallest-side tier only; the other tiers
+       use the hard ``10·tol`` edge.  No exponent fits → the exponent is the
+       smallest one that keeps the smallest meaningful limit at ``10·tol``
+       or more, capped so the largest stays below ``infinite_bound`` and
+       clamped to ``[-30, 30]``; tag ``unscalable+smallest-side``.  Manual
+       and external exponents are not clipped (:func:`assess_scaling` judges
        them).
 
     The resulting exponents are clamped to ``[-30, 30]`` (HiGHS' option
@@ -451,12 +476,16 @@ def recommend_scaling(
     if primal_feasibility_tolerance is not None:
         tol_p = float(primal_feasibility_tolerance)
     elif problem is not None:
-        tol_p, _tol_d = resolve_feasibility_tolerances(problem)
+        tol_p, _tol_d = resolve_feasibility_tolerances(problem, kkt_override=False)
     else:
         tol_p = HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
+    if ranges.infinite_bound is not None:
+        infinite = float(ranges.infinite_bound)
+    elif problem is not None:
+        infinite = resolve_infinite_bound(problem)
+    else:
+        infinite = HIGHS_DEFAULT_INFINITE_BOUND
     cost_lo, cost_hi = ranges.cost
-    bound_lo, bound_hi = ranges.bound
-    rhs_lo, rhs_hi = ranges.rhs
 
     # --- Objective axis ---------------------------------------------------
     obj_skipped_external = False
@@ -490,19 +519,28 @@ def recommend_scaling(
 
     # --- Bound axis -------------------------------------------------------
     def _auto_bound() -> tuple[int, str, ScaleWindow | None]:
-        n_raw, tag = _recommend_bound_scale(
-            bound_max=_safe_float(bound_hi, 0.0),
-            bound_min=_safe_float(bound_lo, math.inf),
-            rhs_max=_safe_float(rhs_hi, 0.0),
-            rhs_min=_safe_float(rhs_lo, math.inf),
-        )
-        n = _clamp(n_raw)
+        # The tier reads the same pool the window does: the meaningful
+        # readout (no values at or above the solver infinity, no residue, no
+        # integer-column bounds) when the report has it, else the raw
+        # bound ∪ RHS range.  No pool (no limit at all, or only residue) →
+        # nothing to scale.
         pool = _pool(ranges)
         if pool is None:
-            return n, tag, None
-        window = bound_scale_window(pool[0], pool[1], tol_p)
+            return 0, "in-zone", None
+        b_lo, b_hi = pool
+        n_raw, tag = _recommend_bound_scale(
+            bound_max=b_hi, bound_min=b_lo, rhs_max=0.0, rhs_min=math.inf
+        )
+        n = _clamp(n_raw)
+        # The 100·tol preference only where the range forces the choice.
+        pref = _PREFERRED_LO_FACTOR if tag == "smallest-side" else _WINDOW_LO_FACTOR
+        window = bound_scale_window(b_lo, b_hi, tol_p, preferred_lo_factor=pref)
         if not window.fits:
-            return n, "unscalable", window
+            # Keep the smallest meaningful limit enforceable (>= 10·tol) and
+            # let the large end take the excess, but never up to the solver
+            # infinity (where a limit becomes no limit).
+            n_un = min(window.n_min_hard, _below_infinite_exponent(b_hi, infinite))
+            return _clamp(n_un), "unscalable+smallest-side", window
         if n < window.n_min:
             return window.n_min, f"{tag}+raised", window
         if n > window.n_max:
@@ -619,8 +657,9 @@ class Finding:
     * ``cost``: ``spread``, ``small_cost`` (smallest scaled cost below
       ``10 · dual tolerance``), ``ok``;
     * ``matrix``: ``dropped`` (warn: a scaled term at or below
-      ``small_matrix``), ``refused`` (error: one at or above
-      ``large_matrix``), ``ok``;
+      ``small_matrix``, which HiGHS drops), ``refused`` (warn: one at or
+      above ``large_matrix`` — HiGHS will refuse the model and say so
+      itself), ``ok``;
     * ``info``: ``residue``, ``beyond_infinite``, ``integer_bounds``.
 
     ``numbers`` carries the measured values (see :func:`assess_scaling`);
@@ -685,7 +724,10 @@ def _assess_bound_rhs(
     if pool is None:
         return None
     b_lo, b_hi = pool
-    window = bound_scale_window(b_lo, b_hi, tol, lo_factor=lo_factor, hi_factor=hi_factor)
+    # The verdict judges against the hard window (no small-end preference).
+    window = bound_scale_window(
+        b_lo, b_hi, tol, lo_factor=lo_factor, hi_factor=hi_factor, preferred_lo_factor=lo_factor
+    )
     s_lo = math.ldexp(b_lo, n)
     s_hi = math.ldexp(b_hi, n)
     decades = _log10_ratio(b_hi, b_lo)
@@ -725,7 +767,12 @@ def _assess_bound_rhs(
             pre_decades = _log10_ratio(pre_pool[1], pre_pool[0])
             numbers["decades_pre"] = pre_decades
             pre_fits = bound_scale_window(
-                pre_pool[0], pre_pool[1], tol, lo_factor=lo_factor, hi_factor=hi_factor
+                pre_pool[0],
+                pre_pool[1],
+                tol,
+                lo_factor=lo_factor,
+                hi_factor=hi_factor,
+                preferred_lo_factor=lo_factor,
             ).fits
     out_of_window = s_lo < window.lo_edge or s_hi > window.hi_edge
     caused = False
@@ -820,13 +867,14 @@ def _assess_matrix(ranges: RangeReport, n_bnd: int, small: float, large: float) 
     }
     kinds = []
     level = "ok"
+    # Both warn: HiGHS drops the small terms and refuses a model with a large
+    # one itself, with its own message; the finding names it ahead of that.
     if hi >= large:
         kinds.append("refused")
-        level = "error"
+        level = "warn"
     if lo <= small:
         kinds.append("dropped")
-        if level == "ok":
-            level = "warn"
+        level = "warn"
     return Finding("matrix", level, "+".join(kinds) or "ok", numbers, extremes)
 
 
@@ -891,7 +939,8 @@ def assess_scaling(
 
     Pure: no side effects, no solver call.  Rules (``tol`` = ``primal_tol``):
 
-    * **bound / RHS** — the pool ``[b_lo*, b_hi]`` scaled by
+    * **bound / RHS** — the pool ``[b_lo*, b_hi]`` (the meaningful readout,
+      else the raw bound ∪ RHS range) scaled by
       ``2**user_bound_scale`` must lie inside ``[window_lo_factor·tol,
       window_hi_factor·tol]`` (error otherwise); a spread of more than
       ``warn_decades`` warns.  ``numbers``: ``decades`` (and
@@ -908,8 +957,8 @@ def assess_scaling(
     * **matrix** — the continuous-column terms as they are, the
       integer-column terms ``× 2**N_bnd``: a term at or below
       ``small_matrix`` warns (the solver drops it), one at or above
-      ``large_matrix`` is an error (the solver refuses the model).  The
-      spread is reported only.
+      ``large_matrix`` warns too (kind ``refused``: HiGHS will refuse the
+      model and report that itself).  The spread is reported only.
     * **info** — residue left out by the floor, values at or above the
       solver infinity, integer-column bounds.
 

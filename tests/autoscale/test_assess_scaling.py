@@ -3,7 +3,8 @@
 Expected values are worked out by hand in each docstring (``log2`` /
 ``2**N`` arithmetic on the numbers written in the test), not copied from a
 run of the code.  Window at tolerance ``tol``: hard edges ``[10·tol,
-1e18·tol]``, preferred small end ``100·tol``.
+1e18·tol]``; the preferred small end ``100·tol`` only in the smallest-side
+tier.
 """
 
 from __future__ import annotations
@@ -55,20 +56,25 @@ def _assess(ranges, plan, tol=1e-7, **kw):
 
 
 def test_incident_shape_is_unscalable_error() -> None:
-    """0.5 … 1e18 at tol 1e-7: N_min = ceil(log2(1e-6/0.5)) = -18,
-    N_max = floor(log2(1e11/1e18)) = -24 → no exponent.  The tier clamp is
-    floor(log2(1e6/1e18)) = -40 → -30 (HiGHS' range), tag unscalable.
-    Fitting the largest value (N = -24) allows 1e-7·2**24 = 1.6777216 in
-    model units, 3.3554432 × the smallest limit."""
+    """0.5 … 1e18 at tol 1e-7: N_min = ceil(log2(1e-6/0.5)) =
+    ceil(1 + log2(1e-6)) = ceil(-18.93) = -18 (0.5·2**-18 = 2**-19 =
+    1.9073486328125e-6 >= 1e-6, 0.5·2**-19 = 9.5e-7 < 1e-6), N_max =
+    floor(log2(1e11/1e18)) = floor(-23.25) = -24 → no exponent.  The plan
+    keeps the smallest limit enforceable: N = -18 (the large end
+    1e18·2**-18 = 3.814697265625e12 stays below the solver infinity 1e20,
+    so the cap does not bind), tag unscalable+smallest-side.  Fitting the
+    largest value (N = -24) allows 1e-7·2**24 = 1.6777216 in model units,
+    3.3554432 × the smallest limit."""
     r = _r(0.5, 1e18)
     plan = recommend_scaling(r, ScalingConfig())
-    assert plan.user_bound_scale == -30
-    assert plan.bound_tag == "unscalable"
+    assert plan.user_bound_scale == -18
+    assert plan.bound_tag == "unscalable+smallest-side"
     assert not plan.bound_window.fits
     v = _assess(r, plan)
     assert v.level == "error"
     f = v.finding("bound_rhs")
     assert f.kind == "spread"
+    assert (f.numbers["s_lo"], f.numbers["s_hi"]) == (1.9073486328125e-06, 3.814697265625e12)
     assert (f.numbers["n_min"], f.numbers["n_max"]) == (-18.0, -24.0)
     assert f.numbers["decades"] == pytest.approx(18.30103, abs=1e-5)
     assert f.numbers["n_fit_large"] == -24.0
@@ -108,12 +114,14 @@ def test_residue_left_out_is_ok_and_reported() -> None:
 def test_uniform_huge_hits_the_scale_option_limit() -> None:
     """5e19 everywhere at tol 1e-8: the large end needs
     N <= floor(log2(1e10/5e19)) = -33, outside [-30, 30], while the spread
-    alone would fit (hard N_min = -88) → scale_option_limit.  The plan keeps
-    clamp(floor(log2(1e6/5e19)) = -46) = -30: 5e19·2**-30 = 4.66e10 > 1e10."""
+    alone would fit (hard N_min = ceil(log2(1e-7/5e19)) = ceil(log2(2e-27))
+    = ceil(1 - 27·3.3219) = ceil(-88.69) = -88) → scale_option_limit.  The
+    plan takes the smallest-side -88 (below the infinity cap) clamped to
+    HiGHS' range: -30, and 5e19·2**-30 = 4.66e10 > 1e10."""
     r = _r(5e19, 5e19)
     plan = recommend_scaling(r, ScalingConfig(), primal_feasibility_tolerance=1e-8)
     assert plan.user_bound_scale == -30
-    assert plan.bound_tag == "unscalable"
+    assert plan.bound_tag == "unscalable+smallest-side"
     f = _assess(r, plan, tol=1e-8).finding("bound_rhs")
     assert (f.level, f.kind) == ("error", "scale_option_limit")
     assert f.numbers["s_hi"] == pytest.approx(4.6566128730773926e10)
@@ -150,15 +158,21 @@ def test_window_moves_with_tolerance_and_keeps_17_decades() -> None:
         )
 
 
-def test_kkt_tolerance_replaces_the_primal_tolerance() -> None:
-    """kkt_tolerance = 1e-6 (≠ its 1e-7 default) overrides
-    primal_feasibility_tolerance = 1e-9, as HiGHS does."""
+def test_layer3_window_uses_the_primal_tolerance_not_kkt() -> None:
+    """kkt_tolerance = 1e-6 (≠ its 1e-7 default) does not replace
+    primal_feasibility_tolerance = 1e-9 for the window (the simplex enforces
+    the latter on the bounds); the diagnostics' resolver keeps HiGHS' kkt
+    rule."""
+    from polar_high.autoscale import resolve_feasibility_tolerances
 
     class _Pb:
         _solver_options = {"kkt_tolerance": 1e-6, "primal_feasibility_tolerance": 1e-9}
 
     plan = recommend_scaling(_r(1.0, 10.0), ScalingConfig(), problem=_Pb())
-    assert plan.primal_feasibility_tolerance == 1e-6
+    assert plan.primal_feasibility_tolerance == 1e-9
+    assert plan.bound_window.lo_edge == pytest.approx(1e-8)
+    assert resolve_feasibility_tolerances(_Pb()) == (1e-6, 1e-6)
+    assert resolve_feasibility_tolerances(_Pb(), kkt_override=False) == (1e-9, 1e-7)
 
 
 def test_integer_matrix_scaled_below_drop_value_warns() -> None:
@@ -169,11 +183,14 @@ def test_integer_matrix_scaled_below_drop_value_warns() -> None:
     assert f.numbers["s_lo"] == 9.5367431640625e-10
 
 
-def test_integer_matrix_scaled_above_refuse_value_errors() -> None:
-    """Integer-column terms × 2**20: 1e10·2**20 = 1.048576e16 >= 1e15."""
+def test_integer_matrix_scaled_above_refuse_value_warns() -> None:
+    """Integer-column terms × 2**20: 1e10·2**20 = 1.048576e16 >= 1e15 —
+    HiGHS will refuse the model and say so itself; the finding warns."""
     r = _r(1.0, 1e3, matrix_continuous=(1e-2, 1e2), integer_matrix=(1.0, 1e10))
-    f = _assess(r, _plan(20)).finding("matrix")
-    assert (f.level, f.kind) == ("error", "refused")
+    v = _assess(r, _plan(20))
+    f = v.finding("matrix")
+    assert (f.level, f.kind) == ("warn", "refused")
+    assert v.level == "warn"
     assert f.numbers["s_hi"] == 1.048576e16
 
 
@@ -253,3 +270,93 @@ def test_streamed_report_without_pool_uses_raw_union() -> None:
     )
     plan = recommend_scaling(r, ScalingConfig())
     assert plan.user_bound_scale == -6  # same pool as the smallest-side test
+
+
+def test_tier_reads_the_meaningful_pool() -> None:
+    """Raw bounds reach 1e30 (no limit to the solver) but the meaningful
+    pool is (1e-2, 1e6): max 1e6 is not above the comfort ceiling 1e6 →
+    in-zone, N = 0; the hard window [ceil(log2(1e-6/1e-2)),
+    floor(log2(1e11/1e6))] = [ceil(-13.29), floor(16.61)] = [-13, 16] keeps
+    it."""
+    r = _r(1e-2, 1e6, bound=(1e-2, 1e30), rhs=(1e-2, 1e6))
+    plan = recommend_scaling(r, ScalingConfig())
+    assert (plan.user_bound_scale, plan.bound_tag) == (0, "in-zone")
+    assert (plan.bound_window.n_min, plan.bound_window.n_max) == (-13, 16)
+
+
+def test_tier_falls_back_to_the_raw_range() -> None:
+    """The same raw ranges without the readout: pool (1e-2, 1e30).  Tier
+    smallest-side (clamp floor(log2(1e6/1e30)) = -80 crushes the small end,
+    1e30 >= 1e9).  Hard N_min = -13 > N_max = floor(log2(1e11/1e30)) =
+    floor(-63.1) = -64 → unscalable; the infinity cap needs 1e30·2**N <
+    1e20, i.e. 2**N < 1e-10: 2**-33 = 1.16e-10 is not, 2**-34 = 5.8e-11 is
+    → N = min(-13, -34) = -34, clamped to -30."""
+    r = RangeReport(
+        matrix=(1.0, 1.0),
+        cost=NAN,
+        bound=(1e-2, 1e30),
+        rhs=(1e-2, 1e6),
+        cross_group_max_ratio=math.nan,
+        trigger=True,
+    )
+    plan = recommend_scaling(r, ScalingConfig())
+    assert (plan.user_bound_scale, plan.bound_tag) == (-30, "unscalable+smallest-side")
+
+
+def test_unscalable_exponent_capped_below_the_solver_infinity() -> None:
+    """Pool 1e-12 … 1e15 at tol 1e-7 (27 decades).  Hard N_min =
+    ceil(log2(1e-6/1e-12)) = ceil(19.93) = 20; N_max = floor(log2(1e11/1e15))
+    = floor(-13.29) = -14 → spread.  The small end wants N = 20, but
+    1e15·2**N < 1e20 needs 2**N < 1e5: 2**16 = 65536 fits, 2**17 = 131072
+    does not → N = 16, the large end at 1e15·65536 = 6.5536e19."""
+    r = _r(1e-12, 1e15)
+    plan = recommend_scaling(r, ScalingConfig())
+    assert (plan.user_bound_scale, plan.bound_tag) == (16, "unscalable+smallest-side")
+    f = _assess(r, plan).finding("bound_rhs")
+    assert (f.level, f.kind) == ("error", "spread")
+    assert f.numbers["s_hi"] == 6.5536e19
+
+
+def test_infinity_cap_follows_the_reported_infinite_bound() -> None:
+    """Same pool with infinite_bound 1e18: 1e15·2**N < 1e18 needs 2**N <
+    1e3: 2**9 = 512 fits, 2**10 = 1024 does not → N = 9."""
+    r = _r(1e-12, 1e15, infinite_bound=1e18)
+    assert recommend_scaling(r, ScalingConfig()).user_bound_scale == 9
+
+
+def test_in_zone_and_refuse_tiers_keep_the_hard_edge() -> None:
+    """The 100·tol preference does not apply outside the smallest-side tier.
+
+    * [1e-6, 1e3] (in-zone): hard N_min = ceil(log2(1e-6/1e-6)) = 0 → N = 0
+      (the preference would have raised it to ceil(log2(10)) = 4).
+    * [1e-6, 2e8] (refuse: clamp floor(log2(1e6/2e8)) = floor(-7.64) = -8
+      puts 1e-6·2**-8 = 3.9e-9 below 1e-4, and 2e8 < 1e9): N = 0, inside
+      [0, floor(log2(1e11/2e8)) = floor(8.97) = 8].
+    * [1e-7, 1e3] (in-zone, below the hard edge): raised to
+      ceil(log2(1e-6/1e-7)) = ceil(3.32) = 4 (the preference would give
+      ceil(log2(100)) = 7)."""
+    p = recommend_scaling(_r(1e-6, 1e3), ScalingConfig())
+    assert (p.user_bound_scale, p.bound_tag, p.bound_window.small_end_factor) == (
+        0,
+        "in-zone",
+        10.0,
+    )
+    p = recommend_scaling(_r(1e-6, 2e8), ScalingConfig())
+    assert (p.user_bound_scale, p.bound_tag) == (0, "refuse")
+    assert (p.bound_window.n_min, p.bound_window.n_max) == (0, 8)
+    p = recommend_scaling(_r(1e-7, 1e3), ScalingConfig())
+    assert (p.user_bound_scale, p.bound_tag) == (4, "in-zone+raised")
+
+
+def test_only_residue_means_nothing_to_scale() -> None:
+    """The readout ran and every limit was residue: no pool → N = 0."""
+    r = _r(
+        1.0,
+        1.0,
+        bound=(1e-12, 1e-9),
+        rhs=(1e-12, 1e-9),
+        bound_rhs_meaningful=None,
+        bound_rhs_residue=(4, 1e-9),
+    )
+    plan = recommend_scaling(r, ScalingConfig())
+    assert (plan.user_bound_scale, plan.bound_tag, plan.bound_window) == (0, "in-zone", None)

@@ -313,12 +313,14 @@ class _GuardAcc:
 
 def _resolve_residue_floor(problem: Any, config: ScalingConfig) -> float:
     """The residue floor (model units): ``config.residue_floor``, else
-    :data:`RESIDUE_FLOOR_FACTOR` × the primal tolerance set on ``problem``."""
+    :data:`RESIDUE_FLOOR_FACTOR` × the primal feasibility tolerance set on
+    ``problem`` (the one the simplex enforces; ``kkt_tolerance`` does not
+    replace it here)."""
     if config.residue_floor is not None:
         return float(config.residue_floor)
     tol_p = HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
     if problem is not None:
-        tol_p, _tol_d = resolve_feasibility_tolerances(problem)
+        tol_p, _tol_d = resolve_feasibility_tolerances(problem, kkt_override=False)
     return RESIDUE_FLOOR_FACTOR * tol_p
 
 
@@ -2088,7 +2090,7 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         matrix_col_index = np.repeat(np.arange(n_cols, dtype=np.int64), np.diff(col_ptr))
     _l2_rf = getattr(problem, "_layer2_row_factor", None)
     _l2_cf = getattr(problem, "_layer2_col_factor", None)
-    tol_p, _tol_d = resolve_feasibility_tolerances(problem)
+    tol_p, _tol_d = resolve_feasibility_tolerances(problem, kkt_override=False)
 
     return ranges_from_arrays(
         matrix_values=sorted_v,

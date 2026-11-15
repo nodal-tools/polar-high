@@ -114,7 +114,8 @@ def test_severe_overshoot_smallest_side() -> None:
     scaled_min = 1e-3 * 2**-20 ≈ 9.5e-10 (well below 1e-4); 1e+12 >= 1e+9,
     so the clamp is kept ("smallest-side") and the tolerance window lifts it.
 
-    Window at tol 1e-7: the preferred small end 100·tol = 1e-5 needs
+    Window at tol 1e-7 (the smallest-side tier is the one that takes the
+    100·tol preference): the preferred small end 100·tol = 1e-5 needs
     N >= ceil(log2(1e-5 / 1e-3)) = ceil(-6.64) = -6; the large end 1e18·tol =
     1e11 allows N <= floor(log2(1e11 / 1e12)) = floor(-3.32) = -4.  -6 <= -4,
     so the window is [-6, -4] and the clamp -20 is raised to -6:
