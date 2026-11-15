@@ -11,10 +11,9 @@ documented branches of :func:`recommend_scaling`:
   zone, ``N_bnd == 0``.
 * **Bound large-end only** — symmetric: bounds overshoot, cost stays
   clean.  ``N_bnd != 0``, ``N_obj == 0``.
-* **Severe overshoot (D's escape)** — ``max(|b|) >= 1e+9`` and the
-  naive clamp would crush the small end.  Geometric-centering branch
-  fires and the chosen exponent lies between the two clamping
-  alternatives.
+* **Severe overshoot (smallest side)** — ``max(|b|) >= 1e+9`` and the
+  naive clamp would crush the small end.  The clamp is kept and the
+  tolerance window raises it until the smallest limit is enforceable.
 * **Refuse-to-scale (Rivendell-shaped)** — moderate overshoot where
   the naive recommendation would crush the small end below ``1e-4``.
   Must refuse and emit ``N_bnd == 0``.
@@ -108,20 +107,27 @@ def test_bound_overshoot_only_moderate_clamp_large() -> None:
     assert "auto" in plan.reasoning
 
 
-def test_severe_overshoot_geometric_escape() -> None:
-    """``max(|b|) >= 1e+9`` AND naive clamp crushes min → geo-centering.
+def test_severe_overshoot_smallest_side() -> None:
+    """``max(|b|) >= 1e+9`` AND the naive clamp crushes min → smallest side.
 
     min_b = 1e-3, max_b = 1e+12: naive dl = floor(log2(1e-6)) = -20,
-    scaled_min = 1e-3 * 2**-20 ≈ 9.5e-10 (well below 1e-4) → escape.
-    Severe trigger: 1e+12 >= 1e+9 ✓ → escape via geometric centering.
+    scaled_min = 1e-3 * 2**-20 ≈ 9.5e-10 (well below 1e-4); 1e+12 >= 1e+9,
+    so the clamp is kept ("smallest-side") and the tolerance window lifts it.
 
-    Geo-centering exponent: log2(sqrt(1e-4 * 1e+6) / sqrt(1e-3 * 1e+12))
-    = log2(sqrt(1e+2) / sqrt(1e+9)) = log2(10 / ~31623) ≈ -11.6 → -12.
+    Window at tol 1e-7: the preferred small end 100·tol = 1e-5 needs
+    N >= ceil(log2(1e-5 / 1e-3)) = ceil(-6.64) = -6; the large end 1e18·tol =
+    1e11 allows N <= floor(log2(1e11 / 1e12)) = floor(-3.32) = -4.  -6 <= -4,
+    so the window is [-6, -4] and the clamp -20 is raised to -6:
+    scaled pool [1.5625e-5, 1.5625e10].  (The former escape branch centred
+    the range at -12, which put the small end at 2.4e-7, 2.4 × tol.)
     """
     r = _ranges(cost=(1.0, 1e2), bound=(1e-3, 1e12), rhs=(1e-3, 1e12))
     plan = recommend_scaling(r, _cfg())
-    assert plan.user_bound_scale == -12
-    assert "escape" in plan.reasoning
+    assert plan.user_bound_scale == -6
+    assert plan.bound_tag == "smallest-side+raised"
+    assert "smallest-side+raised" in plan.reasoning
+    assert (plan.bound_window.n_min, plan.bound_window.n_max) == (-6, -4)
+    assert plan.bound_window.small_end_factor == 100.0
 
 
 def test_refuse_to_scale_rivendell_shape() -> None:

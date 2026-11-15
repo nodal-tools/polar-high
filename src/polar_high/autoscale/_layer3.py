@@ -29,22 +29,37 @@ post-detection :class:`RangeReport` (the same arithmetic HiGHS uses
 internally to decide what to print in its "Consider scaling …"
 warning).
 
-The two-sided "geometric-centering escape" branch fires when the
-worst-bound magnitude is severely above HiGHS' ceiling
-(``>= _HIGHS_LARGE_BOUND * _SEVERE_LARGE_OVERSHOOT`` ≈ 1e+9) AND the
-naive recommendation would drive the small end below the floor.  In
-that regime the cost of refusing to scale (parallel-HiGHS pivots
-overflowing single-precision intermediates) outweighs the cost of
-crushing the small end below ``_HIGHS_SMALL_BOUND`` (presolve
-false-infeasibility risk), so we replace the refusal with geometric
-centering of the bound range over HiGHS' comfort zone.
+The "smallest-side" branch fires when the worst-bound magnitude is
+severely above HiGHS' ceiling (``>= _HIGHS_LARGE_BOUND *
+_SEVERE_LARGE_OVERSHOOT`` ≈ 1e+9) AND pulling it into the comfort zone
+would drive the small end below the floor.  In that regime refusing to
+scale (parallel-HiGHS pivots overflowing) is worse than scaling, so the
+recommendation keeps the large-end clamp and leaves it to the tolerance
+window below to lift the small end.
+
+**Tolerance window.**  HiGHS checks ``primal_feasibility_tolerance`` (``tol``)
+as an absolute amount on the user-scaled bounds, so the smallest meaningful
+limit must stay well above ``tol`` after scaling, and the largest must stay
+small enough for its rows to be checked at all.  Every automatic
+``user_bound_scale`` is clipped into the window of exponents that keeps the
+pool (:attr:`RangeReport.bound_rhs_meaningful`) inside ``[10·tol,
+1e18·tol]`` — preferring the narrower ``[100·tol, 1e18·tol]`` (the smallest
+limit enforced to 1 %) whenever an exponent fits it — and the large end
+takes whatever is left (:func:`bound_scale_window`).  ``10·tol`` follows from
+the tolerance (the smallest limit enforced to 10 %); ``1e18·tol`` is
+calibrated (the largest scaled value of a solve that worked was 2.3e10 at
+``tol = 1e-7``), so it is a keyword.  When no exponent fits, the plan is
+tagged ``unscalable`` and :func:`assess_scaling` reports an error.
+:func:`assess_scaling` judges any plan (automatic, manual or external)
+against the same window.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from ._config import (
@@ -52,8 +67,13 @@ from ._config import (
     USER_SCALE_CLAMP_LO,
     ScalingConfig,
 )
-from ._precedence import get_explicit_option, has_explicit_option
-from ._ranges import RangeReport
+from ._precedence import (
+    HIGHS_DEFAULT_FEASIBILITY_TOLERANCE,
+    get_explicit_option,
+    has_explicit_option,
+    resolve_feasibility_tolerances,
+)
+from ._ranges import Extreme, RangeReport
 
 _logger = logging.getLogger(__name__)
 
@@ -90,6 +110,132 @@ _SEVERE_LARGE_OVERSHOOT = 1e3
 # (Curtis–Reid).
 _SIMPLEX_SCALE_STRATEGY_DEFAULT = 2
 
+# Tolerance window for the scaled bound / RHS pool: ``[10·tol, 1e18·tol]``
+# (17 decades at any tolerance).  The lower edge enforces the smallest limit
+# to 10 %; the upper edge is calibrated (see the module docstring).
+# ``_PREFERRED_LO_FACTOR`` is the small-end target used whenever an exponent
+# fits it (1 %).
+_WINDOW_LO_FACTOR = 10.0
+_WINDOW_HI_FACTOR = 1e18
+_PREFERRED_LO_FACTOR = 100.0
+
+# HiGHS ``small_matrix_value`` / ``large_matrix_value`` defaults: a matrix
+# entry at or below the first is dropped, one at or above the second makes
+# HiGHS refuse the model.
+HIGHS_SMALL_MATRIX_VALUE = 1e-9
+HIGHS_LARGE_MATRIX_VALUE = 1e15
+
+
+@dataclass(frozen=True)
+class ScaleWindow:
+    """The ``user_bound_scale`` exponents that keep a pool ``[b_lo, b_hi]``
+    inside the tolerance window, intersected with HiGHS' ``[-30, 30]``.
+
+    ``n_min`` / ``n_max`` bound the window actually used: ``n_min`` comes
+    from the preferred small-end target (``small_end_factor`` =
+    ``preferred_lo_factor``) when that still leaves room for the large end,
+    else from the hard one (``small_end_factor`` = ``lo_factor``).  ``fits``
+    is ``n_min <= n_max``.  When it does not fit, ``reason`` says why:
+    ``"spread"`` (no power of two fits the pool even without HiGHS' option
+    range) or ``"scale_option_limit"`` (one would, but outside ``[-30, 30]``).
+    ``n_min_hard`` / ``n_max_unclamped`` are the hard-edge exponents before the
+    ``[-30, 30]`` cut.
+    """
+
+    n_min: int
+    n_max: int
+    small_end_factor: float
+    lo_edge: float
+    hi_edge: float
+    n_min_hard: int
+    n_max_unclamped: int
+    reason: str = ""
+
+    @property
+    def fits(self) -> bool:
+        return self.n_min <= self.n_max
+
+
+def _ceil_exponent(target: float, value: float) -> int:
+    """Smallest integer ``n`` with ``value · 2**n >= target`` (exact)."""
+    n = math.ceil(math.log2(target / value))
+    while math.ldexp(value, n) < target:
+        n += 1
+    while math.ldexp(value, n - 1) >= target:
+        n -= 1
+    return n
+
+
+def _floor_exponent(target: float, value: float) -> int:
+    """Largest integer ``n`` with ``value · 2**n <= target`` (exact)."""
+    n = math.floor(math.log2(target / value))
+    while math.ldexp(value, n) > target:
+        n -= 1
+    while math.ldexp(value, n + 1) <= target:
+        n += 1
+    return n
+
+
+def bound_scale_window(
+    b_lo: float,
+    b_hi: float,
+    primal_tol: float,
+    *,
+    lo_factor: float = _WINDOW_LO_FACTOR,
+    hi_factor: float = _WINDOW_HI_FACTOR,
+    preferred_lo_factor: float = _PREFERRED_LO_FACTOR,
+) -> ScaleWindow:
+    """The window of ``user_bound_scale`` exponents for a pool whose
+    smallest meaningful magnitude is ``b_lo`` and largest ``b_hi`` (see
+    :class:`ScaleWindow`).  The scaled pool is ``[b_lo·2**N, b_hi·2**N]``;
+    the window keeps it inside ``[lo_factor·tol, hi_factor·tol]``, with the
+    small end at ``preferred_lo_factor·tol`` or more when the large end still
+    fits."""
+    tol = float(primal_tol)
+    lo_edge = lo_factor * tol
+    hi_edge = hi_factor * tol
+    n_max_raw = _floor_exponent(hi_edge, b_hi)
+    n_min_hard = _ceil_exponent(lo_edge, b_lo)
+    n_min_pref = _ceil_exponent(preferred_lo_factor * tol, b_lo)
+    n_max = min(n_max_raw, USER_SCALE_CLAMP_HI)
+    if max(n_min_pref, USER_SCALE_CLAMP_LO) <= n_max:
+        n_min, factor = max(n_min_pref, USER_SCALE_CLAMP_LO), preferred_lo_factor
+    else:
+        n_min, factor = max(n_min_hard, USER_SCALE_CLAMP_LO), lo_factor
+    reason = ""
+    if n_min > n_max:
+        reason = "spread" if n_min_hard > n_max_raw else "scale_option_limit"
+    return ScaleWindow(
+        n_min=n_min,
+        n_max=n_max,
+        small_end_factor=factor,
+        lo_edge=lo_edge,
+        hi_edge=hi_edge,
+        n_min_hard=n_min_hard,
+        n_max_unclamped=n_max_raw,
+        reason=reason,
+    )
+
+
+def _pool(ranges: RangeReport) -> tuple[float, float] | None:
+    """``(b_lo*, b_hi)`` of the bound / RHS pool: the meaningful readout when
+    the report has it, else the raw bound ∪ RHS minimum and maximum."""
+    if ranges.bound_rhs_meaningful is not None:
+        lo, hi = ranges.bound_rhs_meaningful
+        return float(lo), float(hi)
+    if ranges.bound_rhs_residue is not None:
+        # The readout ran and every entry was residue: no meaningful limit.
+        return None
+    los = [v for v in (ranges.bound[0], ranges.rhs[0]) if _finite_pos(v)]
+    his = [v for v in (ranges.bound[1], ranges.rhs[1]) if _finite_pos(v)]
+    if not los or not his:
+        return None
+    return float(min(los)), float(max(his))
+
+
+def _finite_pos(x: Any) -> bool:
+    return x is not None and isinstance(x, (int, float)) and math.isfinite(x) and x > 0.0
+
 
 @dataclass(frozen=True)
 class Layer3Plan:
@@ -125,6 +271,18 @@ class Layer3Plan:
     reasoning: str
     objective_skipped_external: bool = False
     bound_skipped_external: bool = False
+    #: Where ``user_bound_scale`` came from: ``auto``, ``manual`` or
+    #: ``external``.
+    bound_source: str = "auto"
+    #: The bound tier tag (``in-zone``, ``clamp-large``, ``clamp-small``,
+    #: ``smallest-side``, ``refuse``; ``+raised`` / ``+lowered`` when the
+    #: tolerance window moved it; ``unscalable`` when no exponent fits).
+    bound_tag: str = ""
+    #: The tolerance window the automatic exponent was clipped into
+    #: (``None`` for a manual / external exponent or an empty pool).
+    bound_window: ScaleWindow | None = None
+    #: The primal feasibility tolerance the window used.
+    primal_feasibility_tolerance: float | None = None
 
 
 def _clamp(n: int) -> int:
@@ -196,14 +354,17 @@ def _recommend_bound_scale(
     rhs_min: float,
 ) -> tuple[int, str]:
     """Power-of-two exponent that pulls ``max(|b|)`` into the HiGHS
-    comfort zone, with D's geometric-centering escape on severe
-    overshoots.
+    comfort zone; on a severe overshoot it keeps that exponent even when the
+    small end leaves the zone ("smallest-side": the tolerance window then
+    lifts the small end).
 
     Inputs are the four magnitudes (``±inf`` / ``nan`` → treated as 0
     for the max comparison, ``+inf`` for the min).  Returns
     ``(n, reasoning_tag)`` where ``reasoning_tag`` is one of
-    ``"in-zone"``, ``"clamp-large"``, ``"clamp-small"``, ``"escape"``,
-    or ``"refuse"`` for the operator log.
+    ``"in-zone"``, ``"clamp-large"``, ``"clamp-small"``,
+    ``"smallest-side"``, or ``"refuse"`` for the operator log.  The result
+    is the policy exponent before the tolerance window
+    (:func:`bound_scale_window`) clips it.
     """
     max_b = max(_safe_float(bound_max, 0.0), _safe_float(rhs_max, 0.0))
     min_b = min(_safe_float(bound_min, math.inf), _safe_float(rhs_min, math.inf))
@@ -229,28 +390,16 @@ def _recommend_bound_scale(
 
     # Min-floor guard: when scaling down would drive the small end
     # below ``_HIGHS_SMALL_BOUND``, decide between refusing (the
-    # refuse-safe behaviour for moderate overshoots) and the
-    # geometric-centering escape (the refuse-unsafe behaviour for
-    # severe overshoots).
+    # refuse-safe behaviour for moderate overshoots) and scaling anyway
+    # (severe overshoots, where refusing is worse).
     if dl < 0 and math.isfinite(min_b) and min_b > 0.0:
         scaled_min = min_b * (2.0**dl)
         if scaled_min < _HIGHS_SMALL_BOUND:
             if max_b >= _HIGHS_LARGE_BOUND * _SEVERE_LARGE_OVERSHOOT:
-                # Severe overshoot: geometric centering over the comfort
-                # zone, distributing the unavoidable violation across
-                # both ends.
-                geo_range = math.sqrt(min_b * max_b)
-                geo_band = math.sqrt(_HIGHS_SMALL_BOUND * _HIGHS_LARGE_BOUND)
-                if (
-                    math.isfinite(geo_range)
-                    and geo_range > 0.0
-                    and math.isfinite(geo_band)
-                    and geo_band > 0.0
-                ):
-                    dl = int(round(math.log2(geo_band / geo_range)))
-                    tag = "escape"
-                else:
-                    return 0, "refuse"
+                # Severe overshoot: keep the large-end clamp; the tolerance
+                # window lifts the exponent until the smallest meaningful
+                # limit is enforceable and the large end takes the rest.
+                tag = "smallest-side"
             else:
                 # Moderate overshoot — LPs with tightly-clustered col
                 # bounds land here.  Refusing keeps N=0 and lets HiGHS'
@@ -265,6 +414,7 @@ def recommend_scaling(
     config: ScalingConfig,
     *,
     problem: Any = None,
+    primal_feasibility_tolerance: float | None = None,
 ) -> Layer3Plan:
     """Compute the three HiGHS-native scaling values for one solve.
 
@@ -283,16 +433,27 @@ def recommend_scaling(
        ``config.user_objective_scale`` / ``config.user_bound_scale``
        is set, the plan uses that integer verbatim.  Reasoning
        string surfaces "manual override ...".
-    3. **Severe-overshoot escape** — geometric-centering branch fires
-       when the naive recommendation would crush the small end and
-       ``max_b >= 1e+9``.  D's branch from polar-high's
-       ``_recommend_user_bound_scale``.
-    4. **Default auto** — power-of-two exponents that pull the worst
-       end into the HiGHS comfort zone.
+    3. **Default auto** — power-of-two exponents that pull the worst
+       end into the HiGHS comfort zone; on a severe overshoot
+       (``max_b >= 1e+9``) the large-end clamp is kept even when the small
+       end leaves the zone ("smallest-side").
+    4. **Tolerance window** — an automatic bound exponent is then clipped
+       into :func:`bound_scale_window` of the bound / RHS pool, at
+       ``primal_feasibility_tolerance`` (``None``: the tolerance set on
+       ``problem``, as HiGHS applies it, else ``1e-7``).  No exponent fits →
+       the tier exponent is kept and tagged ``unscalable``.  Manual and
+       external exponents are not clipped (:func:`assess_scaling` judges
+       them).
 
     The resulting exponents are clamped to ``[-30, 30]`` (HiGHS' option
     bounds).
     """
+    if primal_feasibility_tolerance is not None:
+        tol_p = float(primal_feasibility_tolerance)
+    elif problem is not None:
+        tol_p, _tol_d = resolve_feasibility_tolerances(problem)
+    else:
+        tol_p = HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
     cost_lo, cost_hi = ranges.cost
     bound_lo, bound_hi = ranges.bound
     rhs_lo, rhs_hi = ranges.rhs
@@ -328,22 +489,38 @@ def recommend_scaling(
         reasoning_obj_tag = obj_tag
 
     # --- Bound axis -------------------------------------------------------
+    def _auto_bound() -> tuple[int, str, ScaleWindow | None]:
+        n_raw, tag = _recommend_bound_scale(
+            bound_max=_safe_float(bound_hi, 0.0),
+            bound_min=_safe_float(bound_lo, math.inf),
+            rhs_max=_safe_float(rhs_hi, 0.0),
+            rhs_min=_safe_float(rhs_lo, math.inf),
+        )
+        n = _clamp(n_raw)
+        pool = _pool(ranges)
+        if pool is None:
+            return n, tag, None
+        window = bound_scale_window(pool[0], pool[1], tol_p)
+        if not window.fits:
+            return n, "unscalable", window
+        if n < window.n_min:
+            return window.n_min, f"{tag}+raised", window
+        if n > window.n_max:
+            return window.n_max, f"{tag}+lowered", window
+        return n, tag, window
+
     bnd_skipped_external = False
+    bnd_source = "auto"
+    bnd_window: ScaleWindow | None = None
     if problem is not None and has_explicit_option(problem, "user_bound_scale"):
         ext = get_explicit_option(problem, "user_bound_scale")
         try:
             n_bnd = _clamp(int(ext))
         except (TypeError, ValueError):
-            n_bnd_raw, bnd_tag = _recommend_bound_scale(
-                bound_max=_safe_float(bound_hi, 0.0),
-                bound_min=_safe_float(bound_lo, math.inf),
-                rhs_max=_safe_float(rhs_hi, 0.0),
-                rhs_min=_safe_float(rhs_lo, math.inf),
-            )
-            n_bnd = _clamp(n_bnd_raw)
-            reasoning_bnd_tag = bnd_tag
+            n_bnd, reasoning_bnd_tag, bnd_window = _auto_bound()
         else:
             bnd_skipped_external = True
+            bnd_source = "external"
             reasoning_bnd_tag = "external"
             _logger.info(
                 "respecting external user_bound_scale=%d",
@@ -351,16 +528,10 @@ def recommend_scaling(
             )
     elif config.user_bound_scale is not None:
         n_bnd = _clamp(int(config.user_bound_scale))
+        bnd_source = "manual"
         reasoning_bnd_tag = "manual"
     else:
-        n_bnd_raw, bnd_tag = _recommend_bound_scale(
-            bound_max=_safe_float(bound_hi, 0.0),
-            bound_min=_safe_float(bound_lo, math.inf),
-            rhs_max=_safe_float(rhs_hi, 0.0),
-            rhs_min=_safe_float(rhs_lo, math.inf),
-        )
-        n_bnd = _clamp(n_bnd_raw)
-        reasoning_bnd_tag = bnd_tag
+        n_bnd, reasoning_bnd_tag, bnd_window = _auto_bound()
 
     # --- Reasoning string -------------------------------------------------
     parts: list[str] = []
@@ -398,6 +569,10 @@ def recommend_scaling(
         reasoning=reasoning,
         objective_skipped_external=obj_skipped_external,
         bound_skipped_external=bnd_skipped_external,
+        bound_source=bnd_source,
+        bound_tag=reasoning_bnd_tag,
+        bound_window=bnd_window,
+        primal_feasibility_tolerance=tol_p,
     )
 
 
@@ -424,8 +599,375 @@ def apply_scaling(problem: Any, plan: Layer3Plan) -> None:
     problem.set_solver_options(existing)
 
 
+_LEVEL_ORDER = {"ok": 0, "info": 0, "warn": 1, "error": 2}
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One result of :func:`assess_scaling`.
+
+    ``group`` is ``bound_rhs``, ``cost``, ``matrix`` or ``info``; ``level``
+    ``ok`` / ``warn`` / ``error`` (``info`` for the ``info`` group); ``kind``
+    names what was found (``+``-joined when several):
+
+    * ``bound_rhs``: ``spread`` (warn: more than ``warn_decades``; error: no
+      exponent fits), ``scale_option_limit`` (an exponent would fit, but
+      outside HiGHS' ``[-30, 30]``), ``manual_out_of_window`` /
+      ``external_out_of_window`` / ``unscaled_out_of_window`` (the exponent
+      used, set by the caller or ``0`` when not applied, leaves the window
+      while one would fit), ``ok``;
+    * ``cost``: ``spread``, ``small_cost`` (smallest scaled cost below
+      ``10 · dual tolerance``), ``ok``;
+    * ``matrix``: ``dropped`` (warn: a scaled term at or below
+      ``small_matrix``), ``refused`` (error: one at or above
+      ``large_matrix``), ``ok``;
+    * ``info``: ``residue``, ``beyond_infinite``, ``integer_bounds``.
+
+    ``numbers`` carries the measured values (see :func:`assess_scaling`);
+    ``extremes`` maps ``min`` / ``max`` to the :class:`Extreme` holding that
+    end (when the report has extremes).  ``caused_by_prescale`` is ``True``
+    when ``ranges_pre`` was given and the finding is worse than it would be
+    on ``ranges_pre`` (the scaling applied between the two readouts caused
+    it).
+    """
+
+    group: str
+    level: str
+    kind: str
+    numbers: Mapping[str, float] = field(default_factory=dict)
+    extremes: Mapping[str, Extreme] = field(default_factory=dict)
+    caused_by_prescale: bool = False
+
+
+@dataclass(frozen=True)
+class ScalingVerdict:
+    """What :func:`assess_scaling` concluded: the worst ``level`` over the
+    findings (``ok`` / ``warn`` / ``error``), the findings, and the inputs
+    they were judged at."""
+
+    level: str
+    findings: tuple[Finding, ...]
+    primal_tol: float
+    dual_tol: float
+    window: tuple[float, float]
+    bound_scale: int
+    objective_scale: int
+    bound_source: str
+
+    def finding(self, group: str) -> Finding | None:
+        """The first finding of ``group`` (``None`` when there is none)."""
+        for f in self.findings:
+            if f.group == group:
+                return f
+        return None
+
+
+def _ext(ranges: RangeReport, group: str) -> dict[str, Extreme]:
+    e = ranges.extremes or {}
+    return dict(e.get(group, {}))
+
+
+def _log10_ratio(hi: float, lo: float) -> float:
+    return math.log10(hi / lo) if lo > 0.0 and hi > 0.0 else 0.0
+
+
+def _assess_bound_rhs(
+    ranges: RangeReport,
+    ranges_pre: RangeReport | None,
+    n: int,
+    source: str,
+    tol: float,
+    warn_decades: float,
+    lo_factor: float,
+    hi_factor: float,
+) -> Finding | None:
+    pool = _pool(ranges)
+    if pool is None:
+        return None
+    b_lo, b_hi = pool
+    window = bound_scale_window(b_lo, b_hi, tol, lo_factor=lo_factor, hi_factor=hi_factor)
+    s_lo = math.ldexp(b_lo, n)
+    s_hi = math.ldexp(b_hi, n)
+    decades = _log10_ratio(b_hi, b_lo)
+    extremes = _ext(ranges, "bound_rhs")
+    lo_end = extremes.get("min")
+    # Model units per reported unit at the smallest limit (1 / Layer 2 factor).
+    ratio = 1.0
+    if lo_end is not None and lo_end.post > 0.0 and math.isfinite(lo_end.model):
+        ratio = lo_end.model / lo_end.post
+    model_lo = b_lo * ratio
+    numbers: dict[str, float] = {
+        "decades": decades,
+        "b_lo": b_lo,
+        "b_hi": b_hi,
+        "s_lo": s_lo,
+        "s_hi": s_hi,
+        "r_lo": tol / s_lo,
+        "violation_model": math.ldexp(tol, -n) * ratio,
+        "window_lo": window.lo_edge,
+        "window_hi": window.hi_edge,
+        "n_min": float(window.n_min),
+        "n_max": float(window.n_max),
+        "n_used": float(n),
+        "fits": 1.0 if window.fits else 0.0,
+    }
+    # What fitting the largest value costs the smallest limit: the exponent
+    # that puts the large end on the upper edge (within HiGHS' range).
+    n_fit_large = max(min(window.n_max_unclamped, USER_SCALE_CLAMP_HI), USER_SCALE_CLAMP_LO)
+    numbers["n_fit_large"] = float(n_fit_large)
+    numbers["fit_large_violation_model"] = math.ldexp(tol, -n_fit_large) * ratio
+    numbers["fit_large_violation_ratio"] = numbers["fit_large_violation_model"] / model_lo
+    pre_fits = None
+    pre_decades = None
+    if ranges_pre is not None:
+        pre_pool = _pool(ranges_pre)
+        if pre_pool is not None:
+            pre_decades = _log10_ratio(pre_pool[1], pre_pool[0])
+            numbers["decades_pre"] = pre_decades
+            pre_fits = bound_scale_window(
+                pre_pool[0], pre_pool[1], tol, lo_factor=lo_factor, hi_factor=hi_factor
+            ).fits
+    out_of_window = s_lo < window.lo_edge or s_hi > window.hi_edge
+    caused = False
+    if out_of_window:
+        level = "error"
+        if not window.fits:
+            kind = window.reason
+            caused = bool(pre_fits)
+        else:
+            kind = {"manual": "manual_out_of_window", "external": "external_out_of_window"}.get(
+                source, "unscaled_out_of_window" if source == "unscaled" else "out_of_window"
+            )
+        if decades > warn_decades and kind != "spread":
+            kind = f"spread+{kind}"
+    elif decades > warn_decades:
+        level, kind = "warn", "spread"
+        caused = pre_decades is not None and pre_decades <= warn_decades
+    else:
+        level, kind = "ok", "ok"
+    return Finding("bound_rhs", level, kind, numbers, extremes, caused)
+
+
+def _assess_cost(
+    ranges: RangeReport, n_obj: int, n_bnd: int, tol_d: float, warn_decades: float
+) -> Finding | None:
+    cont = ranges.cost_continuous
+    if cont is None and ranges.integer_cost is None:
+        cont = ranges.cost if _finite_pos(ranges.cost[0]) else None
+    los: list[float] = []
+    his: list[float] = []
+    if cont is not None:
+        los.append(math.ldexp(cont[0], n_obj))
+        his.append(math.ldexp(cont[1], n_obj))
+    if ranges.integer_cost is not None:
+        los.append(math.ldexp(ranges.integer_cost[0], n_obj + n_bnd))
+        his.append(math.ldexp(ranges.integer_cost[1], n_obj + n_bnd))
+    if not los:
+        return None
+    c_lo, c_hi = min(los), max(his)
+    decades = _log10_ratio(c_hi, c_lo)
+    kinds = []
+    if decades > warn_decades:
+        kinds.append("spread")
+    if c_lo < 10.0 * tol_d:
+        kinds.append("small_cost")
+    extremes = _ext(ranges, "cost")
+    ints = _ext(ranges, "integer_cost")
+    if ranges.integer_cost is not None:
+        if cont is None or math.ldexp(ranges.integer_cost[0], n_obj + n_bnd) == c_lo:
+            if "min" in ints:
+                extremes["min"] = ints["min"]
+        if cont is None or math.ldexp(ranges.integer_cost[1], n_obj + n_bnd) == c_hi:
+            if "max" in ints:
+                extremes["max"] = ints["max"]
+    numbers = {"decades": decades, "s_lo": c_lo, "s_hi": c_hi, "small_edge": 10.0 * tol_d}
+    level = "warn" if kinds else "ok"
+    return Finding("cost", level, "+".join(kinds) or "ok", numbers, extremes)
+
+
+def _assess_matrix(ranges: RangeReport, n_bnd: int, small: float, large: float) -> Finding | None:
+    cont = ranges.matrix_continuous
+    if cont is None and ranges.integer_matrix is None:
+        cont = ranges.matrix if _finite_pos(ranges.matrix[0]) else None
+    ends: list[tuple[float, float, str]] = []
+    if cont is not None:
+        ends.append((cont[0], cont[1], "matrix"))
+    if ranges.integer_matrix is not None:
+        ends.append(
+            (
+                math.ldexp(ranges.integer_matrix[0], n_bnd),
+                math.ldexp(ranges.integer_matrix[1], n_bnd),
+                "integer_matrix",
+            )
+        )
+    if not ends:
+        return None
+    lo, lo_group = min((e[0], e[2]) for e in ends)
+    hi, hi_group = max((e[1], e[2]) for e in ends)
+    extremes = {}
+    lo_ext = _ext(ranges, lo_group).get("min")
+    hi_ext = _ext(ranges, hi_group).get("max")
+    if lo_ext is not None:
+        extremes["min"] = lo_ext
+    if hi_ext is not None:
+        extremes["max"] = hi_ext
+    numbers = {
+        "decades": _log10_ratio(hi, lo),
+        "s_lo": lo,
+        "s_hi": hi,
+        "small_matrix": small,
+        "large_matrix": large,
+    }
+    kinds = []
+    level = "ok"
+    if hi >= large:
+        kinds.append("refused")
+        level = "error"
+    if lo <= small:
+        kinds.append("dropped")
+        if level == "ok":
+            level = "warn"
+    return Finding("matrix", level, "+".join(kinds) or "ok", numbers, extremes)
+
+
+def _assess_info(ranges: RangeReport) -> list[Finding]:
+    out: list[Finding] = []
+    if ranges.bound_rhs_residue is not None and ranges.bound_rhs_residue[0] > 0:
+        count, largest = ranges.bound_rhs_residue
+        out.append(
+            Finding(
+                "info",
+                "info",
+                "residue",
+                {
+                    "count": float(count),
+                    "largest_model": float(largest),
+                    "floor": float(ranges.residue_floor or 0.0),
+                },
+                _ext(ranges, "residue"),
+            )
+        )
+    if ranges.bound_rhs_beyond_infinite:
+        out.append(
+            Finding(
+                "info",
+                "info",
+                "beyond_infinite",
+                {
+                    "count": float(ranges.bound_rhs_beyond_infinite),
+                    "infinite_bound": float(ranges.infinite_bound or 0.0),
+                },
+            )
+        )
+    if ranges.integer_bound is not None:
+        out.append(
+            Finding(
+                "info",
+                "info",
+                "integer_bounds",
+                {"lo": ranges.integer_bound[0], "hi": ranges.integer_bound[1]},
+                _ext(ranges, "integer_bound"),
+            )
+        )
+    return out
+
+
+def assess_scaling(
+    ranges: RangeReport,
+    plan: Layer3Plan,
+    *,
+    primal_tol: float,
+    dual_tol: float,
+    warn_decades: float = 13.0,
+    small_matrix: float = HIGHS_SMALL_MATRIX_VALUE,
+    large_matrix: float = HIGHS_LARGE_MATRIX_VALUE,
+    apply_user_scale: bool = True,
+    ranges_pre: RangeReport | None = None,
+    window_lo_factor: float = _WINDOW_LO_FACTOR,
+    window_hi_factor: float = _WINDOW_HI_FACTOR,
+) -> ScalingVerdict:
+    """Judge the LP a solver will receive: ``ranges`` (the readout of that
+    LP before ``user_*_scale``) under ``plan``'s exponents.
+
+    Pure: no side effects, no solver call.  Rules (``tol`` = ``primal_tol``):
+
+    * **bound / RHS** — the pool ``[b_lo*, b_hi]`` scaled by
+      ``2**user_bound_scale`` must lie inside ``[window_lo_factor·tol,
+      window_hi_factor·tol]`` (error otherwise); a spread of more than
+      ``warn_decades`` warns.  ``numbers``: ``decades`` (and
+      ``decades_pre``), ``b_lo`` / ``b_hi``, scaled ``s_lo`` / ``s_hi``,
+      ``r_lo`` = ``tol / s_lo`` (fraction of the smallest limit the solver may
+      violate), ``violation_model`` (that amount in model units),
+      ``window_lo`` / ``window_hi``, ``n_min`` / ``n_max`` / ``n_used`` /
+      ``fits``, and ``n_fit_large`` / ``fit_large_violation_model`` /
+      ``fit_large_violation_ratio`` (what fitting the largest value would
+      cost the smallest limit).
+    * **cost** — warn only: spread over ``warn_decades``, or the smallest
+      scaled cost below ``10·dual_tol``.  Continuous-column costs are scaled
+      by ``2**N_obj``, integer-column costs by ``2**(N_obj + N_bnd)``.
+    * **matrix** — the continuous-column terms as they are, the
+      integer-column terms ``× 2**N_bnd``: a term at or below
+      ``small_matrix`` warns (the solver drops it), one at or above
+      ``large_matrix`` is an error (the solver refuses the model).  The
+      spread is reported only.
+    * **info** — residue left out by the floor, values at or above the
+      solver infinity, integer-column bounds.
+
+    ``apply_user_scale=False`` judges the LP at ``N = 0`` for both exponents
+    (a solver that does not receive ``user_*_scale``).  ``ranges_pre``, when
+    given, sets :attr:`Finding.caused_by_prescale`.  The caller decides what a
+    level means (raise, warn, ignore).
+    """
+    if apply_user_scale:
+        n_bnd = int(plan.user_bound_scale)
+        n_obj = int(plan.user_objective_scale)
+        source = plan.bound_source
+    else:
+        n_bnd = n_obj = 0
+        source = "unscaled"
+    findings: list[Finding] = []
+    b = _assess_bound_rhs(
+        ranges,
+        ranges_pre,
+        n_bnd,
+        source,
+        float(primal_tol),
+        warn_decades,
+        window_lo_factor,
+        window_hi_factor,
+    )
+    if b is not None:
+        findings.append(b)
+    c = _assess_cost(ranges, n_obj, n_bnd, float(dual_tol), warn_decades)
+    if c is not None:
+        findings.append(c)
+    m = _assess_matrix(ranges, n_bnd, small_matrix, large_matrix)
+    if m is not None:
+        findings.append(m)
+    findings.extend(_assess_info(ranges))
+    worst = max((f.level for f in findings), key=lambda lv: _LEVEL_ORDER[lv], default="ok")
+    level = "ok" if worst == "info" else worst
+    return ScalingVerdict(
+        level=level,
+        findings=tuple(findings),
+        primal_tol=float(primal_tol),
+        dual_tol=float(dual_tol),
+        window=(window_lo_factor * float(primal_tol), window_hi_factor * float(primal_tol)),
+        bound_scale=n_bnd,
+        objective_scale=n_obj,
+        bound_source=source,
+    )
+
+
 __all__ = [
+    "Finding",
+    "HIGHS_LARGE_MATRIX_VALUE",
+    "HIGHS_SMALL_MATRIX_VALUE",
     "Layer3Plan",
+    "ScaleWindow",
+    "ScalingVerdict",
     "apply_scaling",
+    "assess_scaling",
+    "bound_scale_window",
     "recommend_scaling",
 ]
