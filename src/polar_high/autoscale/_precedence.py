@@ -16,7 +16,13 @@ problem.  Either path yields the same answer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
+
+# HiGHS defaults the scaling checks fall back to when an option is not set.
+HIGHS_DEFAULT_FEASIBILITY_TOLERANCE = 1e-7
+HIGHS_DEFAULT_KKT_TOLERANCE = 1e-7
+HIGHS_DEFAULT_INFINITE_BOUND = 1e20
 
 
 def get_explicit_option(problem: Any, option_name: str) -> Any | None:
@@ -55,4 +61,84 @@ def has_explicit_option(problem: Any, option_name: str) -> bool:
     return get_explicit_option(problem, option_name) is not None
 
 
-__all__ = ["get_explicit_option", "has_explicit_option"]
+def _as_float(value: Any, default: float) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if out == out else default  # NaN -> default
+
+
+def feasibility_tolerances_from_options(options: Mapping[str, Any] | None) -> tuple[float, float]:
+    """``(primal, dual)`` feasibility tolerances HiGHS will use for an
+    options mapping: the explicit ``primal_feasibility_tolerance`` /
+    ``dual_feasibility_tolerance`` (else HiGHS' default ``1e-7``), both
+    replaced by ``kkt_tolerance`` when that is set to anything other than its
+    default — HiGHS' own rule."""
+    opts = options or {}
+    p = opts.get("primal_feasibility_tolerance")
+    d = opts.get("dual_feasibility_tolerance")
+    tol_p = (
+        HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
+        if p is None
+        else _as_float(p, HIGHS_DEFAULT_FEASIBILITY_TOLERANCE)
+    )
+    tol_d = (
+        HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
+        if d is None
+        else _as_float(d, HIGHS_DEFAULT_FEASIBILITY_TOLERANCE)
+    )
+    k = opts.get("kkt_tolerance")
+    if k is not None:
+        kkt = _as_float(k, HIGHS_DEFAULT_KKT_TOLERANCE)
+        if kkt != HIGHS_DEFAULT_KKT_TOLERANCE:
+            tol_p = tol_d = kkt
+    return tol_p, tol_d
+
+
+def infinite_bound_from_options(options: Mapping[str, Any] | None) -> float:
+    """HiGHS' ``infinite_bound`` for an options mapping (default ``1e20``):
+    a bound at or above it is no limit to the solver."""
+    v = (options or {}).get("infinite_bound")
+    return HIGHS_DEFAULT_INFINITE_BOUND if v is None else _as_float(v, HIGHS_DEFAULT_INFINITE_BOUND)
+
+
+def _explicit_options(problem: Any, names: tuple[str, ...]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if problem is None:
+        return out
+    for name in names:
+        v = get_explicit_option(problem, name)
+        if v is not None:
+            out[name] = v
+    return out
+
+
+def resolve_feasibility_tolerances(problem: Any) -> tuple[float, float]:
+    """``(primal, dual)`` feasibility tolerances set on ``problem`` (see
+    :func:`feasibility_tolerances_from_options`); HiGHS' defaults when
+    ``problem`` is ``None`` or sets none."""
+    return feasibility_tolerances_from_options(
+        _explicit_options(
+            problem,
+            ("primal_feasibility_tolerance", "dual_feasibility_tolerance", "kkt_tolerance"),
+        )
+    )
+
+
+def resolve_infinite_bound(problem: Any) -> float:
+    """``infinite_bound`` set on ``problem``, else HiGHS' default ``1e20``."""
+    return infinite_bound_from_options(_explicit_options(problem, ("infinite_bound",)))
+
+
+__all__ = [
+    "HIGHS_DEFAULT_FEASIBILITY_TOLERANCE",
+    "HIGHS_DEFAULT_INFINITE_BOUND",
+    "HIGHS_DEFAULT_KKT_TOLERANCE",
+    "feasibility_tolerances_from_options",
+    "get_explicit_option",
+    "has_explicit_option",
+    "infinite_bound_from_options",
+    "resolve_feasibility_tolerances",
+    "resolve_infinite_bound",
+]

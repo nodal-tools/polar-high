@@ -34,6 +34,13 @@ _DEFAULT_THRESHOLD_DECADES = 9.0
 USER_SCALE_CLAMP_LO: int = -30
 USER_SCALE_CLAMP_HI: int = 30
 
+# A bound / RHS whose model-unit magnitude is below this many primal
+# feasibility tolerances is *residue*: a solve with no scaling at all enforces
+# it to no better than 10 %, so it cannot stand for a limit (float noise such
+# as ``2e-15`` from a cancellation).  The default of
+# :attr:`ScalingConfig.residue_floor`.
+RESIDUE_FLOOR_FACTOR: float = 10.0
+
 
 class ScalingMode(StrEnum):
     """Autoscaler policy modes.
@@ -119,6 +126,12 @@ class ScalingConfig:
     report_yaml_path:
         Where a caller wishes to write an audit YAML.  Library does not
         read or write this; it's a transport for caller-side reporters.
+    residue_floor:
+        Model-unit magnitude below which a bound or RHS value is residue
+        (left out of the smallest meaningful limit and counted instead; see
+        :attr:`RangeReport.bound_rhs_meaningful`).  ``None`` (default):
+        :data:`RESIDUE_FLOOR_FACTOR` × the primal feasibility tolerance set
+        on the problem (HiGHS' ``1e-7`` when none is set).
     """
 
     mode: ScalingMode = ScalingMode.BASIC
@@ -126,9 +139,11 @@ class ScalingConfig:
     user_bound_scale: int | None = None
     user_objective_scale: int | None = None
     report_yaml_path: Path | None = None
+    residue_floor: float | None = None
 
 
 __all__ = [
+    "RESIDUE_FLOOR_FACTOR",
     "ScalingConfig",
     "ScalingMode",
     "USER_SCALE_CLAMP_HI",

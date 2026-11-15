@@ -22,7 +22,9 @@ The legacy ``polar_high.engine._recommend_user_bound_scale`` and the
 been retired in favour of this package.
 """
 
+from ._coef_walk import FlooredMinMax, FlooredMinMaxAbsReducer
 from ._config import (
+    RESIDUE_FLOOR_FACTOR,
     USER_SCALE_CLAMP_HI,
     USER_SCALE_CLAMP_LO,
     ScalingConfig,
@@ -31,8 +33,16 @@ from ._config import (
     mode_enables_layer3,
 )
 from ._layer3 import Layer3Plan, apply_scaling, recommend_scaling
-from ._precedence import get_explicit_option, has_explicit_option
+from ._precedence import (
+    feasibility_tolerances_from_options,
+    get_explicit_option,
+    has_explicit_option,
+    infinite_bound_from_options,
+    resolve_feasibility_tolerances,
+    resolve_infinite_bound,
+)
 from ._ranges import (
+    Extreme,
     RangeReport,
     detect_ranges,
     ranges_from_arrays,
@@ -40,7 +50,11 @@ from ._ranges import (
 )
 
 __all__ = [
+    "Extreme",
+    "FlooredMinMax",
+    "FlooredMinMaxAbsReducer",
     "Layer3Plan",
+    "RESIDUE_FLOOR_FACTOR",
     "RangeReport",
     "ScalingConfig",
     "ScalingMode",
@@ -48,11 +62,15 @@ __all__ = [
     "USER_SCALE_CLAMP_LO",
     "apply_scaling",
     "detect_ranges",
+    "feasibility_tolerances_from_options",
     "get_explicit_option",
     "has_explicit_option",
+    "infinite_bound_from_options",
     "mode_enables_layer1",
     "mode_enables_layer3",
     "ranges_from_arrays",
     "ranges_from_streamed",
     "recommend_scaling",
+    "resolve_feasibility_tolerances",
+    "resolve_infinite_bound",
 ]

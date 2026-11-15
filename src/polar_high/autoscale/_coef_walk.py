@@ -104,10 +104,15 @@ __all__ = [
     "ArrayClassifier",
     "CoefBatch",
     "CoefWalkRecipe",
+    "FlooredMinMax",
+    "FlooredMinMaxAbsReducer",
     "Log2HistogramReducer",
     "MinMaxAbsReducer",
+    "PoolEnd",
+    "PoolRange",
     "Reducer",
     "bounded_coefficient_walk",
+    "fold_pools",
 ]
 
 
@@ -495,6 +500,252 @@ class MinMaxAbsReducer(Reducer):
         if self._hi == 0.0:
             return None, None
         return self._lo, self._hi
+
+
+class PoolEnd:
+    """One end (smallest or largest) of a magnitude pool: the reported
+    (post-scaling) magnitude and the model-unit magnitude of the entry that
+    holds it, plus its local row id and column id (``-1`` when the stream
+    carries none)."""
+
+    __slots__ = ("post", "model", "rid", "col_id")
+
+    def __init__(self, post: float, model: float, rid: int, col_id: int) -> None:
+        self.post = post
+        self.model = model
+        self.rid = rid
+        self.col_id = col_id
+
+
+class PoolRange:
+    """Running smallest / largest end of one magnitude pool (see
+    :class:`PoolEnd`).  Empty until the first :meth:`add`."""
+
+    __slots__ = ("lo", "hi", "by_model")
+
+    def __init__(self, *, by_model: bool = False) -> None:
+        self.lo: PoolEnd | None = None
+        self.hi: PoolEnd | None = None
+        # Rank the ends by the model-unit magnitude instead of the reported
+        # one (the residue pool: the floor is judged in model units).
+        self.by_model = by_model
+
+    def _key(self, end: PoolEnd) -> float:
+        return end.model if self.by_model else end.post
+
+    def add(
+        self,
+        post: np.ndarray,
+        model: np.ndarray,
+        rid: np.ndarray | None = None,
+        col_id: np.ndarray | None = None,
+    ) -> None:
+        """Fold already-masked, index-paired arrays into the pool."""
+        if post.size == 0:
+            return
+        rank = model if self.by_model else post
+        i_lo = int(np.argmin(rank))
+        i_hi = int(np.argmax(rank))
+        if self.lo is None or rank[i_lo] < self._key(self.lo):
+            self.lo = PoolEnd(
+                float(post[i_lo]),
+                float(model[i_lo]),
+                -1 if rid is None else int(rid[i_lo]),
+                -1 if col_id is None else int(col_id[i_lo]),
+            )
+        if self.hi is None or rank[i_hi] > self._key(self.hi):
+            self.hi = PoolEnd(
+                float(post[i_hi]),
+                float(model[i_hi]),
+                -1 if rid is None else int(rid[i_hi]),
+                -1 if col_id is None else int(col_id[i_hi]),
+            )
+
+    def merge(self, other: PoolRange) -> tuple[bool, bool]:
+        """Fold ``other``'s ends in; returns ``(lo_taken, hi_taken)``."""
+        lo_taken = hi_taken = False
+        if other.lo is not None and (self.lo is None or self._key(other.lo) < self._key(self.lo)):
+            self.lo = other.lo
+            lo_taken = True
+        if other.hi is not None and (self.hi is None or self._key(other.hi) > self._key(self.hi)):
+            self.hi = other.hi
+            hi_taken = True
+        return lo_taken, hi_taken
+
+    def pair(self) -> tuple[float, float] | None:
+        """``(smallest, largest)`` reported magnitude, ``None`` when empty."""
+        if self.lo is None or self.hi is None:
+            return None
+        return self.lo.post, self.hi.post
+
+
+class FlooredMinMax:
+    """What :class:`FlooredMinMaxAbsReducer` found in one stream.
+
+    * ``all`` — ``(min, max)`` of every finite non-zero ``|scaled coef|``:
+      exactly what :class:`MinMaxAbsReducer` returns (``(None, None)`` when
+      empty).
+    * ``meaningful`` — the continuous-column entries that are limits the
+      solver keeps: ``|scaled| < infinite`` (larger is "no limit" to the
+      solver).  ``meaningful.hi`` is the largest of them; ``meaningful.lo``
+      the smallest whose model-unit magnitude ``|coef|`` is at least
+      ``floor`` (smaller ones are *residue*).
+    * ``residue_count`` / ``residue`` — entries left out of the small end
+      by the floor; ``residue`` ranks them by model-unit magnitude
+      (``residue.hi`` is the largest one left out).
+    * ``beyond_infinite`` — entries at or above ``infinite``.
+    * ``integer`` — the entries on integer columns (``integer_cols``), kept
+      apart from every other pool.
+    """
+
+    __slots__ = ("all", "meaningful", "residue_count", "residue", "beyond_infinite", "integer")
+
+    def __init__(self) -> None:
+        self.all: tuple[float | None, float | None] = (None, None)
+        self.meaningful = PoolRange()
+        self.residue_count = 0
+        self.residue = PoolRange(by_model=True)
+        self.beyond_infinite = 0
+        self.integer = PoolRange()
+
+
+class FlooredMinMaxAbsReducer(Reducer):
+    """:class:`MinMaxAbsReducer` plus the pools a scaling check needs.
+
+    The model-unit magnitude of an entry is ``|coef|`` as the stream
+    delivers it (before the ``scale`` side vectors); the reported magnitude
+    is ``|scaled coef|`` (:func:`_scaled_abs`).  ``floor`` is judged on the
+    model-unit magnitude, ``infinite`` on the reported one.  ``integer_cols``
+    is a boolean array indexed by ``col_id`` (``None``: every column is
+    continuous); a Var-less (param-only) stream has no columns and must
+    leave it ``None``.  ``finalize`` returns a :class:`FlooredMinMax`; its
+    ``all`` pair is byte-identical to :class:`MinMaxAbsReducer`'s result.
+    """
+
+    def __init__(
+        self,
+        scale: tuple[np.ndarray | None, int, np.ndarray | None],
+        floor: float = 0.0,
+        *,
+        infinite: float = math.inf,
+        integer_cols: np.ndarray | None = None,
+    ) -> None:
+        self._scale = scale
+        self._floor = float(floor)
+        self._infinite = float(infinite)
+        self._integer_cols = integer_cols
+        self._all = MinMaxAbsReducer(scale)
+        self._out = FlooredMinMax()
+
+    def init(self) -> None:
+        self._all.init()
+        self._out = FlooredMinMax()
+
+    def update(self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray) -> None:
+        if coef_arr.size == 0:
+            return
+        post = _scaled_abs(rid_arr, col_id_arr, coef_arr, self._scale)
+        # ``all``: the MinMaxAbsReducer fold, on the same scaled array.
+        mask = np.isfinite(post) & (post != 0)
+        if not mask.any():
+            return
+        m = post[mask]
+        lo = float(m.min())
+        hi = float(m.max())
+        if lo < self._all._lo:
+            self._all._lo = lo
+        if hi > self._all._hi:
+            self._all._hi = hi
+        model = np.abs(coef_arr.astype(np.float64, copy=False))
+        fold_pools(
+            self._out,
+            post,
+            model,
+            rid_arr,
+            col_id_arr,
+            floor=self._floor,
+            infinite=self._infinite,
+            integer_cols=self._integer_cols,
+        )
+
+    def finalize(self) -> FlooredMinMax:
+        self._out.all = self._all.finalize()
+        return self._out
+
+
+def fold_pools(
+    out: FlooredMinMax,
+    post: np.ndarray,
+    model: np.ndarray,
+    rid: np.ndarray | None,
+    col_id: np.ndarray | None,
+    *,
+    floor: float,
+    infinite: float,
+    integer_cols: np.ndarray | None,
+    multiplicity: int = 1,
+) -> None:
+    """Fold paired ``|reported|`` / ``|model|`` magnitudes into ``out``'s
+    pools (everything except ``out.all``).  ``rid`` / ``col_id`` may be
+    ``None`` (reported as ``-1``).  ``multiplicity`` counts each entry that
+    many times in the residue / beyond-infinite counts (a single value
+    broadcast over many rows or columns)."""
+    mask = np.isfinite(post) & (post != 0)
+    if not mask.any():
+        return
+    if integer_cols is not None and col_id is not None:
+        on_int = mask & integer_cols[col_id]
+        if on_int.any():
+            out.integer.add(
+                post[on_int],
+                model[on_int],
+                None if rid is None else rid[on_int],
+                col_id[on_int],
+            )
+            mask &= ~on_int
+    beyond = mask & (post >= infinite)
+    n_beyond = int(np.count_nonzero(beyond))
+    if n_beyond:
+        out.beyond_infinite += n_beyond * multiplicity
+        mask &= ~beyond
+    if not mask.any():
+        return
+    # The largest kept limit: residue never sets it (it is tiny).
+    i_hi = np.flatnonzero(mask)
+    p_keep = post[i_hi]
+    j = int(np.argmax(p_keep))
+    k = int(i_hi[j])
+    if out.meaningful.hi is None or p_keep[j] > out.meaningful.hi.post:
+        out.meaningful.hi = PoolEnd(
+            float(post[k]),
+            float(model[k]),
+            -1 if rid is None else int(rid[k]),
+            -1 if col_id is None else int(col_id[k]),
+        )
+    residue = mask & (model < floor)
+    n_res = int(np.count_nonzero(residue))
+    if n_res:
+        out.residue_count += n_res * multiplicity
+        out.residue.add(
+            post[residue],
+            model[residue],
+            None if rid is None else rid[residue],
+            None if col_id is None else col_id[residue],
+        )
+        mask &= ~residue
+    if not mask.any():
+        return
+    i_lo = np.flatnonzero(mask)
+    p_lo = post[i_lo]
+    j = int(np.argmin(p_lo))
+    k = int(i_lo[j])
+    if out.meaningful.lo is None or p_lo[j] < out.meaningful.lo.post:
+        out.meaningful.lo = PoolEnd(
+            float(post[k]),
+            float(model[k]),
+            -1 if rid is None else int(rid[k]),
+            -1 if col_id is None else int(col_id[k]),
+        )
 
 
 # Per-bucket accumulator tuple: (sum_log2, count, abs_min, abs_max).

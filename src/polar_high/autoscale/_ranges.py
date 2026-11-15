@@ -27,14 +27,21 @@ itself prints in its "Coefficient ranges" block — by construction.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any, NamedTuple
 
 import numpy as np
 
 from .._collect import collect_in_join_order, collect_streaming_in_join_order
-from ._config import ScalingConfig
+from ._coef_walk import FlooredMinMax, PoolRange, fold_pools
+from ._config import RESIDUE_FLOOR_FACTOR, ScalingConfig
+from ._precedence import (
+    HIGHS_DEFAULT_FEASIBILITY_TOLERANCE,
+    HIGHS_DEFAULT_INFINITE_BOUND,
+    resolve_feasibility_tolerances,
+    resolve_infinite_bound,
+)
 
 # Sentinel for "category has zero non-zero finite entries".  Reported as
 # ``(nan, nan)`` per the spec; downstream code that wants to treat the
@@ -77,6 +84,306 @@ class RangeReport:
     rhs: tuple[float, float]
     cross_group_max_ratio: float
     trigger: bool
+    # --- Scaling-check readout (``None`` when the producer cannot tell, e.g.
+    # :func:`ranges_from_streamed`).  The six fields above never depend on
+    # these, and equality / hashing compare the six fields only.
+    #: ``(b_lo*, b_hi)`` over the *pool*: the finite non-zero bounds of the
+    #: continuous columns and the row bounds whose reported magnitude is below
+    #: :attr:`infinite_bound`.  ``b_hi`` is the largest of them; ``b_lo*`` the
+    #: smallest whose model-unit magnitude is at least :attr:`residue_floor`.
+    #: ``None`` when no entry clears the floor.
+    bound_rhs_meaningful: tuple[float, float] | None = field(default=None, compare=False)
+    #: ``(count, largest model-unit magnitude)`` of the pool entries left out
+    #: of ``b_lo*`` by the floor (``(0, 0.0)`` when none).
+    bound_rhs_residue: tuple[int, float] | None = field(default=None, compare=False)
+    #: Number of bound / row-bound entries at or above :attr:`infinite_bound`
+    #: (no limit to the solver).
+    bound_rhs_beyond_infinite: int | None = field(default=None, compare=False)
+    #: ``(min, max)`` of the integer-column bounds (``user_bound_scale``
+    #: leaves them alone); ``None`` when there are none.
+    integer_bound: tuple[float, float] | None = field(default=None, compare=False)
+    #: ``(min, max)`` of the matrix terms of the continuous columns.
+    matrix_continuous: tuple[float, float] | None = field(default=None, compare=False)
+    #: ``(min, max)`` of the matrix terms of the integer columns
+    #: (``user_bound_scale`` multiplies them by ``2**N``).
+    integer_matrix: tuple[float, float] | None = field(default=None, compare=False)
+    #: ``(min, max)`` of the costs of the continuous columns.
+    cost_continuous: tuple[float, float] | None = field(default=None, compare=False)
+    #: ``(min, max)`` of the costs of the integer columns (scaled by
+    #: ``2**(N_obj + N_bnd)``).
+    integer_cost: tuple[float, float] | None = field(default=None, compare=False)
+    #: The floor and the solver-infinite cut the readout used.
+    residue_floor: float | None = field(default=None, compare=False)
+    infinite_bound: float | None = field(default=None, compare=False)
+    #: Where each end of each pool sits: ``extremes[group][side]`` is an
+    #: :class:`Extreme`; ``group`` ∈ ``bound_rhs``, ``residue``, ``matrix``,
+    #: ``cost``, ``integer_bound``, ``integer_matrix``, ``integer_cost``;
+    #: ``side`` ∈ ``min`` / ``max`` (only ``max`` for ``residue``).
+    extremes: Mapping[str, Mapping[str, Extreme]] | None = field(default=None, compare=False)
+
+
+class Extreme(NamedTuple):
+    """One end of a magnitude pool: the family (variable or constraint
+    name; an objective term's label for ``cost``) holding it, the reported
+    (post-scaling) magnitude, the model-unit magnitude, and the component
+    (``bound``, ``rhs``, ``matrix`` or ``cost``).  ``model`` is ``nan`` where
+    the readout does not track it (costs under an objective cutoff)."""
+
+    family: str | None
+    post: float
+    model: float
+    component: str
+
+
+class _Book:
+    """Global pool ends with the family at each end, merged family by
+    family from family-local :class:`PoolRange` objects."""
+
+    def __init__(self) -> None:
+        self.pools: dict[str, PoolRange] = {}
+        self.where: dict[tuple[str, str], tuple[str | None, str]] = {}
+
+    def merge(self, group: str, pool: PoolRange, family: str | None, component: str) -> None:
+        tgt = self.pools.get(group)
+        if tgt is None:
+            tgt = self.pools[group] = PoolRange(by_model=pool.by_model)
+        lo_taken, hi_taken = tgt.merge(pool)
+        if lo_taken:
+            self.where[(group, "min")] = (family, component)
+        if hi_taken:
+            self.where[(group, "max")] = (family, component)
+
+    def pair(self, group: str) -> tuple[float, float] | None:
+        pool = self.pools.get(group)
+        return None if pool is None else pool.pair()
+
+    def hi_post(self, group: str) -> float | None:
+        pool = self.pools.get(group)
+        return None if pool is None or pool.hi is None else pool.hi.post
+
+    def extremes(self, col_family=None) -> dict[str, dict[str, Extreme]]:
+        """The ends as :class:`Extreme` records.  ``col_family(col_id)``, when
+        given, names a cost end by the variable family of its column."""
+        out: dict[str, dict[str, Extreme]] = {}
+        for group, pool in self.pools.items():
+            sides = (
+                (("max", pool.hi),) if group == "residue" else (("min", pool.lo), ("max", pool.hi))
+            )
+            for side, end in sides:
+                if end is None:
+                    continue
+                family, component = self.where[(group, side)]
+                if component == "cost" and col_family is not None and end.col_id >= 0:
+                    family = col_family(end.col_id) or family
+                out.setdefault(group, {})[side] = Extreme(family, end.post, end.model, component)
+        return out
+
+
+class _GuardAcc:
+    """Accumulates the scaling-check fields of a :class:`RangeReport`."""
+
+    def __init__(
+        self,
+        floor: float,
+        infinite: float,
+        integer_cols: np.ndarray | None,
+        problem: Any = None,
+    ) -> None:
+        self.problem = problem
+        self.floor = floor
+        self.infinite = infinite
+        self.integer_cols = integer_cols
+        self.book = _Book()
+        self.residue_count = 0
+        self.beyond_infinite = 0
+
+    def bound_rhs(self, res: FlooredMinMax, family: str | None, component: str) -> None:
+        """Merge a bound / RHS family's pools (its integer pool holds the
+        integer-column bounds)."""
+        self.book.merge("bound_rhs", res.meaningful, family, component)
+        self.book.merge("residue", res.residue, family, component)
+        self.book.merge("integer_bound", res.integer, family, component)
+        self.residue_count += res.residue_count
+        self.beyond_infinite += res.beyond_infinite
+
+    def fold_bound_rhs(
+        self,
+        post: np.ndarray,
+        model: np.ndarray,
+        family: str | None,
+        component: str,
+        *,
+        multiplicity: int = 1,
+    ) -> None:
+        """Fold the magnitudes of continuous-column bounds or row bounds."""
+        res = FlooredMinMax()
+        fold_pools(
+            res,
+            np.abs(post),
+            np.abs(model),
+            None,
+            None,
+            floor=self.floor,
+            infinite=self.infinite,
+            integer_cols=None,
+            multiplicity=multiplicity,
+        )
+        self.bound_rhs(res, family, component)
+
+    def fold_integer_bound(
+        self, post: np.ndarray, model: np.ndarray, family: str | None, *, multiplicity: int = 1
+    ) -> None:
+        """Fold the bounds of an integer-column family (their own pool;
+        values at or above the solver infinity still count as no limit)."""
+        post = np.abs(post)
+        model = np.abs(model)
+        res = FlooredMinMax()
+        mask = np.isfinite(post) & (post != 0)
+        beyond = mask & (post >= self.infinite)
+        res.beyond_infinite = int(np.count_nonzero(beyond)) * multiplicity
+        keep = mask & ~beyond
+        res.integer.add(post[keep], model[keep])
+        self.bound_rhs(res, family, "bound")
+
+    def matrix(self, res: FlooredMinMax, family: str | None) -> None:
+        self.book.merge("matrix", res.meaningful, family, "matrix")
+        self.book.merge("integer_matrix", res.integer, family, "matrix")
+
+    def fold_matrix(
+        self, post: np.ndarray, model: np.ndarray, col_id: np.ndarray, family: str | None
+    ) -> None:
+        res = FlooredMinMax()
+        fold_pools(
+            res,
+            np.abs(post),
+            np.abs(model),
+            None,
+            col_id,
+            floor=0.0,
+            infinite=math.inf,
+            integer_cols=self.integer_cols,
+        )
+        self.matrix(res, family)
+
+    def fold_cost(
+        self, post: np.ndarray, model: np.ndarray, col_id: np.ndarray | None, family: str | None
+    ) -> None:
+        res = FlooredMinMax()
+        fold_pools(
+            res,
+            np.abs(post),
+            np.abs(model),
+            None,
+            col_id,
+            floor=0.0,
+            infinite=math.inf,
+            integer_cols=self.integer_cols if col_id is not None else None,
+        )
+        self.book.merge("cost", res.meaningful, family, "cost")
+        self.book.merge("integer_cost", res.integer, family, "cost")
+
+    def fields(self) -> dict[str, Any]:
+        b = self.book
+        lo_hi = b.pair("bound_rhs")
+        res = b.pools.get("residue")
+        largest = 0.0 if res is None or res.hi is None else res.hi.model
+        # ``b_lo*`` needs an entry above the floor; ``pair`` is None otherwise.
+        return {
+            "bound_rhs_meaningful": lo_hi,
+            "bound_rhs_residue": (int(self.residue_count), float(largest)),
+            "bound_rhs_beyond_infinite": int(self.beyond_infinite),
+            "integer_bound": b.pair("integer_bound"),
+            "matrix_continuous": b.pair("matrix"),
+            "integer_matrix": b.pair("integer_matrix"),
+            "cost_continuous": b.pair("cost"),
+            "integer_cost": b.pair("integer_cost"),
+            "residue_floor": float(self.floor),
+            "infinite_bound": float(self.infinite),
+            "extremes": b.extremes(None if self.problem is None else self._col_family),
+        }
+
+    def _col_family(self, col_id: int) -> str | None:
+        """Name of the variable family holding column ``col_id``."""
+        for v in (getattr(self.problem, "_vars", None) or {}).values():
+            ids = v.frame["col_id"].to_numpy()
+            if ids.size and ids.min() <= col_id <= ids.max() and bool((ids == col_id).any()):
+                return str(v.name)
+        return None
+
+
+def _resolve_residue_floor(problem: Any, config: ScalingConfig) -> float:
+    """The residue floor (model units): ``config.residue_floor``, else
+    :data:`RESIDUE_FLOOR_FACTOR` × the primal tolerance set on ``problem``."""
+    if config.residue_floor is not None:
+        return float(config.residue_floor)
+    tol_p = HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
+    if problem is not None:
+        tol_p, _tol_d = resolve_feasibility_tolerances(problem)
+    return RESIDUE_FLOOR_FACTOR * tol_p
+
+
+def _guard_var_bounds(acc: _GuardAcc, v: Any, l2_cf: np.ndarray | None) -> None:
+    """Fold one variable family's bounds into the scaling-check pools.
+
+    The bounds on ``v`` are the ones the solver receives (a column scaling
+    rewrites them in place); their model-unit magnitude is
+    ``|bound| · |l2_cf[col]|`` (``l2_cf`` holds the inverse column factor).
+    A family with no columns contributes nothing."""
+    n_v = int(v.frame.height)
+    if n_v == 0:
+        return
+    ids = None
+    for b in (v.lower, v.upper):
+        mult = 1
+        if isinstance(b, np.ndarray):
+            post = np.abs(np.asarray(b, dtype=np.float64))
+            if l2_cf is None:
+                model = post
+            else:
+                if ids is None:
+                    ids = v.frame["col_id"].to_numpy()
+                model = post * np.abs(l2_cf[ids])
+        else:
+            bf = float(b)
+            if not math.isfinite(bf) or bf == 0.0:
+                continue
+            if l2_cf is None:
+                post = np.array([abs(bf)])
+                model = post
+                mult = n_v
+            else:
+                if ids is None:
+                    ids = v.frame["col_id"].to_numpy()
+                post = np.full(n_v, abs(bf))
+                model = post * np.abs(l2_cf[ids])
+        if getattr(v, "integer", False):
+            acc.fold_integer_bound(post, model, v.name, multiplicity=mult)
+        else:
+            acc.fold_bound_rhs(post, model, v.name, "bound", multiplicity=mult)
+
+
+def _objective_term_label(term: Any, index: int) -> str:
+    """Name for an objective term in the scaling-check extremes: its
+    variable family when the term keeps one, else ``objective term <i>``."""
+    var = getattr(term, "var_source", None)
+    if var is None:
+        meta = getattr(term, "sum_block_meta", None)
+        var = None if meta is None else getattr(meta, "var_source", None)
+    name = getattr(var, "name", None)
+    return str(name) if name else f"objective term {index}"
+
+
+def _integer_column_mask(problem: Any) -> np.ndarray | None:
+    """Boolean ``col_id → is integer`` array, ``None`` when no variable
+    family is integer (the common LP case: no per-column array at all)."""
+    vars_ = getattr(problem, "_vars", None) or {}
+    int_vars = [v for v in vars_.values() if getattr(v, "integer", False)]
+    if not int_vars:
+        return None
+    mask = np.zeros(int(problem._next_col), dtype=bool)
+    for v in int_vars:
+        mask[v.frame["col_id"].to_numpy()] = True
+    return mask
 
 
 class _FlooredCostRange:
@@ -110,8 +417,12 @@ class _FlooredCostRange:
         self.ref_max = 0.0
         self._lo = np.full(self._NBINS, np.inf)
         self._hi = np.zeros(self._NBINS)
+        # Per-bin label of the ``add`` call holding each bin's end
+        # (``-1`` until a labelled ``add`` sets it).
+        self._lo_lab = np.full(self._NBINS, -1, dtype=np.int64)
+        self._hi_lab = np.full(self._NBINS, -1, dtype=np.int64)
 
-    def add(self, user: np.ndarray, reported: np.ndarray) -> None:
+    def add(self, user: np.ndarray, reported: np.ndarray, *, label: int | None = None) -> None:
         u = np.abs(np.asarray(user, dtype=np.float64))
         w = np.abs(np.asarray(reported, dtype=np.float64))
         fin = np.isfinite(u)
@@ -126,10 +437,22 @@ class _FlooredCostRange:
         w = w[mask]
         _, e = np.frexp(u)
         idx = e.astype(np.int64) + self._OFFSET
-        np.minimum.at(self._lo, idx, w)
-        np.maximum.at(self._hi, idx, w)
+        if label is None:
+            np.minimum.at(self._lo, idx, w)
+            np.maximum.at(self._hi, idx, w)
+            return
+        lo_t = np.full(self._NBINS, np.inf)
+        hi_t = np.zeros(self._NBINS)
+        np.minimum.at(lo_t, idx, w)
+        np.maximum.at(hi_t, idx, w)
+        upd = lo_t < self._lo
+        self._lo[upd] = lo_t[upd]
+        self._lo_lab[upd] = label
+        upd = hi_t > self._hi
+        self._hi[upd] = hi_t[upd]
+        self._hi_lab[upd] = label
 
-    def result(self) -> tuple[float | None, float | None]:
+    def _kept(self) -> np.ndarray:
         from ..engine import _objective_zero_floor
 
         floor = _objective_zero_floor(0.0, self.rel_threshold, self.ref_max)
@@ -138,9 +461,27 @@ class _FlooredCostRange:
             _, k = math.frexp(floor)  # floor = 2**(k-1)
             # bin e holds [2**(e-1), 2**e): kept iff 2**(e-1) >= floor.
             keep[: max(k + self._OFFSET, 0)] = False  # cut every bin e < k
+        return keep
+
+    def result(self) -> tuple[float | None, float | None]:
+        keep = self._kept()
         if not keep.any():
             return None, None
         return float(self._lo[keep].min()), float(self._hi[keep].max())
+
+    def ends(self) -> dict[str, tuple[float, int]]:
+        """``{"min": (value, label), "max": (value, label)}`` over the kept
+        entries of labelled ``add`` calls (empty when nothing survives)."""
+        keep = self._kept()
+        if not keep.any():
+            return {}
+        kept = np.flatnonzero(keep)
+        i_lo = int(kept[np.argmin(self._lo[kept])])
+        i_hi = int(kept[np.argmax(self._hi[kept])])
+        return {
+            "min": (float(self._lo[i_lo]), int(self._lo_lab[i_lo])),
+            "max": (float(self._hi[i_hi]), int(self._hi_lab[i_hi])),
+        }
 
 
 def _objective_cost_floor_active(problem: Any) -> tuple[float, float] | None:
@@ -207,8 +548,10 @@ def _build_report(
     bound: tuple[float, float],
     rhs: tuple[float, float],
     config: ScalingConfig,
+    guard: Mapping[str, Any] | None = None,
 ) -> RangeReport:
-    """Assemble a :class:`RangeReport` from four already-reduced groups.
+    """Assemble a :class:`RangeReport` from four already-reduced groups
+    (plus the scaling-check fields in ``guard``, when given).
 
     Computes the cross-group ratio over non-empty groups only, then ORs
     the four per-group ratios with the cross-group ratio against the
@@ -234,6 +577,7 @@ def _build_report(
         rhs=rhs,
         cross_group_max_ratio=cross,
         trigger=trigger,
+        **(guard or {}),
     )
 
 
@@ -246,6 +590,13 @@ def ranges_from_arrays(
     row_lower: np.ndarray | None,
     row_upper: np.ndarray | None,
     config: ScalingConfig,
+    col_integer: np.ndarray | None = None,
+    matrix_col_index: np.ndarray | None = None,
+    col_model_factor: np.ndarray | None = None,
+    row_model_factor: np.ndarray | None = None,
+    cost_model_factor: np.ndarray | None = None,
+    primal_feasibility_tolerance: float | None = None,
+    infinite_bound: float = HIGHS_DEFAULT_INFINITE_BOUND,
 ) -> RangeReport:
     """Compute a :class:`RangeReport` directly from LP arrays.
 
@@ -263,12 +614,75 @@ def ranges_from_arrays(
     so the four ranges match HiGHS' "Coefficient ranges" block.  Any
     array may be ``None`` (treated as empty) — useful when an LP genuinely
     has no objective term or no row bounds (degenerate but legal).
+
+    The scaling-check fields (see :class:`RangeReport`) come from the
+    optional arguments:
+
+    * ``col_integer`` — boolean per column (``None``: all continuous);
+      ``matrix_col_index`` — the column of each ``matrix_values`` entry
+      (needed to split the matrix by integrality; without it every entry
+      counts as continuous).
+    * ``col_model_factor`` / ``row_model_factor`` / ``cost_model_factor`` —
+      per-column / per-row factors that turn a reported magnitude into its
+      model-unit magnitude (``None``: the arrays are in model units).
+    * ``primal_feasibility_tolerance`` — sets the residue floor when
+      ``config.residue_floor`` is ``None`` (default HiGHS' ``1e-7``);
+      ``infinite_bound`` — the solver's infinity cut.
+
+    Extremes carry no family names here (``family`` is ``None``).
     """
     matrix = _abs_finite_nonzero_min_max([matrix_values])
     cost_r = _abs_finite_nonzero_min_max([cost])
     bound_r = _abs_finite_nonzero_min_max([col_lower, col_upper])
     rhs_r = _abs_finite_nonzero_min_max([row_lower, row_upper])
-    return _build_report(matrix, cost_r, bound_r, rhs_r, config)
+
+    if config.residue_floor is not None:
+        floor = float(config.residue_floor)
+    else:
+        tol = (
+            HIGHS_DEFAULT_FEASIBILITY_TOLERANCE
+            if primal_feasibility_tolerance is None
+            else float(primal_feasibility_tolerance)
+        )
+        floor = RESIDUE_FLOOR_FACTOR * tol
+    int_cols = None
+    if col_integer is not None:
+        int_cols = np.asarray(col_integer, dtype=bool)
+        if not int_cols.any():
+            int_cols = None
+    acc = _GuardAcc(floor, float(infinite_bound), int_cols)
+
+    def _f64(a: np.ndarray) -> np.ndarray:
+        return np.asarray(a, dtype=np.float64)
+
+    for arr in (col_lower, col_upper):
+        if arr is None or np.asarray(arr).size == 0:
+            continue
+        post = np.abs(_f64(arr))
+        model = post if col_model_factor is None else post * np.abs(_f64(col_model_factor))
+        if int_cols is None:
+            acc.fold_bound_rhs(post, model, None, "bound")
+        else:
+            acc.fold_bound_rhs(post[~int_cols], model[~int_cols], None, "bound")
+            acc.fold_integer_bound(post[int_cols], model[int_cols], None)
+    for arr in (row_lower, row_upper):
+        if arr is None or np.asarray(arr).size == 0:
+            continue
+        post = np.abs(_f64(arr))
+        model = post if row_model_factor is None else post * np.abs(_f64(row_model_factor))
+        acc.fold_bound_rhs(post, model, None, "rhs")
+    if matrix_values is not None and np.asarray(matrix_values).size:
+        mv = _f64(matrix_values)
+        if matrix_col_index is None:
+            acc.fold_matrix(mv, mv, None, None)
+        else:
+            acc.fold_matrix(mv, mv, np.asarray(matrix_col_index, dtype=np.int64), None)
+    if cost is not None and np.asarray(cost).size:
+        cv = _f64(cost)
+        model = cv if cost_model_factor is None else cv * np.abs(_f64(cost_model_factor))
+        cids = None if int_cols is None else np.arange(cv.size, dtype=np.int64)
+        acc.fold_cost(cv, model, cids, None)
+    return _build_report(matrix, cost_r, bound_r, rhs_r, config, guard=acc.fields())
 
 
 def ranges_from_streamed(
@@ -365,7 +779,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         CoefWalkRecipe as _CoefWalkRecipe,
     )
     from ._coef_walk import (
-        MinMaxAbsReducer as _MinMaxAbsReducer,
+        FlooredMinMaxAbsReducer as _FlooredMinMaxAbsReducer,
     )
     from ._coef_walk import (
         bounded_coefficient_walk as _bounded_coefficient_walk,
@@ -431,6 +845,13 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     # decision agrees bit-for-bit with what the consumers will emit.
     _l2_rf = getattr(problem, "_layer2_row_factor", None)
     _l2_cf = getattr(problem, "_layer2_col_factor", None)
+
+    # Scaling-check pools (RangeReport's optional fields): the residue floor
+    # in model units, HiGHS' infinite bound, and the integer columns.
+    _floor = _resolve_residue_floor(problem, config)
+    _infinite = resolve_infinite_bound(problem)
+    _int_cols = _integer_column_mask(problem)
+    _acc = _GuardAcc(_floor, _infinite, _int_cols, problem)
 
     # Declared dense suffix — gates the bounded block-COO LHS fast path
     # (Phase D-1).  ``None`` / empty for callers that never opted into the
@@ -671,9 +1092,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         objective has no constraint row), then apply ``|_l2_cf[col_id]|``
         and :func:`_reduce_abs` — BYTE-IDENTICAL to the streaming readout.
 
-        Returns ``(user_coef, reported)`` arrays — the per-cell user-space
-        coefficients and their post-Layer-2 magnitudes ``coef·|cf|`` the
-        caller reduces (with :func:`_reduce_abs`, or through the objective
+        Returns ``(user_coef, reported, col_id)`` arrays — the per-cell
+        user-space coefficients, their post-Layer-2 magnitudes ``coef·|cf|``
+        and their columns — the caller reduces (with :func:`_reduce_abs`, or through the objective
         cutoff) — or ``None`` to decline
         (caller falls through to the existing streaming collect unchanged).
         Declining is always safe — a false decline costs memory, never
@@ -737,7 +1158,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         n = int(seed.height)
         if n == 0:
             _empty = np.zeros(0, dtype=np.float64)
-            return _empty, _empty
+            return _empty, _empty, np.zeros(0, dtype=np.int64)
 
         # Completeness guard: the grid is dense-complete (every leading
         # block holds the full, identically-ordered dense set) iff
@@ -810,7 +1231,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
         cids = seed["col_id"].to_numpy().astype(np.int64)
         vals = coef * np.abs(_l2_cf[cids])
         _emit_block_coo_path("obj_positional")
-        return coef, vals
+        return coef, vals, cids
 
     def _update_cost(lo: float | None, hi: float | None) -> None:
         nonlocal cost_lo, cost_hi
@@ -852,6 +1273,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     bound_lo = a
                 if a > bound_hi:
                     bound_hi = a
+        _guard_var_bounds(_acc, v, _l2_cf)
 
     if _profile:
         _emit("bounds_done")
@@ -866,32 +1288,72 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     # Layer 3's objective centring.  Off ⇒ the readout below is unchanged.
     _cost_floor = _objective_cost_floor_active(problem)
     _floored_cost = None if _cost_floor is None else _FlooredCostRange(*_cost_floor)
+    # Under the cutoff the continuous / integer cost pools are two more
+    # cutoff readouts (sharing the whole objective's reference maximum),
+    # each remembering the term holding each kept binade's end.
+    _floored_cont = None if _cost_floor is None else _FlooredCostRange(*_cost_floor)
+    _floored_int = (
+        None if _cost_floor is None or _int_cols is None else _FlooredCostRange(*_cost_floor)
+    )
+    _cost_labels: list[str] = []
+
+    def _floored_split(user: np.ndarray, reported: np.ndarray, cids, label_idx: int) -> None:
+        if _int_cols is None or cids is None:
+            _floored_cont.add(user, reported, label=label_idx)
+            return
+        on_int = _int_cols[cids]
+        _floored_cont.add(user[~on_int], reported[~on_int], label=label_idx)
+        _floored_int.add(user[on_int], reported[on_int], label=label_idx)
+
     for ti, t in enumerate(problem._obj_terms):
         if t.lazy is None:
             continue
+        _cost_labels.append(_objective_term_label(t, ti))
+        _label = _cost_labels[-1]
         # Bake deferred Where pushdown frames before consuming the lazy
         # plan (Sum(over=None) objective terms already bake — defensive).
         t_lazy, _t_dims = _bake_term(t)
         if _floored_cost is not None:
             _obj_bounded = None if _l2_cf is None else _obj_chain_bounded(t)
             if _obj_bounded is not None:
-                _floored_cost.add(*_obj_bounded)
+                _floored_cost.add(_obj_bounded[0], _obj_bounded[1])
+                _floored_split(
+                    _obj_bounded[0], _obj_bounded[1], _obj_bounded[2], len(_cost_labels) - 1
+                )
             else:
-                cols = ("coef",) if _l2_cf is None else ("col_id", "coef")
+                cols = ("coef",) if (_l2_cf is None and _int_cols is None) else ("col_id", "coef")
                 df = _collect_streaming(t_lazy.select(*cols))
                 if df.height:
                     user = df["coef"].to_numpy().astype(np.float64)
+                    cids = (
+                        df["col_id"].to_numpy().astype(np.int64) if "col_id" in df.columns else None
+                    )
                     if _l2_cf is None:
                         _floored_cost.add(user, user)
+                        _floored_split(user, user, cids, len(_cost_labels) - 1)
                     else:
-                        cids = df["col_id"].to_numpy().astype(np.int64)
-                        _floored_cost.add(user, user * np.abs(_l2_cf[cids]))
+                        rep = user * np.abs(_l2_cf[cids])
+                        _floored_cost.add(user, rep)
+                        _floored_split(user, rep, cids, len(_cost_labels) - 1)
                 del df
             if _profile:
                 _emit("obj_term_done", term_idx=ti, floored="1")
             continue
-        if _l2_cf is None:
+        if _l2_cf is None and _int_cols is None:
             lo, hi = _agg(t_lazy, "coef")
+            if lo is not None:
+                _acc.fold_cost(np.array([lo, hi]), np.array([lo, hi]), None, _label)
+        elif _l2_cf is None:
+            # Integer columns present: read the columns too, for the split.
+            df = _collect_streaming(t_lazy.select("col_id", "coef"))
+            if df.height == 0:
+                lo, hi = None, None
+            else:
+                cids = df["col_id"].to_numpy().astype(np.int64)
+                vals = df["coef"].to_numpy().astype(np.float64)
+                lo, hi = _reduce_abs(vals)
+                _acc.fold_cost(vals, vals, cids, _label)
+            del df
         else:
             # ---- Bounded objective Param-chain fast path (Phase D-3).
             # ``Sum(over=None)`` wraps a deep ``Var × Param × Param …``
@@ -906,6 +1368,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             _obj_bounded = _obj_chain_bounded(t)
             if _obj_bounded is not None:
                 lo, hi = _reduce_abs(_obj_bounded[1])
+                _acc.fold_cost(_obj_bounded[1], _obj_bounded[0], _obj_bounded[2], _label)
                 if _profile:
                     _emit("obj_term_bounded", term_idx=ti, bounded="1")
             else:
@@ -915,15 +1378,25 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     lo, hi = None, None
                 else:
                     cids = df["col_id"].to_numpy().astype(np.int64)
-                    vals = df["coef"].to_numpy().astype(np.float64)
-                    vals = vals * np.abs(_l2_cf[cids])
+                    user = df["coef"].to_numpy().astype(np.float64)
+                    vals = user * np.abs(_l2_cf[cids])
                     lo, hi = _reduce_abs(vals)
+                    _acc.fold_cost(vals, user, cids, _label)
         _update_cost(lo, hi)
         if _profile:
             _emit("obj_term_done", term_idx=ti)
 
     if _floored_cost is not None:
         _update_cost(*_floored_cost.result())
+        # The cutoff's relative part is judged against the WHOLE objective.
+        for _fc, _grp in ((_floored_cont, "cost"), (_floored_int, "integer_cost")):
+            if _fc is None:
+                continue
+            _fc.ref_max = _floored_cost.ref_max
+            for _side, (_post, _li) in _fc.ends().items():
+                _end = PoolRange()
+                _end.add(np.array([_post]), np.array([math.nan]))
+                _acc.book.merge(_grp, _end, _cost_labels[_li], "cost")
 
     if _profile:
         _emit("obj_done")
@@ -982,6 +1455,9 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             # magnitude bound is ``|rhs| * (min/max of |rf_slice|)``.
             if _l2_rf is None or row_count == 0:
                 _update_rhs_scalar(float(rhs))
+                if row_count:
+                    _one = np.array([float(rhs)])
+                    _acc.fold_bound_rhs(_one, _one, cname, "rhs", multiplicity=row_count)
             else:
                 rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
                 vals = float(rhs) * rf_slice
@@ -991,6 +1467,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                         rhs_lo = lo
                     if hi > rhs_hi:
                         rhs_hi = hi
+                _acc.fold_bound_rhs(vals, np.full(row_count, float(rhs)), cname, "rhs")
         elif isinstance(rhs, _Param):
             if over is not None and rhs.dims:
                 on = list(rhs.dims)
@@ -1035,6 +1512,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                             vals = rhs_coef * np.abs(_l2_rf[base_row + rids])
                         else:
                             vals = rhs_coef
+                        _acc.fold_bound_rhs(vals, rhs_coef, cname, "rhs")
                         lo, hi = _reduce_abs(vals)
                         if lo is not None:
                             if lo < rhs_lo:
@@ -1061,15 +1539,16 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     else:
                         recipe = _CoefWalkRecipe.from_rhs_param(rhs)
                     scale = (_l2_rf, base_row, None)
-                    (walk_minmax,) = _bounded_coefficient_walk(
+                    (walk_res,) = _bounded_coefficient_walk(
                         over,
                         recipe,
                         scale,
-                        [_MinMaxAbsReducer(scale)],
+                        [_FlooredMinMaxAbsReducer(scale, _floor, infinite=_infinite)],
                         batch_rows=_WALK_BATCH_ROWS,
                         dense_axes=dense_axes,
                     )
-                    lo, hi = walk_minmax
+                    _acc.bound_rhs(walk_res, cname, "rhs")
+                    lo, hi = walk_res.all
                     if lo is not None:
                         if lo < rhs_lo:
                             rhs_lo = lo
@@ -1090,12 +1569,16 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     vals = f["value"].to_numpy().astype(np.float64)
                     if _l2_rf is None or row_count == 0:
                         lo, hi = _reduce_abs(vals)
+                        if row_count:
+                            _acc.fold_bound_rhs(vals, vals, cname, "rhs", multiplicity=row_count)
                     else:
                         # Each (broadcast) rhs value is multiplied by
                         # every row's row_factor; expand explicitly.
                         rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
-                        vals = np.outer(vals, rf_slice).ravel()
+                        raw = vals
+                        vals = np.outer(raw, rf_slice).ravel()
                         lo, hi = _reduce_abs(vals)
+                        _acc.fold_bound_rhs(vals, np.repeat(raw, row_count), cname, "rhs")
                     if lo is not None:
                         if lo < rhs_lo:
                             rhs_lo = lo
@@ -1242,15 +1725,16 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                     # NEVER materialised.
                     recipe = _CoefWalkRecipe.from_term(term)
                     scale = (_l2_rf, base_row, _l2_cf)
-                    (walk_minmax,) = _bounded_coefficient_walk(
+                    (walk_res,) = _bounded_coefficient_walk(
                         over,
                         recipe,
                         scale,
-                        [_MinMaxAbsReducer(scale)],
+                        [_FlooredMinMaxAbsReducer(scale, integer_cols=_int_cols)],
                         batch_rows=_WALK_BATCH_ROWS,
                         dense_axes=dense_axes,
                     )
-                    lo, hi = walk_minmax
+                    _acc.matrix(walk_res, cname)
+                    lo, hi = walk_res.all
                     _update_matrix(lo, hi)
                     if _profile:
                         _emit(
@@ -1324,15 +1808,16 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
             ):
                 recipe = _CoefWalkRecipe.from_term(term)
                 scale = (_l2_rf, base_row, _l2_cf)
-                (walk_minmax,) = _bounded_coefficient_walk(
+                (walk_res,) = _bounded_coefficient_walk(
                     over,
                     recipe,
                     scale,
-                    [_MinMaxAbsReducer(scale)],
+                    [_FlooredMinMaxAbsReducer(scale, integer_cols=_int_cols)],
                     batch_rows=_WALK_BATCH_ROWS,
                     dense_axes=dense_axes,
                 )
-                lo, hi = walk_minmax
+                _acc.matrix(walk_res, cname)
+                lo, hi = walk_res.all
                 _update_matrix(lo, hi)
                 if _profile:
                     _emit(
@@ -1379,12 +1864,14 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 else:
                     rids = df["_rid"].to_numpy().astype(np.int64)
                     cids = df["col_id"].to_numpy().astype(np.int64)
-                    vals = df["coef"].to_numpy().astype(np.float64)
+                    raw = df["coef"].to_numpy().astype(np.float64)
+                    vals = raw
                     if _l2_rf is not None:
                         vals = vals * np.abs(_l2_rf[base_row + rids])
                     if _l2_cf is not None:
                         vals = vals * np.abs(_l2_cf[cids])
                     lo, hi = _reduce_abs(vals)
+                    _acc.fold_matrix(vals, raw, cids, cname)
                 _update_matrix(lo, hi)
                 if _profile:
                     _emit(
@@ -1401,24 +1888,29 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 # rows.  ``_agg`` reduces |coef| only; when side vectors
                 # are on, expand to per-(row,col) magnitudes so the row/
                 # col factors apply.
-                if _l2_rf is None and _l2_cf is None:
-                    lo, hi = _agg(term_lazy, "coef")
+                # Collect ``(col_id, coef)`` (a scalar term is small) — the
+                # pools need the columns; ``_reduce_abs`` on the collected
+                # coef equals the ``_agg`` readout exactly.
+                df = _collect_streaming(term_lazy.select("col_id", "coef"))
+                if df.height == 0:
+                    lo, hi = None, None
                 else:
-                    df = _collect_streaming(term_lazy.select("col_id", "coef"))
-                    if df.height == 0:
-                        lo, hi = None, None
+                    cids = df["col_id"].to_numpy().astype(np.int64)
+                    raw = df["coef"].to_numpy().astype(np.float64)
+                    vals = raw
+                    if _l2_cf is not None:
+                        vals = vals * np.abs(_l2_cf[cids])
+                    if _l2_rf is None or row_count == 0:
+                        lo, hi = _reduce_abs(vals)
+                        _acc.fold_matrix(vals, raw, cids, cname)
                     else:
-                        cids = df["col_id"].to_numpy().astype(np.int64)
-                        vals = df["coef"].to_numpy().astype(np.float64)
-                        if _l2_cf is not None:
-                            vals = vals * np.abs(_l2_cf[cids])
-                        if _l2_rf is None or row_count == 0:
-                            lo, hi = _reduce_abs(vals)
-                        else:
-                            rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
-                            # Per-row broadcast: row_count × len(cids).
-                            tiled_vals = np.outer(rf_slice, vals).ravel()
-                            lo, hi = _reduce_abs(tiled_vals)
+                        rf_slice = np.abs(_l2_rf[base_row : base_row + row_count])
+                        # Per-row broadcast: row_count × len(cids).
+                        tiled_vals = np.outer(rf_slice, vals).ravel()
+                        lo, hi = _reduce_abs(tiled_vals)
+                        _acc.fold_matrix(
+                            tiled_vals, np.tile(raw, row_count), np.tile(cids, row_count), cname
+                        )
             else:
                 # Defensive dim-bound backstop.  After the un-gate, EVERY
                 # dim-bound term with a row index routes earlier and
@@ -1437,17 +1929,15 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
                 rl_a, tl_a = _align(row_index_lf, term_lazy, on)
                 keys = rl_a.select(on).unique()
                 pruned = tl_a.join(keys, on=on, how="semi")
-                if _l2_cf is None:
-                    lo, hi = _agg(pruned, "coef")
+                df = _collect_streaming(pruned.select("col_id", "coef"))
+                if df.height == 0:
+                    lo, hi = None, None
                 else:
-                    df = _collect_streaming(pruned.select("col_id", "coef"))
-                    if df.height == 0:
-                        lo, hi = None, None
-                    else:
-                        cids = df["col_id"].to_numpy().astype(np.int64)
-                        vals = df["coef"].to_numpy().astype(np.float64)
-                        vals = vals * np.abs(_l2_cf[cids])
-                        lo, hi = _reduce_abs(vals)
+                    cids = df["col_id"].to_numpy().astype(np.int64)
+                    raw = df["coef"].to_numpy().astype(np.float64)
+                    vals = raw if _l2_cf is None else raw * np.abs(_l2_cf[cids])
+                    lo, hi = _reduce_abs(vals)
+                    _acc.fold_matrix(vals, raw, cids, cname)
             _update_matrix(lo, hi)
             if _profile:
                 _emit(
@@ -1461,7 +1951,7 @@ def _ranges_via_streaming(problem: Any, config: ScalingConfig) -> RangeReport:
     cost = (cost_lo, cost_hi) if cost_hi > 0 else _NAN_PAIR
     bound = (bound_lo, bound_hi) if bound_hi > 0 else _NAN_PAIR
     rhs_r = (rhs_lo, rhs_hi) if rhs_hi > 0 else _NAN_PAIR
-    return _build_report(matrix, cost, bound, rhs_r, config)
+    return _build_report(matrix, cost, bound, rhs_r, config, guard=_acc.fields())
 
 
 def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
@@ -1585,6 +2075,21 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
     def _strip_inf(a: np.ndarray) -> np.ndarray:
         return np.where(np.abs(a) >= inf_sentinel, 0.0, a)
 
+    # Scaling-check inputs: integrality, the column of each CSC entry, and
+    # the factors back to model units (the arrays carry the Layer 2 side
+    # vectors baked in; the column bounds were rewritten in place, and the
+    # objective above is read in model units).
+    col_integer = _integer_column_mask(problem)
+    matrix_col_index = None
+    if col_integer is not None:
+        col_ptr = np.asarray(_starts, dtype=np.int64)
+        if col_ptr.size == n_cols:  # no trailing entry
+            col_ptr = np.append(col_ptr, int(sorted_v.size))
+        matrix_col_index = np.repeat(np.arange(n_cols, dtype=np.int64), np.diff(col_ptr))
+    _l2_rf = getattr(problem, "_layer2_row_factor", None)
+    _l2_cf = getattr(problem, "_layer2_col_factor", None)
+    tol_p, _tol_d = resolve_feasibility_tolerances(problem)
+
     return ranges_from_arrays(
         matrix_values=sorted_v,
         cost=col_obj,
@@ -1593,6 +2098,12 @@ def _ranges_via_passmodel(problem: Any, config: ScalingConfig) -> RangeReport:
         row_lower=_strip_inf(row_lb_h),
         row_upper=_strip_inf(row_ub_h),
         config=config,
+        col_integer=col_integer,
+        matrix_col_index=matrix_col_index,
+        col_model_factor=None if _l2_cf is None else np.abs(_l2_cf),
+        row_model_factor=None if _l2_rf is None else 1.0 / np.abs(_l2_rf),
+        primal_feasibility_tolerance=tol_p,
+        infinite_bound=resolve_infinite_bound(problem),
     )
 
 
@@ -1640,6 +2151,7 @@ def detect_ranges(problem_or_solution: Any, config: ScalingConfig) -> RangeRepor
 
 
 __all__ = [
+    "Extreme",
     "RangeReport",
     "detect_ranges",
     "ranges_from_arrays",
