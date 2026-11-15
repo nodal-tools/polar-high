@@ -287,3 +287,40 @@ def test_residue_floor_uses_the_primal_tolerance_not_kkt() -> None:
     seen = {}
     pb.solve(pre_run_check=lambda r, h: seen.update(r))
     assert seen["residue_floor"] == pytest.approx(1e-6)
+
+
+def test_write_mps_runs_the_hook_on_the_canonical_matrix(tmp_path) -> None:
+    """``write_mps(pre_run_check=)`` hands the hook the same ranges as a
+    WarmProblem build of the same LP (no solver instance: ``None``) and
+    returns the options it returned."""
+    warm = {}
+    WarmProblem(_scaled_lp()).solve(pre_run_check=lambda r, h: warm.update(r))
+    seen = {}
+    handles = []
+
+    def hook(ranges, h):
+        seen.update(ranges)
+        handles.append(h)
+        return {"user_bound_scale": -5}
+
+    mps = tmp_path / "m.mps"
+    out = _scaled_lp().write_mps(str(mps), emit_names=False, pre_run_check=hook)
+    assert out == {"user_bound_scale": -5}
+    assert handles == [None]
+    assert seen == warm
+    assert mps.exists()
+    # Without a hook: nothing to carry.
+    assert _lp().write_mps(str(tmp_path / "n.mps")) == {}
+
+
+def test_write_mps_hook_raise_writes_no_file(tmp_path) -> None:
+    def hook(ranges, h):
+        raise RuntimeError("too wide")
+
+    pb = _lp()
+    mps = tmp_path / "m.mps"
+    with pytest.raises(RuntimeError, match="too wide"):
+        pb.write_mps(str(mps), release=True, pre_run_check=hook)
+    assert not mps.exists()
+    # The raise came before the release: the Problem still solves.
+    assert pb.solve().optimal

@@ -5868,7 +5868,8 @@ class Problem:
         emit_names: bool = True,
         release: bool = False,
         name: str = "POLAR_HIGH",
-    ) -> None:
+        pre_run_check: Callable[[dict, Any], Mapping[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
         """Stream the LP/MIP to ``path`` as a free-format MPS file.
 
         This is an in-house writer that consumes the polar-side LP
@@ -5920,6 +5921,21 @@ class Problem:
             :meth:`solve` will raise.
         name
             MPS ``NAME`` header; default ``"POLAR_HIGH"``.
+        pre_run_check
+            As on :meth:`solve`, for a caller that solves the file in
+            another process: called once as ``pre_run_check(ranges, None)``
+            before anything is written, with the ranges of the LP in the
+            file (the same keys as on :meth:`solve`, read from the
+            canonical matrix as a :class:`WarmProblem` build does).  There
+            is no solver instance (``None``), so the hook returns the
+            options it wants; they are returned for the caller to pass to
+            its solver.  An exception from it propagates and no file is
+            written.
+
+        Returns
+        -------
+        dict
+            The options ``pre_run_check`` returned (empty without one).
 
         Raises
         ------
@@ -6092,6 +6108,15 @@ class Problem:
                     f"write a corrupt MPS. First offender (col, coef): "
                     f"({bad_j}, {float(m.col_obj[bad_j])})"
                 )
+
+        # ---- The caller's check of the LP it is about to receive, before
+        # anything is written (a raise leaves no file).  O(rows + cols + nnz)
+        # over the canonical matrix, no walk and no solver instance.
+        hook_options: dict[str, Any] = {}
+        if pre_run_check is not None:
+            hook_ranges = _warm_pre_run_ranges(self, m, getattr(self, "_solver_options", None))
+            hook_options = dict(pre_run_check(dict(hook_ranges), None) or {})
+            del hook_ranges
 
         # ---- Structural basis-fingerprint of the model's name-set.  Always
         # taken over the REAL column / constraint-row names (``m.col_names``
@@ -6296,6 +6321,7 @@ class Problem:
 
         if profile:
             _emit("exit")
+        return hook_options
 
     # ------------------------------------------------------------------
     # Shared non-streaming LP-array builder

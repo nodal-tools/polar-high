@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (first build only, the same keys) and `build_only(path,
   pre_run_check=fn)` (before the MPS file is written; returns the options
   the hook returned or set on the handle, as the file carries none).
+  `write_mps(path, pre_run_check=fn)` calls `fn(ranges, None)` with the
+  same keys read from the canonical matrix (no solver instance is built,
+  so the writer keeps its memory bound) and returns the options `fn`
+  returned; a raise writes no file.  A `WarmProblem` whose hook raises
+  undoes its build, so the next `solve` checks again.
 - `resolve_feasibility_tolerances`, `resolve_infinite_bound` (and their
   `*_from_options` forms) read those options as HiGHS applies them;
   `kkt_override=False` gives the tolerances the simplex enforces.
