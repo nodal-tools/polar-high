@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-scaled space (rebuilt exactly from the unscaled solution, as the
   scaling is by powers of two), and `user_bound_scale` /
   `user_objective_scale` the exponents in effect.  Without user scaling
-  the new counters equal the plain ones.  `engine.user_scaled_kkt_failures`
-  is the array-level function.
+  the new counters equal the plain ones; for a `kOptimal` solve with user
+  scaling they are not recorded (`None`), as rebuilding them copies the
+  whole solution.  `engine.user_scaled_kkt_failures` is the array-level
+  function.
 
 ## [3.14.0] — 2026-11-13
 

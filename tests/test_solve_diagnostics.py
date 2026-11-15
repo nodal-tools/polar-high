@@ -366,3 +366,15 @@ def test_user_scaled_counters_equal_plain_ones_without_user_scaling() -> None:
     assert diag.user_scaled_max_primal_infeasibility == diag.max_primal_infeasibility
     assert diag.user_scaled_num_dual_infeasibilities == diag.num_dual_infeasibilities
     assert diag.user_scaled_max_dual_infeasibility == diag.max_dual_infeasibility
+
+
+def test_user_scaled_counters_not_recorded_for_an_optimal_user_scaled_solve() -> None:
+    diag = (
+        _equality_lp(1.0, 1.0, {"user_bound_scale": -4}).solve(keep_solver=True).solve_diagnostics()
+    )
+    assert diag is not None and diag.model_status_name == "kOptimal"
+    assert diag.user_bound_scale == -4
+    assert diag.user_scaled_num_primal_infeasibilities is None
+    assert diag.user_scaled_max_primal_infeasibility is None
+    assert diag.user_scaled_num_dual_infeasibilities is None
+    assert diag.user_scaled_max_dual_infeasibility is None

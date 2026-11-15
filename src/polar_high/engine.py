@@ -7620,7 +7620,9 @@ class SolveDiagnostics:
     times larger after unscaling.  The ``user_scaled_*`` fields give the
     counters in the user-scaled space HiGHS solved — rebuilt exactly from
     the unscaled solution, see :func:`user_scaled_kkt_failures` — and equal
-    the plain ones when no user scaling was applied.
+    the plain ones when no user scaling was applied.  They are not recorded
+    (``None``) for a ``kOptimal`` solve with user scaling, which HiGHS
+    certified in the space it solved.
     ``user_bound_scale`` / ``user_objective_scale`` are the exponents the
     handle held at snapshot time (0 = none).  The ``user_scaled_*`` fields
     are ``None`` when not recorded (the default); the dual pair is also
@@ -7779,7 +7781,7 @@ class Solution:
         mip_gap = float(info.mip_gap)
         bound_scale = _highs_int_option(h, "user_bound_scale")
         objective_scale = _highs_int_option(h, "user_objective_scale")
-        user_scaled = self._user_scaled_counters(h, info, bound_scale, objective_scale)
+        user_scaled = self._user_scaled_counters(h, info, status, bound_scale, objective_scale)
         return SolveDiagnostics(
             model_status=status,
             model_status_name=status.name,
@@ -7802,16 +7804,19 @@ class Solution:
         )
 
     def _user_scaled_counters(
-        self, h, info, bound_scale: int, objective_scale: int
-    ) -> tuple[int, float, int | None, float | None]:
+        self, h, info, status, bound_scale: int, objective_scale: int
+    ) -> tuple[int | None, float | None, int | None, float | None]:
         """The ``user_scaled_*`` counters of :meth:`solve_diagnostics`.
 
         HiGHS' own counters when no user scaling was applied (they are in
         the space it solved) or when there is no primal solution to measure
-        (they then say "not known").  Otherwise rebuilt from the handle's
-        unscaled model and solution with :func:`user_scaled_kkt_failures`,
-        reading the integrality off the model only when a variable is
-        integer (polar-high declares integrality per variable family)."""
+        (they then say "not known").  ``None`` for a ``kOptimal`` solve with
+        user scaling: HiGHS certified it in the space it solved, and
+        rebuilding the counters copies the whole solution (not done on every
+        solve).  Otherwise rebuilt from the handle's unscaled model and
+        solution with :func:`user_scaled_kkt_failures`, reading the
+        integrality off the model only when a variable is integer
+        (polar-high declares integrality per variable family)."""
         own_dual = (int(info.num_dual_infeasibilities), float(info.max_dual_infeasibility))
         if info.dual_solution_status == highspy.kSolutionStatusNone:
             own_dual = (None, None)
@@ -7822,6 +7827,8 @@ class Solution:
         )
         if bound_scale == 0 and objective_scale == 0:
             return own
+        if status == highspy.HighsModelStatus.kOptimal:
+            return None, None, None, None
         hs = h.getSolution()
         if not hs.value_valid:
             return own
