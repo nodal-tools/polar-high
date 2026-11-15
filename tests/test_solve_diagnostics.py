@@ -378,3 +378,48 @@ def test_user_scaled_counters_not_recorded_for_an_optimal_user_scaled_solve() ->
     assert diag.user_scaled_max_primal_infeasibility is None
     assert diag.user_scaled_num_dual_infeasibilities is None
     assert diag.user_scaled_max_dual_infeasibility is None
+
+
+def test_mip_user_scaled_rebuild_takes_integrality_from_the_variables(monkeypatch) -> None:
+    """A MIP stopped at its first incumbent (kSolutionLimit) with
+    ``user_bound_scale = -2`` rebuilds the user-scaled counters.  The
+    continuous mask comes from the variable families: the 400 knapsack
+    columns are integer, the appended column ``s`` is continuous; HiGHS'
+    LP is never copied for it."""
+    import highspy
+
+    p = _knapsack({"mip_max_improving_sols": 1, "user_bound_scale": -2, "presolve": "off"})
+    one = pl.DataFrame({"m": [0]})
+    s = p.add_var("s", "m", one, lower=0.0, upper=3.0)
+    p.add_cstr("s_cap", over=None, sense="<=", lhs_terms={"s": fp.Sum(s)}, rhs_terms={"r": 2.0})
+    sol = p.solve(keep_solver=True)
+    assert sol.highs.getModelStatus() == highspy.HighsModelStatus.kSolutionLimit
+
+    seen = {}
+    real = fp.engine.user_scaled_kkt_failures
+
+    def spy(**kw):
+        seen["mask"] = kw["col_continuous"].copy()
+        return real(**kw)
+
+    def no_copy(*a, **k):
+        raise AssertionError("getLp() copies the whole LP")
+
+    monkeypatch.setattr(fp.engine, "user_scaled_kkt_failures", spy)
+    monkeypatch.setattr(type(sol.highs), "getLp", no_copy)
+    diag = sol.solve_diagnostics()
+    assert diag.user_scaled_num_primal_infeasibilities is not None
+    expected = np.zeros(401, dtype=bool)
+    expected[s.frame["col_id"].to_numpy()] = True
+    assert np.array_equal(seen["mask"], expected)
+
+
+def test_solve_diagnostics_is_cached_on_the_solution(monkeypatch) -> None:
+    sol = _build_problem({}).solve(keep_solver=True)
+    first = sol.solve_diagnostics()
+
+    def no_read(*a, **k):
+        raise AssertionError("read HiGHS again")
+
+    monkeypatch.setattr(type(sol.highs), "getInfo", no_read)
+    assert sol.solve_diagnostics() is first

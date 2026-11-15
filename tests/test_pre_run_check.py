@@ -124,7 +124,135 @@ def test_hook_rejected_on_non_streaming_path() -> None:
         _lp().solve(streaming=False, pre_run_check=lambda r, h: None)
 
 
-def test_warm_problem_solve_takes_no_hook() -> None:
-    import inspect
+def _scaled_lp() -> Problem:
+    """:func:`_lp` with hand-set side vectors: rows × (4, 0.5, 2), columns ×
+    0.25 (bounds left as written: they are the reported ones)."""
+    pb = _lp()
+    pb._layer2_row_factor = np.array([4.0, 0.5, 2.0])
+    pb._layer2_col_factor = np.full(int(pb._next_col), 0.25)
+    return pb
 
-    assert "pre_run_check" not in inspect.signature(WarmProblem.solve).parameters
+
+def test_integer_pools_reach_the_hook() -> None:
+    """With the side vectors of :func:`_scaled_lp` (term = coef · row factor
+    · col factor, cost = coef · col factor): x in dem 4·0.25 = 1, x in cap0
+    0.5·0.25 = 0.125, z in cap0 0.125, z in tiny 2·0.25 = 0.5 → continuous
+    matrix (0.125, 1); y (integer) in dem 4·0.25 = 1 → (1, 1); every cost
+    0.25; y's bound 1e12 (its lower 0 is no limit)."""
+    seen = {}
+    _scaled_lp().solve(pre_run_check=lambda r, h: seen.update(r))
+    assert seen["matrix_continuous"] == (0.125, 1.0)
+    assert seen["integer_matrix"] == (1.0, 1.0)
+    assert seen["cost_continuous"] == (0.25, 0.25)
+    assert seen["integer_cost"] == (0.25, 0.25)
+    assert seen["integer_bound"] == (1e12, 1e12)
+
+
+def test_pure_lp_has_no_integer_pools() -> None:
+    pb = Problem()
+    i = pl.DataFrame({"i": [0, 1]})
+    x = pb.add_var("x", "i", i, lower=0.0, upper=4.0)
+    pb.add_cstr("c", over=None, sense=">=", lhs_terms={"x": Sum(x)}, rhs_terms={"r": 1.0})
+    pb.set_objective(Sum(x), sense="min")
+    seen = {}
+    pb.solve(pre_run_check=lambda r, h: seen.update(r))
+    assert seen["integer_matrix"] is None and seen["integer_cost"] is None
+    assert seen["integer_bound"] is None
+    assert seen["matrix_continuous"] == (1.0, 1.0)
+
+
+def test_warm_problem_first_build_gets_the_streaming_ranges() -> None:
+    """The WarmProblem build reads the same ranges from its canonical
+    matrix as the streaming build: every key equal."""
+    streamed = {}
+    _scaled_lp().solve(pre_run_check=lambda r, h: streamed.update(r))
+    warm = {}
+    WarmProblem(_scaled_lp()).solve(pre_run_check=lambda r, h: warm.update(r))
+    assert warm == streamed
+    # Hand check of the pool (as in the walk test above).
+    assert warm["row_bound_meaningful"] == (2.0, 5e4)
+    assert warm["col_bound_meaningful"] == (1e3, 1e3)
+    assert warm["bound_rhs_residue"] == (1, 3e-15)
+
+
+def test_warm_problem_hook_once_on_the_first_build() -> None:
+    wp = WarmProblem(_lp())
+    calls = []
+
+    def hook(ranges, h):
+        calls.append(str(h.getModelStatus()))
+        return {"user_bound_scale": -3}
+
+    sol = wp.solve(pre_run_check=hook)
+    assert calls == ["HighsModelStatus.kNotset"]
+    assert sol.optimal
+    assert sol.solve_diagnostics().user_bound_scale == -3
+    # A re-solve of the built instance does not call it.
+    wp.solve(pre_run_check=hook)
+    assert len(calls) == 1
+
+
+def test_warm_problem_hook_can_raise_before_run() -> None:
+    class Stop(Exception):
+        pass
+
+    def hook(ranges, h):
+        raise Stop("too wide")
+
+    wp = WarmProblem(_lp())
+    with pytest.raises(Stop):
+        wp.solve(pre_run_check=hook)
+    import highspy
+
+    assert wp._h.getModelStatus() == highspy.HighsModelStatus.kNotset
+
+
+def test_names_decision_follows_the_hook(tmp_path) -> None:
+    """An option the hook sets that writes a file with names gets them
+    under ``highs_names="auto"`` (streaming and warm)."""
+
+    def hook(ranges, h):
+        return {"write_basis_file": str(tmp_path / "b.bas")}
+
+    sol = _lp().solve(highs_names="auto", keep_solver=True, pre_run_check=hook)
+    assert sol.highs_names_passed
+    sol = WarmProblem(_lp(), highs_names="auto").solve(pre_run_check=hook)
+    assert sol.highs_names_passed
+    # Without the hook nothing needs names.
+    assert not _lp().solve(highs_names="auto", keep_solver=True).highs_names_passed
+
+
+def test_build_only_runs_the_hook_and_returns_its_options(tmp_path) -> None:
+    seen = {}
+
+    def hook(ranges, h):
+        seen.update(ranges)
+        h.setOptionValue("user_objective_scale", 2)
+        return {"user_bound_scale": -4}
+
+    mps = tmp_path / "m.mps"
+    out = _lp().build_only(str(mps), pre_run_check=hook)
+    assert out == {"user_objective_scale": 2, "user_bound_scale": -4}
+    assert mps.exists()
+    assert seen["row_bound_meaningful"] == (0.5, 1e5)
+    # Without a hook: nothing to carry.
+    assert _lp().build_only(str(tmp_path / "n.mps")) == {}
+
+
+def test_build_only_hook_raise_writes_no_file(tmp_path) -> None:
+    def hook(ranges, h):
+        raise RuntimeError("too wide")
+
+    mps = tmp_path / "m.mps"
+    with pytest.raises(RuntimeError, match="too wide"):
+        _lp().build_only(str(mps), pre_run_check=hook)
+    assert not mps.exists()
+
+
+def test_residue_floor_uses_the_primal_tolerance_not_kkt() -> None:
+    """kkt_tolerance 1e-5 does not move the floor: 10 × the primal 1e-7."""
+    pb = _lp()
+    pb.set_solver_options({"kkt_tolerance": 1e-5})
+    seen = {}
+    pb.solve(pre_run_check=lambda r, h: seen.update(r))
+    assert seen["residue_floor"] == pytest.approx(1e-6)

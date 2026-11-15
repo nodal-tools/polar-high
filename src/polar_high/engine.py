@@ -63,14 +63,16 @@ _logger = logging.getLogger(__name__)
 
 
 class _StreamGuardPools:
-    """Scaling-check pools a streaming solve builds for ``pre_run_check``:
-    the continuous-column bounds and the row bounds HiGHS receives, each
-    paired with its model-unit magnitude (column bound × inverse column
-    factor; the row bound before the row factor), with the residue floor and
-    the infinite bound of the effective options.  O(rows + cols) vectorised,
-    no extra walk."""
+    """Scaling-check pools a solve builds for ``pre_run_check``: the
+    continuous-column bounds and the row bounds HiGHS receives, each paired
+    with its model-unit magnitude (column bound × inverse column factor; the
+    row bound before the row factor), with the residue floor and the
+    infinite bound of the effective options; and the matrix terms, costs
+    and bounds split by column integrality (HiGHS scales the matrix entries
+    and costs of integer columns by ``2**user_bound_scale``).  O(rows + cols
+    + nnz) vectorised, no extra walk."""
 
-    def __init__(self, opts: Mapping[str, Any] | None) -> None:
+    def __init__(self, opts: Mapping[str, Any] | None, col_int: np.ndarray | None) -> None:
         from .autoscale._coef_walk import FlooredMinMax
         from .autoscale._config import RESIDUE_FLOOR_FACTOR
         from .autoscale._precedence import (
@@ -78,11 +80,17 @@ class _StreamGuardPools:
             infinite_bound_from_options,
         )
 
-        tol_p, _tol_d = feasibility_tolerances_from_options(opts)
+        tol_p, _tol_d = feasibility_tolerances_from_options(opts, kkt_override=False)
         self.floor = RESIDUE_FLOOR_FACTOR * tol_p
         self.infinite = infinite_bound_from_options(opts)
         self.cols = FlooredMinMax()
         self.rows = FlooredMinMax()
+        # Boolean ``col_id -> integer`` (``None``: every column continuous).
+        self.int_mask = None
+        if col_int is not None and col_int.any():
+            self.int_mask = np.asarray(col_int, dtype=bool).copy()
+        # (lo, hi) running pairs, seeded as in ``_running_finite_nonzero_min_max``.
+        self._mx = {k: (math.inf, 0.0) for k in ("mc", "mi", "cc", "ci", "bi")}
 
     def _fold(self, out, post: np.ndarray, model: np.ndarray) -> None:
         from .autoscale._coef_walk import fold_pools
@@ -98,22 +106,70 @@ class _StreamGuardPools:
             integer_cols=None,
         )
 
+    def _run(self, key: str, arr: np.ndarray) -> None:
+        lo, hi = self._mx[key]
+        self._mx[key] = _running_finite_nonzero_min_max(arr, lo, hi)
+
     def fold_columns(
         self,
         col_lb: np.ndarray,
         col_ub: np.ndarray,
-        col_int: np.ndarray,
         l2_cf: np.ndarray | None,
     ) -> None:
-        cont = col_int == 0
+        """Continuous-column bounds into the pool (model magnitude =
+        bound × ``|l2_cf|``); integer-column bounds into their own range
+        (below the solver infinity)."""
+        cont = None if self.int_mask is None else ~self.int_mask
         factor = None if l2_cf is None else np.abs(l2_cf)
         for b in (col_lb, col_ub):
-            post = b[cont]
-            model = post if factor is None else post * factor[cont]
+            post = b if cont is None else b[cont]
+            if factor is None:
+                model = post
+            else:
+                model = post * (factor if cont is None else factor[cont])
             self._fold(self.cols, post, model)
+            if self.int_mask is not None:
+                ib = np.abs(b[self.int_mask])
+                self._run("bi", ib[ib < self.infinite])
 
     def fold_rows(self, post: np.ndarray, model: np.ndarray) -> None:
         self._fold(self.rows, post, model)
+
+    def fold_costs(self, col_obj: np.ndarray) -> None:
+        """Objective coefficients as HiGHS receives them, split by
+        integrality."""
+        if self.int_mask is None:
+            self._run("cc", col_obj)
+            return
+        self._run("cc", col_obj[~self.int_mask])
+        self._run("ci", col_obj[self.int_mask])
+
+    def fold_matrix(self, col_idx: np.ndarray, vals: np.ndarray) -> None:
+        """Matrix terms (``vals`` on columns ``col_idx``), split by
+        integrality."""
+        if vals.size == 0:
+            return
+        if self.int_mask is None:
+            self._run("mc", vals)
+            return
+        on_int = self.int_mask[col_idx]
+        self._run("mc", vals[~on_int])
+        self._run("mi", vals[on_int])
+
+    def fold_matrix_csc(self, col_ptr: np.ndarray, vals: np.ndarray) -> None:
+        """Matrix terms of a column-wise (CSC) matrix, split by integrality
+        without a per-term column-index array."""
+        if vals.size == 0:
+            return
+        if self.int_mask is None:
+            self._run("mc", vals)
+            return
+        ptr = np.asarray(col_ptr, dtype=np.int64)
+        if ptr.size == self.int_mask.size:  # no trailing entry
+            ptr = np.append(ptr, int(vals.size))
+        on_int = np.repeat(self.int_mask, np.diff(ptr))
+        self._run("mc", vals[~on_int])
+        self._run("mi", vals[on_int])
 
     def fields(self) -> dict[str, Any]:
         def _pair(r) -> tuple[float, float] | None:
@@ -121,6 +177,10 @@ class _StreamGuardPools:
             if m.lo is None or m.hi is None:
                 return None
             return (m.lo.post, m.hi.post)
+
+        def _mx(key: str) -> tuple[float, float] | None:
+            lo, hi = self._mx[key]
+            return None if hi == 0.0 else (lo, hi)
 
         largest = 0.0
         for r in (self.cols, self.rows):
@@ -133,7 +193,60 @@ class _StreamGuardPools:
             "bound_rhs_beyond_infinite": self.cols.beyond_infinite + self.rows.beyond_infinite,
             "residue_floor": self.floor,
             "infinite_bound": self.infinite,
+            "matrix_continuous": _mx("mc"),
+            "integer_matrix": _mx("mi"),
+            "cost_continuous": _mx("cc"),
+            "integer_cost": _mx("ci"),
+            "integer_bound": _mx("bi"),
         }
+
+
+def _option_record(h: highspy.Highs) -> dict[str, Any]:
+    """The values in highspy's ``HighsOptions`` record of ``h`` (the options
+    it exposes as attributes)."""
+    rec = h.getOptions()
+    out: dict[str, Any] = {}
+    for name in dir(rec):
+        if name.startswith("_"):
+            continue
+        try:
+            val = getattr(rec, name)
+        except Exception:  # noqa: BLE001 — an attribute highspy cannot read
+            continue
+        if not callable(val):
+            out[name] = val
+    return out
+
+
+def _call_pre_run_check(
+    pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None],
+    ranges: Mapping[str, Any],
+    h: highspy.Highs,
+    *,
+    track_changes: bool = False,
+) -> dict[str, Any]:
+    """Call ``pre_run_check(ranges, h)`` and set the options it returns on
+    ``h``.  Returns the options it returned; with ``track_changes`` also the
+    ones it set on ``h`` directly (read back from the options record), so a
+    caller that does not run ``h`` itself can carry them.  An exception from
+    the hook propagates."""
+    import warnings
+
+    before = _option_record(h) if track_changes else None
+    returned = dict(pre_run_check(dict(ranges), h) or {})
+    _ok = getattr(highspy.HighsStatus, "kOk", None)
+    for _k, _v in returned.items():
+        _st = h.setOptionValue(_k, _v)
+        if _ok is not None and _st != _ok:
+            warnings.warn(
+                f"HiGHS rejected option {_k}={_v!r} from pre_run_check (status={_st!r})",
+                stacklevel=3,
+            )
+    if before is None:
+        return returned
+    changed = {k: v for k, v in _option_record(h).items() if before.get(k) != v}
+    changed.update(returned)
+    return changed
 
 
 def _running_finite_nonzero_min_max(
@@ -4687,10 +4800,15 @@ class Problem:
             ``infinite_bound``); ``highs`` is the live handle.  It may set
             options on ``highs`` (e.g. ``user_bound_scale``), return a mapping
             of HiGHS options to set, or raise — then no solve runs and the
-            exception propagates.  Honoured by the streaming path only
-            (``ValueError`` with ``streaming=False``); not called by
-            :meth:`build_only` (the caller runs the solve) nor by
-            :class:`WarmProblem` solves.
+            exception propagates.  The ranges also carry the
+            ``matrix_continuous`` / ``integer_matrix``, ``cost_continuous`` /
+            ``integer_cost`` and ``integer_bound`` ``(min, max)`` pairs (HiGHS
+            multiplies an integer column's matrix entries and cost by
+            ``2**user_bound_scale``).  The names decision of
+            ``highs_names="auto"`` is taken after the hook, so an option it
+            sets that writes names is honoured.  Honoured by the streaming
+            path only (``ValueError`` with ``streaming=False``); also taken by
+            :meth:`build_only` and by the first :meth:`WarmProblem.solve`.
         """
         _check_highs_names(highs_names)
         if pre_run_check is not None and not streaming:
@@ -4820,7 +4938,8 @@ class Problem:
         mps_path: str,
         *,
         options: dict | None = None,
-    ) -> None:
+        pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
         """Build the LP into HiGHS, write to ``mps_path``, release everything.
 
         For callers that want to drive the actual solve out-of-process —
@@ -4854,6 +4973,20 @@ class Problem:
             ``presolve`` / ``solver`` / ``simplex_scale_strategy`` —
             options that affect what ``writeModel`` serialises).
             ``None`` uses :attr:`_solver_options`.
+        pre_run_check
+            As on :meth:`solve`: called once with the ranges of the built
+            LP and the HiGHS handle, before the MPS file is written; it may
+            raise (no file is written).  The MPS file carries no options, so
+            the options the hook returns or sets on the handle are returned
+            for the caller to pass to its solver.
+
+        Returns
+        -------
+        dict
+            The HiGHS options ``pre_run_check`` returned or set on the
+            handle (those set on the handle are read back from highspy's
+            ``HighsOptions`` record, so return an option to be sure it is
+            carried); empty without a hook.
         """
         if getattr(self, "_released", False):
             raise RuntimeError(
@@ -4871,12 +5004,13 @@ class Problem:
                 UserWarning,
                 stacklevel=2,
             )
-        self._solve_streaming(
+        return self._solve_streaming(
             options=options,
             keep_solver=False,
             save_memory=True,
             _mps_out_path=mps_path,
             _build_only=True,
+            pre_run_check=pre_run_check,
         )
 
     # ------------------------------------------------------------------
@@ -6248,7 +6382,7 @@ class Problem:
         tmp_dir: str | os.PathLike | None = None,
         highs_names: str = "always",
         pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None] | None = None,
-    ) -> Solution | None:
+    ) -> Solution | dict[str, Any]:
         _sp_emit, _sp_on = _make_solve_profile_emitter()
         # The save_memory round trip writes the MPS through HiGHS and reads
         # the names back from it, so names always go to HiGHS there.
@@ -6503,8 +6637,9 @@ class Problem:
         # value paired with its model-unit magnitude.
         _guard = None
         if pre_run_check is not None:
-            _guard = _StreamGuardPools(opts)
-            _guard.fold_columns(col_lb, col_ub, col_int, self._layer2_col_factor)
+            _guard = _StreamGuardPools(opts, col_int)
+            _guard.fold_columns(col_lb, col_ub, self._layer2_col_factor)
+            _guard.fold_costs(col_obj_h)
 
         # HiGHS has its own internal copies of the column bound / cost
         # arrays after addCols; we don't reference these locals again.
@@ -7081,6 +7216,8 @@ class Problem:
                 _r_matrix_lo,
                 _r_matrix_hi,
             )
+            if _guard is not None:
+                _guard.fold_matrix(idx32, val64)
             _r_row_lo, _r_row_hi = _running_finite_nonzero_min_max(
                 row_lb,
                 _r_row_lo,
@@ -7187,6 +7324,7 @@ class Problem:
                     "_build_only=True requires _mps_out_path to be set",
                 )
             _caller_owns_mps = _mps_out_path is not None
+            _build_only_options: dict[str, Any] = {}
             mps_path = (
                 _mps_out_path
                 if _mps_out_path is not None
@@ -7198,6 +7336,12 @@ class Problem:
                 # stdout stays clean.  We restore output_flag on the
                 # fresh Highs from the caller's effective options dict
                 # (re-applied below), so the user's preference wins.
+                if _build_only and pre_run_check is not None:
+                    # The caller runs the solve from the MPS file, which
+                    # carries no options: hand back what the hook set.
+                    _build_only_options = _call_pre_run_check(
+                        pre_run_check, streamed_lp_ranges, h, track_changes=True
+                    )
                 try:
                     h.setOptionValue("output_flag", False)
                 except Exception:
@@ -7226,7 +7370,7 @@ class Problem:
                 # caller is expected to construct its own Solution from
                 # the external solver's output arrays + ``self._vars``.
                 if _build_only:
-                    return None
+                    return _build_only_options
 
                 h = highspy.Highs()
                 # See the addCols-time block above — same rationale:
@@ -7498,6 +7642,12 @@ class Problem:
                 if _sp_on:
                     _sp_emit("primal_seed", injected=0, error=type(exc).__name__)
 
+        # The hook runs before the names decision, so an option it sets
+        # that writes a file with names (``highs_options_need_names``) gets
+        # them.
+        if pre_run_check is not None:
+            _call_pre_run_check(pre_run_check, streamed_lp_ranges, h)
+
         names_passed = names_mode == "always"
         if names_mode == "auto" and highs_options_need_names(h):
             _pass_col_names(h)
@@ -7505,21 +7655,6 @@ class Problem:
             names_passed = True
             if _sp_on:
                 _sp_emit("names_passed_for_options", n_cols=n_cols, n_rows=n_rows)
-
-        if pre_run_check is not None:
-            _set = pre_run_check(dict(streamed_lp_ranges), h)
-            if _set:
-                import warnings
-
-                _ok = getattr(highspy.HighsStatus, "kOk", None)
-                for _k, _v in dict(_set).items():
-                    _st = h.setOptionValue(_k, _v)
-                    if _ok is not None and _st != _ok:
-                        warnings.warn(
-                            f"HiGHS rejected option {_k}={_v!r} from pre_run_check "
-                            f"(status={_st!r})",
-                            stacklevel=2,
-                        )
 
         h.run()
 
@@ -7835,7 +7970,9 @@ class Solution:
         # ``pre_run_check`` adds its scaling-check keys
         # (``col_bound_meaningful``, ``row_bound_meaningful``,
         # ``bound_rhs_residue``, ``bound_rhs_beyond_infinite``,
-        # ``residue_floor``, ``infinite_bound``; see :meth:`Problem.solve`).
+        # ``residue_floor``, ``infinite_bound``, ``matrix_continuous``,
+        # ``integer_matrix``, ``cost_continuous``, ``integer_cost``,
+        # ``integer_bound``; see :meth:`Problem.solve`).
         self.streamed_lp_ranges = streamed_lp_ranges
         # Whether ``highs`` holds the LP names (``highs_names`` on the
         # solve).  ``False`` only when a solve kept them out of HiGHS; then
@@ -7843,6 +7980,8 @@ class Solution:
         # writes) and ``col_names`` / ``row_names`` above are the names.
         self.highs_names_passed = highs_names_passed
         self._highs_name_passer = highs_name_passer
+        # ``(handle, SolveDiagnostics)`` of the first :meth:`solve_diagnostics`.
+        self._solve_diagnostics_cache: tuple[Any, SolveDiagnostics] | None = None
 
     @property
     def objective_in_user_units(self) -> float:
@@ -7906,10 +8045,21 @@ class Solution:
         :attr:`max_primal_infeasibility`, but extends it to the shim case
         via ``hasattr`` so no ``AttributeError`` can leak from the
         subprocess path.
+
+        The result is cached on the Solution (keyed on the handle), so a
+        second call is free; it describes the solve this Solution came from.
         """
         h = self.highs
         if h is None or not hasattr(h, "getInfo") or not hasattr(h, "getModelStatus"):
             return None
+        cached = getattr(self, "_solve_diagnostics_cache", None)
+        if cached is not None and cached[0] is h:
+            return cached[1]
+        diag = self._read_solve_diagnostics(h)
+        self._solve_diagnostics_cache = (h, diag)
+        return diag
+
+    def _read_solve_diagnostics(self, h) -> SolveDiagnostics:
         info = h.getInfo()
         status = h.getModelStatus()
         feasible = highspy.kSolutionStatusFeasible
@@ -7973,12 +8123,14 @@ class Solution:
             n_cols, np.arange(n_cols, dtype=np.int32)
         )
         _st, _n, row_lower, row_upper, _nnz = h.getRows(n_rows, np.arange(n_rows, dtype=np.int32))
+        # Integrality from the variable families' column ids (no copy of
+        # HiGHS' LP); columns no family owns (e.g. appended recourse
+        # columns) are continuous.
         continuous = np.ones(n_cols, dtype=bool)
-        if any(getattr(v, "integer", False) for v in self._vars.values()):
-            integrality = h.getLp().integrality_
-            if len(integrality):
-                k_cont = highspy.HighsVarType.kContinuous
-                continuous = np.array([t == k_cont for t in integrality], dtype=bool)
+        for v in self._vars.values():
+            if getattr(v, "integer", False):
+                ids = v.frame["col_id"].to_numpy()
+                continuous[ids[ids < n_cols]] = False
         tol_p = _highs_float_option(h, "primal_feasibility_tolerance", 1e-7)
         tol_d = _highs_float_option(h, "dual_feasibility_tolerance", 1e-7)
         kkt_tol = _highs_float_option(h, "kkt_tolerance", _HIGHS_DEFAULT_KKT_TOLERANCE)
@@ -8185,6 +8337,41 @@ def _pass_warm_names(h: highspy.Highs, col_names: list, row_names: list) -> None
         # Fall back to a synthetic ``row_<idx>`` so the API contract
         # is satisfied and diagnostics remain useful.
         h.passRowName(i, n if n else f"row_{i}")
+
+
+def _warm_pre_run_ranges(p: Problem, m: Any, opts: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The ``pre_run_check`` ranges of a :class:`WarmProblem` build, from its
+    canonical matrix ``m`` (side vectors baked in): the four
+    ``streamed_lp_ranges`` pairs and the scaling-check keys, with the same
+    meaning as on the streaming path (one value per row: the finite bound,
+    both for a ranged row).  O(rows + cols + nnz) vectorised."""
+
+    def _pair(arrs) -> tuple[float, float] | None:
+        lo, hi = math.inf, 0.0
+        for a in arrs:
+            lo, hi = _running_finite_nonzero_min_max(a, lo, hi)
+        return None if hi == 0.0 else (lo, hi)
+
+    ranges: dict[str, Any] = {
+        "matrix": _pair([m.val]),
+        "cost": _pair([m.col_obj]),
+        "col_bound": _pair([m.col_lb, m.col_ub]),
+        "row_bound": _pair([m.row_lb, m.row_ub]),
+    }
+    guard = _StreamGuardPools(opts, m.col_int)
+    guard.fold_columns(m.col_lb, m.col_ub, p._layer2_col_factor)
+    guard.fold_costs(m.col_obj)
+    guard.fold_matrix_csc(m.col_ptr, m.val)
+    rf = p._layer2_row_factor
+    inv_rf = None if rf is None else 1.0 / np.abs(rf)
+    lb_side = np.isfinite(m.row_lb)
+    ub_side = np.isfinite(m.row_ub) & ~(lb_side & (m.row_ub == m.row_lb))
+    for side, vals in ((lb_side, m.row_lb), (ub_side, m.row_ub)):
+        post = vals[side]
+        model = post if inv_rf is None else post * inv_rf[side]
+        guard.fold_rows(post, model)
+    ranges.update(guard.fields())
+    return ranges
 
 
 class WarmProblem:
@@ -9433,7 +9620,13 @@ class WarmProblem:
 
     # -- solve -----------------------------------------------------------
 
-    def solve(self, *, options: dict | None = None, retry_on_unknown: bool = False) -> Solution:
+    def solve(
+        self,
+        *,
+        options: dict | None = None,
+        retry_on_unknown: bool = False,
+        pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None] | None = None,
+    ) -> Solution:
         """Solve the LP.  First call builds the LP from scratch (same
         pipeline as :meth:`Problem.solve`); subsequent calls just run
         HiGHS again on the (possibly updated) live model.
@@ -9441,6 +9634,12 @@ class WarmProblem:
         ``options`` is honoured on the FIRST solve only — subsequent
         solves use the same HiGHS instance.  To change options on a
         rebuilt LP, drop the WarmProblem and create a new one.
+
+        ``pre_run_check`` (see :meth:`Problem.solve`) is called on the FIRST
+        solve only, after the build and before the names decision and
+        ``run()``, with the same ranges keys, built from the canonical
+        matrix this build holds.  A re-solve of the built instance does not
+        call it: its ranges are not re-derived after updates.
 
         ``retry_on_unknown`` (default ``False`` → byte-identical to the
         legacy path for every existing caller) enables a warm-restart
@@ -9458,7 +9657,7 @@ class WarmProblem:
         fires.
         """
         if self._h is None:
-            self._initial_build(options=options)
+            self._initial_build(options=options, pre_run_check=pre_run_check)
         else:
             # A re-solve of an instance with an explicit ``threads`` count: HiGHS' task scheduler is
             # process-global, and another Highs may have re-initialised it with a different count since this
@@ -9726,7 +9925,12 @@ class WarmProblem:
             f"update_rhs({cstr_name!r}): unsupported new_param type {type(new_param).__name__}"
         )
 
-    def _initial_build(self, *, options: dict | None) -> None:
+    def _initial_build(
+        self,
+        *,
+        options: dict | None,
+        pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None] | None = None,
+    ) -> None:
         """Run the same pipeline as :meth:`Problem.solve` up to
         ``passModel``.  Stores ``self._h`` and the row/col metadata maps
         for later updates.
@@ -10350,6 +10554,7 @@ class WarmProblem:
         # HiGHS now holds its own copy of the whole LP (matrix included);
         # free the intermediate before the names and the solve.
         del lp
+        pre_run_ranges = None if pre_run_check is None else _warm_pre_run_ranges(p, m, opts)
         if _sp_on:
             _sp_emit("highs_passmodel_post")
 
@@ -10475,6 +10680,13 @@ class WarmProblem:
         for _name, _proto, _over in p._cstrs:
             for t in _proto.expr.terms:
                 t.sum_block_meta = None
+
+        # Last, so the hook sees the handle as it will run (options, basis),
+        # and before :meth:`solve`'s names decision.  An exception from it
+        # propagates out of :meth:`solve` before ``run()``.
+        if pre_run_check is not None:
+            _call_pre_run_check(pre_run_check, pre_run_ranges, h)
+            del pre_run_ranges
 
         if _sp_on:
             _sp_emit("initial_build_exit", n_cols=int(n_cols), n_rows=int(n_rows))
