@@ -202,9 +202,40 @@ def test_warm_problem_hook_can_raise_before_run() -> None:
     wp = WarmProblem(_lp())
     with pytest.raises(Stop):
         wp.solve(pre_run_check=hook)
-    import highspy
+    # The build is undone: no unchecked instance is left to solve.
+    assert wp._h is None
 
-    assert wp._h.getModelStatus() == highspy.HighsModelStatus.kNotset
+
+def test_warm_problem_retry_after_hook_raise_runs_the_hook_again() -> None:
+    """A retry after a raising hook rebuilds and checks again; it never
+    solves the instance the hook refused."""
+
+    class Stop(Exception):
+        pass
+
+    calls = []
+
+    def refuse(ranges, h):
+        calls.append("refuse")
+        raise Stop("too wide")
+
+    wp = WarmProblem(_lp())
+    with pytest.raises(Stop):
+        wp.solve(pre_run_check=refuse)
+    with pytest.raises(Stop):
+        wp.solve(pre_run_check=refuse)
+    assert calls == ["refuse", "refuse"]
+
+    def accept(ranges, h):
+        calls.append("accept")
+        return {"user_bound_scale": -2}
+
+    sol = wp.solve(pre_run_check=accept)
+    assert calls == ["refuse", "refuse", "accept"]
+    assert sol.optimal
+    assert sol.solve_diagnostics().user_bound_scale == -2
+    # Same optimum as a fresh WarmProblem without a hook.
+    assert sol.obj == pytest.approx(WarmProblem(_lp()).solve().obj, rel=1e-12)
 
 
 def test_names_decision_follows_the_hook(tmp_path) -> None:

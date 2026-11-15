@@ -423,3 +423,19 @@ def test_solve_diagnostics_is_cached_on_the_solution(monkeypatch) -> None:
 
     monkeypatch.setattr(type(sol.highs), "getInfo", no_read)
     assert sol.solve_diagnostics() is first
+
+
+def test_solve_diagnostics_cache_does_not_keep_the_handle_alive() -> None:
+    """The cache holds a weak reference: once ``sol.highs`` is dropped and
+    garbage collected, the HiGHS instance is gone."""
+    import gc
+    import weakref
+
+    sol = _build_problem({}).solve(keep_solver=True)
+    assert sol.solve_diagnostics() is not None
+    probe = weakref.ref(sol.highs)
+    sol.highs = None
+    gc.collect()
+    assert probe() is None
+    # Without a handle there is nothing to diagnose.
+    assert sol.solve_diagnostics() is None

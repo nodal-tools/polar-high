@@ -246,7 +246,13 @@ def _finite_pos(x: Any) -> bool:
 
 
 def _below_infinite_exponent(b_hi: float, infinite: float) -> int:
-    """Largest integer ``n`` with ``b_hi · 2**n < infinite`` (exact)."""
+    """Largest integer ``n`` with ``b_hi · 2**n < infinite`` (exact).
+
+    An infinite ``infinite`` (``infinite_bound = inf``: the solver treats
+    no finite value as "no limit") caps nothing, so the answer is the
+    largest exponent the scale option accepts, ``USER_SCALE_CLAMP_HI``."""
+    if math.isinf(infinite):
+        return USER_SCALE_CLAMP_HI
     n = _floor_exponent(infinite, b_hi)
     while math.ldexp(b_hi, n) >= infinite:
         n -= 1

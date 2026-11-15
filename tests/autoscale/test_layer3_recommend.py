@@ -282,3 +282,16 @@ def test_cost_in_band_not_scaled() -> None:
     plan = recommend_scaling(r, _cfg())
     assert plan.user_objective_scale == 0
     assert "in-zone" in plan.reasoning
+
+
+def test_below_infinite_exponent_with_infinite_bound_inf() -> None:
+    """``infinite_bound = inf`` caps nothing: the cap is the largest
+    exponent the scale option accepts (``USER_SCALE_CLAMP_HI``), not the
+    ``OverflowError`` that ``math.floor(inf)`` would raise."""
+    from polar_high.autoscale._config import USER_SCALE_CLAMP_HI
+    from polar_high.autoscale._layer3 import _below_infinite_exponent
+
+    assert _below_infinite_exponent(1e18, math.inf) == USER_SCALE_CLAMP_HI
+    # Finite case unchanged: 1e18 · 2**n < 1e20 → n = 6 (1e18·64 = 6.4e19,
+    # 1e18·128 = 1.28e20).
+    assert _below_infinite_exponent(1e18, 1e20) == 6

@@ -7980,7 +7980,9 @@ class Solution:
         # writes) and ``col_names`` / ``row_names`` above are the names.
         self.highs_names_passed = highs_names_passed
         self._highs_name_passer = highs_name_passer
-        # ``(handle, SolveDiagnostics)`` of the first :meth:`solve_diagnostics`.
+        # ``(weakref to handle, SolveDiagnostics)`` of the first
+        # :meth:`solve_diagnostics`.  A weak reference, so the cache never
+        # keeps a HiGHS instance alive after ``highs`` is dropped.
         self._solve_diagnostics_cache: tuple[Any, SolveDiagnostics] | None = None
 
     @property
@@ -8046,17 +8048,24 @@ class Solution:
         via ``hasattr`` so no ``AttributeError`` can leak from the
         subprocess path.
 
-        The result is cached on the Solution (keyed on the handle), so a
+        The result is cached on the Solution (keyed on a weak reference to
+        the handle, so the cache never keeps the handle alive), so a
         second call is free; it describes the solve this Solution came from.
         """
         h = self.highs
         if h is None or not hasattr(h, "getInfo") or not hasattr(h, "getModelStatus"):
             return None
         cached = getattr(self, "_solve_diagnostics_cache", None)
-        if cached is not None and cached[0] is h:
+        if cached is not None and cached[0]() is h:
             return cached[1]
         diag = self._read_solve_diagnostics(h)
-        self._solve_diagnostics_cache = (h, diag)
+        try:
+            ref = weakref.ref(h)
+        except TypeError:
+            # A handle type without weakref support: do not cache rather
+            # than hold a strong reference to it.
+            return diag
+        self._solve_diagnostics_cache = (ref, diag)
         return diag
 
     def _read_solve_diagnostics(self, h) -> SolveDiagnostics:
@@ -10661,6 +10670,24 @@ class WarmProblem:
         # (output_flag preference is applied earlier — before the log routing —
         # so it suppresses the version banner, not just the solve log.)
 
+        # After the options and the basis, so the hook sees the handle as
+        # it will run, and before :meth:`solve`'s names decision.  An
+        # exception from it propagates out of :meth:`solve` before ``run()``
+        # and un-does the build (``_h`` back to ``None``; the ``SumBlockMeta``
+        # recipe below is not yet released), so a retry rebuilds and runs
+        # the hook again instead of solving the unchecked instance.
+        if pre_run_check is not None:
+            try:
+                _call_pre_run_check(pre_run_check, pre_run_ranges, h)
+            except BaseException:
+                self._h = None
+                self._n_cols = 0
+                self._n_rows = 0
+                self._col_names = None
+                self._row_names = None
+                raise
+            del pre_run_ranges
+
         # Release the per-term ``SumBlockMeta`` recipe now the build has
         # consumed it.  A ``Sum``-reduced term survivor-filters its own
         # ``param_sources`` (dropping the summed-out factors), but the
@@ -10680,13 +10707,6 @@ class WarmProblem:
         for _name, _proto, _over in p._cstrs:
             for t in _proto.expr.terms:
                 t.sum_block_meta = None
-
-        # Last, so the hook sees the handle as it will run (options, basis),
-        # and before :meth:`solve`'s names decision.  An exception from it
-        # propagates out of :meth:`solve` before ``run()``.
-        if pre_run_check is not None:
-            _call_pre_run_check(pre_run_check, pre_run_ranges, h)
-            del pre_run_ranges
 
         if _sp_on:
             _sp_emit("initial_build_exit", n_cols=int(n_cols), n_rows=int(n_rows))
