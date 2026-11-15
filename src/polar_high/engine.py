@@ -32,9 +32,9 @@ import sys
 import tempfile
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
 
 import highspy
 import numpy as np
@@ -60,6 +60,80 @@ _logger = logging.getLogger(__name__)
 # col_bound-only ``user_bound_scale`` recommendation that mirrors flextool's
 # ``recommend_user_bound_scale_from_lp``.
 # ---------------------------------------------------------------------------
+
+
+class _StreamGuardPools:
+    """Scaling-check pools a streaming solve builds for ``pre_run_check``:
+    the continuous-column bounds and the row bounds HiGHS receives, each
+    paired with its model-unit magnitude (column bound × inverse column
+    factor; the row bound before the row factor), with the residue floor and
+    the infinite bound of the effective options.  O(rows + cols) vectorised,
+    no extra walk."""
+
+    def __init__(self, opts: Mapping[str, Any] | None) -> None:
+        from .autoscale._coef_walk import FlooredMinMax
+        from .autoscale._config import RESIDUE_FLOOR_FACTOR
+        from .autoscale._precedence import (
+            feasibility_tolerances_from_options,
+            infinite_bound_from_options,
+        )
+
+        tol_p, _tol_d = feasibility_tolerances_from_options(opts)
+        self.floor = RESIDUE_FLOOR_FACTOR * tol_p
+        self.infinite = infinite_bound_from_options(opts)
+        self.cols = FlooredMinMax()
+        self.rows = FlooredMinMax()
+
+    def _fold(self, out, post: np.ndarray, model: np.ndarray) -> None:
+        from .autoscale._coef_walk import fold_pools
+
+        fold_pools(
+            out,
+            np.abs(post),
+            np.abs(model),
+            None,
+            None,
+            floor=self.floor,
+            infinite=self.infinite,
+            integer_cols=None,
+        )
+
+    def fold_columns(
+        self,
+        col_lb: np.ndarray,
+        col_ub: np.ndarray,
+        col_int: np.ndarray,
+        l2_cf: np.ndarray | None,
+    ) -> None:
+        cont = col_int == 0
+        factor = None if l2_cf is None else np.abs(l2_cf)
+        for b in (col_lb, col_ub):
+            post = b[cont]
+            model = post if factor is None else post * factor[cont]
+            self._fold(self.cols, post, model)
+
+    def fold_rows(self, post: np.ndarray, model: np.ndarray) -> None:
+        self._fold(self.rows, post, model)
+
+    def fields(self) -> dict[str, Any]:
+        def _pair(r) -> tuple[float, float] | None:
+            m = r.meaningful
+            if m.lo is None or m.hi is None:
+                return None
+            return (m.lo.post, m.hi.post)
+
+        largest = 0.0
+        for r in (self.cols, self.rows):
+            if r.residue.hi is not None:
+                largest = max(largest, r.residue.hi.model)
+        return {
+            "col_bound_meaningful": _pair(self.cols),
+            "row_bound_meaningful": _pair(self.rows),
+            "bound_rhs_residue": (self.cols.residue_count + self.rows.residue_count, largest),
+            "bound_rhs_beyond_infinite": self.cols.beyond_infinite + self.rows.beyond_infinite,
+            "residue_floor": self.floor,
+            "infinite_bound": self.infinite,
+        }
 
 
 def _running_finite_nonzero_min_max(
@@ -4517,6 +4591,7 @@ class Problem:
         save_memory: bool = False,
         tmp_dir: str | os.PathLike | None = None,
         highs_names: str = "always",
+        pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None] | None = None,
     ) -> Solution:
         """Solve the LP and return a :class:`Solution`.
 
@@ -4597,8 +4672,29 @@ class Problem:
             :meth:`Solution.pass_names_to_highs` passes them later.  A
             ``save_memory`` solve always passes them: its MPS round trip
             through HiGHS carries the names.
+        pre_run_check
+            Called once, right before ``HiGHS.run()``, as
+            ``pre_run_check(ranges, highs)``: ``ranges`` is the
+            ``streamed_lp_ranges`` dict of the LP HiGHS holds, with the
+            scaling-check keys added (see :attr:`Solution.streamed_lp_ranges`:
+            ``col_bound_meaningful`` / ``row_bound_meaningful``, ``(b_lo*,
+            b_hi)`` over the continuous-column bounds and the row bounds below
+            ``infinite_bound``, the small end leaving out entries whose model-
+            unit magnitude is below ``residue_floor`` = 10 × the primal
+            feasibility tolerance in the effective options;
+            ``bound_rhs_residue`` ``(count, largest model-unit magnitude)``;
+            ``bound_rhs_beyond_infinite``; ``residue_floor``;
+            ``infinite_bound``); ``highs`` is the live handle.  It may set
+            options on ``highs`` (e.g. ``user_bound_scale``), return a mapping
+            of HiGHS options to set, or raise — then no solve runs and the
+            exception propagates.  Honoured by the streaming path only
+            (``ValueError`` with ``streaming=False``); not called by
+            :meth:`build_only` (the caller runs the solve) nor by
+            :class:`WarmProblem` solves.
         """
         _check_highs_names(highs_names)
+        if pre_run_check is not None and not streaming:
+            raise ValueError("pre_run_check is honoured by the streaming path only")
         # Guard against re-entry on a Problem whose LP source has
         # already been dropped — see ``save_memory`` above.  We can
         # neither rebuild the matrix from ``self._cstrs`` (cleared) nor
@@ -4625,6 +4721,7 @@ class Problem:
                 save_memory=save_memory,
                 tmp_dir=tmp_dir,
                 highs_names=highs_names,
+                pre_run_check=pre_run_check,
             )
 
         if save_memory:
@@ -6150,6 +6247,7 @@ class Problem:
         _build_only: bool = False,
         tmp_dir: str | os.PathLike | None = None,
         highs_names: str = "always",
+        pre_run_check: Callable[[dict, highspy.Highs], Mapping[str, Any] | None] | None = None,
     ) -> Solution | None:
         _sp_emit, _sp_on = _make_solve_profile_emitter()
         # The save_memory round trip writes the MPS through HiGHS and reads
@@ -6400,6 +6498,14 @@ class Problem:
         _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(col_lb_h, math.inf, 0.0)
         _r_cb_lo, _r_cb_hi = _running_finite_nonzero_min_max(col_ub_h, _r_cb_lo, _r_cb_hi)
 
+        # Scaling-check pools for ``pre_run_check`` (built only when one is
+        # given): continuous-column bounds and row bounds, each reported
+        # value paired with its model-unit magnitude.
+        _guard = None
+        if pre_run_check is not None:
+            _guard = _StreamGuardPools(opts)
+            _guard.fold_columns(col_lb, col_ub, col_int, self._layer2_col_factor)
+
         # HiGHS has its own internal copies of the column bound / cost
         # arrays after addCols; we don't reference these locals again.
         # Releasing them now (~6·n_cols·8 bytes = ~864 MB at N=3000
@@ -6551,6 +6657,7 @@ class Problem:
             # the 0-based absolute constraint row id; row_factor is
             # 0-indexed over constraints (HiGHS row index space starts
             # at 0 here — no cost row in the constraint space).
+            _rhs_model = rhs_vec if _guard is not None else None
             if self._layer2_row_factor is not None and row_count:
                 rhs_vec = rhs_vec * self._layer2_row_factor[base_row : base_row + row_count]
 
@@ -6577,6 +6684,12 @@ class Problem:
                 _rb_uns = None if _srf is None else 1.0 / _srf[base_row : base_row + row_count]
                 row_lb = _floor_small_coefs(row_lb, _coef_zero_thr, _rb_uns)
                 row_ub = _floor_small_coefs(row_ub, _coef_zero_thr, _rb_uns)
+
+            if _guard is not None:
+                # One value per row (the side the sense bounds), as HiGHS
+                # receives it after the small-coefficient cutoff.
+                _guard.fold_rows(row_ub if sense == "<=" else row_lb, _rhs_model)
+                del _rhs_model
 
             if _sp_on:
                 _sp_emit(
@@ -7001,12 +7114,15 @@ class Problem:
                 return None
             return (lo, hi)
 
-        streamed_lp_ranges: dict[str, tuple[float, float] | None] = {
+        streamed_lp_ranges: dict[str, Any] = {
             "matrix": _pack(_r_matrix_lo, _r_matrix_hi),
             "cost": _pack(_r_cost_lo, _r_cost_hi),
             "col_bound": _pack(_r_cb_lo, _r_cb_hi),
             "row_bound": _pack(_r_row_lo, _r_row_hi),
         }
+        if _guard is not None:
+            streamed_lp_ranges.update(_guard.fields())
+            del _guard
 
         # Row names — pass after all rows are added.  HiGHS row indices
         # are monotonic across addRows calls, so the global ``i`` here
@@ -7390,6 +7506,21 @@ class Problem:
             if _sp_on:
                 _sp_emit("names_passed_for_options", n_cols=n_cols, n_rows=n_rows)
 
+        if pre_run_check is not None:
+            _set = pre_run_check(dict(streamed_lp_ranges), h)
+            if _set:
+                import warnings
+
+                _ok = getattr(highspy.HighsStatus, "kOk", None)
+                for _k, _v in dict(_set).items():
+                    _st = h.setOptionValue(_k, _v)
+                    if _ok is not None and _st != _ok:
+                        warnings.warn(
+                            f"HiGHS rejected option {_k}={_v!r} from pre_run_check "
+                            f"(status={_st!r})",
+                            stacklevel=2,
+                        )
+
         h.run()
 
         if _sp_on:
@@ -7700,7 +7831,11 @@ class Solution:
         # :meth:`Problem._solve_streaming` — dict with keys ``matrix`` /
         # ``cost`` / ``col_bound`` / ``row_bound``, each
         # ``(abs_min, abs_max) | None``.  ``None`` when the solution was
-        # synthesised outside a streaming solve.
+        # synthesised outside a streaming solve.  A solve given a
+        # ``pre_run_check`` adds its scaling-check keys
+        # (``col_bound_meaningful``, ``row_bound_meaningful``,
+        # ``bound_rhs_residue``, ``bound_rhs_beyond_infinite``,
+        # ``residue_floor``, ``infinite_bound``; see :meth:`Problem.solve`).
         self.streamed_lp_ranges = streamed_lp_ranges
         # Whether ``highs`` holds the LP names (``highs_names`` on the
         # solve).  ``False`` only when a solve kept them out of HiGHS; then
