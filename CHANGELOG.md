@@ -9,8 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.15.0] — 2026-11-15
+
+### Behaviour changes for existing users
+
+- **Layer 3's escape tier is replaced by a tolerance window.**  When the
+  largest bound / RHS is far above HiGHS' comfort zone (`>= 1e9`) and
+  pulling it in would crush the small end, `recommend_scaling` used to
+  centre the range geometrically (tag `escape`).  With a tolerance of
+  `1e-7` that could leave the smallest limit below the tolerance itself,
+  so HiGHS did not enforce it.  It now keeps the large-end clamp (tag
+  `smallest-side`) and clips every automatic `user_bound_scale` into the
+  window that keeps the bound / RHS pool inside `[10·tol, 1e18·tol]`,
+  with the smallest meaningful limit at `100·tol` or more whenever the
+  largest still fits (tag suffix `+raised` / `+lowered`; `unscalable` when
+  no exponent fits).  **`N` in that tier now depends on the primal
+  feasibility tolerance**: e.g. a pool `1e-3 … 1e12` gets `N = -6` at
+  `1e-7` (it got `-12`); a pool `2.1e-5 … 1.4e9` gets `-1` at `1e-7` and
+  `-4` at `1e-8`.  Other tiers keep their exponent unless it leaves the
+  window (a smallest limit below `100·tol` at that exponent).  Manual and
+  external exponents are unchanged.
+
 ### Added
 
+- **Scaling-check readout.**  `RangeReport` gains optional fields (not
+  part of equality; `None` from `ranges_from_streamed`):
+  `bound_rhs_meaningful` (`(b_lo*, b_hi)` over continuous-column bounds
+  and row bounds below HiGHS' `infinite_bound`, residue below
+  `ScalingConfig.residue_floor` — default 10 × the primal tolerance, in
+  model units — left out of the small end), `bound_rhs_residue`,
+  `bound_rhs_beyond_infinite`, the integer-column `integer_bound` /
+  `integer_matrix` / `integer_cost` and continuous `matrix_continuous` /
+  `cost_continuous` pools, `residue_floor`, `infinite_bound`, and
+  `extremes` (the family at each end, as `Extreme`).  Filled by the
+  pre-solve walk, the passModel rebuild and `ranges_from_arrays` (new
+  optional arguments); `FlooredMinMaxAbsReducer` is the walk-side fold.
+- **`assess_scaling(ranges, plan, *, primal_tol, dual_tol, ...)`** →
+  `ScalingVerdict`: bound / RHS outside the tolerance window is an error,
+  a spread above `warn_decades` (default 13) a warning; costs warn only;
+  matrix terms HiGHS would drop warn, ones it would refuse are an error;
+  integer columns judged as HiGHS scales them; `apply_user_scale=False`
+  judges at `N = 0`; `ranges_pre` marks findings caused by a pre-scaling
+  rewrite.  Policy (raise or warn) stays with the caller.
+  `bound_scale_window` gives the window of exponents for a pool;
+  `Layer3Plan` gains `bound_source`, `bound_tag`, `bound_window` and
+  `primal_feasibility_tolerance`; `recommend_scaling` takes
+  `primal_feasibility_tolerance=` (default: the Problem's, as HiGHS
+  applies it with `kkt_tolerance`).
+- **`locate_extremes(problem, family, group, side, *, k=5)`** names the
+  `k` smallest / largest entries of one family (dimension values decoded,
+  count within a factor) with the bounded walk (`TopKAbsReducer`).
+- **`Problem.solve(pre_run_check=fn)`** calls `fn(ranges, highs)` right
+  before `HiGHS.run()` with the streamed ranges plus the floored pool of
+  the LP actually built (`col_bound_meaningful`, `row_bound_meaningful`,
+  …); it may set options (e.g. `user_bound_scale`), return options to set,
+  or raise so that no solve runs.  Streaming path only.
+- `resolve_feasibility_tolerances`, `resolve_infinite_bound` (and their
+  `*_from_options` forms) read those options as HiGHS applies them.
 - **`SolveDiagnostics` reports the infeasibility counters in the space
   HiGHS solved.**  HiGHS measures its info counters after it has removed
   `user_bound_scale` / `user_objective_scale`, without rescaling its
