@@ -104,6 +104,7 @@ __all__ = [
     "ArrayClassifier",
     "CoefBatch",
     "CoefWalkRecipe",
+    "CountWithinReducer",
     "FlooredMinMax",
     "FlooredMinMaxAbsReducer",
     "Log2HistogramReducer",
@@ -111,6 +112,7 @@ __all__ = [
     "PoolEnd",
     "PoolRange",
     "Reducer",
+    "TopKAbsReducer",
     "bounded_coefficient_walk",
     "fold_pools",
 ]
@@ -746,6 +748,198 @@ def fold_pools(
             -1 if rid is None else int(rid[k]),
             -1 if col_id is None else int(col_id[k]),
         )
+
+
+class TopKAbsReducer(Reducer):
+    """The ``k`` smallest (``side="min"``) or largest (``side="max"``)
+    entries of a stream, with their local row id, column id, reported
+    magnitude ``|scaled coef|`` and model-unit magnitude ``|coef|``, plus
+    how many entries lie within ``factor`` of the best one.
+
+    Entries taken: finite non-zero, reported magnitude below ``infinite``;
+    on the ``min`` side also model-unit magnitude at least ``floor``.
+    ``columns`` picks ``"all"``, ``"continuous"`` or ``"integer"`` columns
+    by ``integer_cols`` (a boolean array indexed by ``col_id``; ``None`` =
+    all continuous).
+
+    Exact for any batching: the kept candidates and the within-factor
+    buffer are merged per batch, and an entry dropped from the buffer was
+    already outside ``factor`` of a best value that can only get better.
+    The buffer holds only the values within ``factor`` of the current best;
+    once it would exceed ``max_near`` entries it stops growing and
+    :attr:`near_overflow` is set — the caller then counts with a second pass
+    (:class:`CountWithinReducer` against the final best).
+
+    ``finalize`` returns ``(entries, count_within)``: ``entries`` is a list
+    of dicts (``post``, ``model``, ``rid``, ``col_id``) best first;
+    ``count_within`` is ``None`` after an overflow.
+    """
+
+    def __init__(
+        self,
+        scale: tuple[np.ndarray | None, int, np.ndarray | None],
+        k: int,
+        side: str,
+        floor: float = 0.0,
+        *,
+        infinite: float = math.inf,
+        integer_cols: np.ndarray | None = None,
+        columns: str = "all",
+        factor: float = 10.0,
+        max_near: int = 1_000_000,
+    ) -> None:
+        if side not in ("min", "max"):
+            raise ValueError(f"side must be 'min' or 'max'; got {side!r}")
+        if columns not in ("all", "continuous", "integer"):
+            raise ValueError(f"columns must be all/continuous/integer; got {columns!r}")
+        if k < 1:
+            raise ValueError(f"k must be positive; got {k}")
+        self._scale = scale
+        self.k = int(k)
+        self.side = side
+        self.floor = float(floor)
+        self.infinite = float(infinite)
+        self.integer_cols = integer_cols
+        self.columns = columns
+        self.factor = float(factor)
+        self.max_near = int(max_near)
+        self.init()
+
+    def init(self) -> None:
+        self._post = np.empty(0, dtype=np.float64)
+        self._model = np.empty(0, dtype=np.float64)
+        self._rid = np.empty(0, dtype=np.int64)
+        self._cid = np.empty(0, dtype=np.int64)
+        self._near = np.empty(0, dtype=np.float64)
+        self.near_overflow = False
+
+    def update(self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray) -> None:
+        if coef_arr.size == 0:
+            return
+        post = _scaled_abs(rid_arr, col_id_arr, coef_arr, self._scale)
+        model = np.abs(coef_arr.astype(np.float64, copy=False))
+        self.update_magnitudes(post, model, rid_arr, col_id_arr)
+
+    def _within(self, values: np.ndarray, best: float) -> np.ndarray:
+        if self.side == "min":
+            return values <= best * self.factor
+        return values >= best / self.factor
+
+    def update_magnitudes(
+        self,
+        post: np.ndarray,
+        model: np.ndarray,
+        rid_arr: np.ndarray | None,
+        col_id_arr: np.ndarray | None,
+    ) -> None:
+        """Fold already-computed ``|reported|`` / ``|model|`` magnitudes
+        (used for bounds, which are not ``coef × side vector``)."""
+        n = post.size
+        if n == 0:
+            return
+        rid_arr = np.full(n, -1, dtype=np.int64) if rid_arr is None else rid_arr
+        col_id_arr = np.full(n, -1, dtype=np.int64) if col_id_arr is None else col_id_arr
+        mask = np.isfinite(post) & (post != 0) & (post < self.infinite)
+        if self.side == "min" and self.floor > 0.0:
+            mask &= model >= self.floor
+        if self.columns != "all":
+            if self.integer_cols is None:
+                on_int = np.zeros(n, dtype=bool)
+            else:
+                on_int = np.zeros(n, dtype=bool)
+                valid = col_id_arr >= 0
+                on_int[valid] = self.integer_cols[col_id_arr[valid]]
+            mask &= on_int if self.columns == "integer" else ~on_int
+        if not mask.any():
+            return
+        p = post[mask]
+        m = model[mask]
+        r = rid_arr[mask].astype(np.int64, copy=False)
+        c = col_id_arr[mask].astype(np.int64, copy=False)
+        # Keep this batch's k best, then merge with the running k best.
+        key = p if self.side == "min" else -p
+        if p.size > self.k:
+            sel = np.argpartition(key, self.k - 1)[: self.k]
+            p_k, m_k, r_k, c_k = p[sel], m[sel], r[sel], c[sel]
+        else:
+            p_k, m_k, r_k, c_k = p, m, r, c
+        allp = np.concatenate([self._post, p_k])
+        allm = np.concatenate([self._model, m_k])
+        allr = np.concatenate([self._rid, r_k])
+        allc = np.concatenate([self._cid, c_k])
+        # Stable order: by magnitude, then by row / column id (deterministic
+        # whatever the batching).
+        order = np.lexsort((allc, allr, allp if self.side == "min" else -allp))[: self.k]
+        self._post, self._model = allp[order], allm[order]
+        self._rid, self._cid = allr[order], allc[order]
+        best = float(self._post[0])
+        if not self.near_overflow:
+            near = np.concatenate([self._near, p[self._within(p, best)]])
+            near = near[self._within(near, best)]
+            if near.size > self.max_near:
+                self.near_overflow = True
+                self._near = np.empty(0, dtype=np.float64)
+            else:
+                self._near = near
+
+    @property
+    def best(self) -> float | None:
+        return None if self._post.size == 0 else float(self._post[0])
+
+    def finalize(self) -> tuple[list[dict[str, Any]], int | None]:
+        entries = [
+            {
+                "post": float(self._post[i]),
+                "model": float(self._model[i]),
+                "rid": int(self._rid[i]),
+                "col_id": int(self._cid[i]),
+            }
+            for i in range(self._post.size)
+        ]
+        count = None if self.near_overflow else int(self._near.size)
+        return entries, count
+
+
+class CountWithinReducer(Reducer):
+    """Counts the entries within ``factor`` of ``best`` that a
+    :class:`TopKAbsReducer` with the same selection would take (the second
+    pass after its within-factor buffer overflowed)."""
+
+    def __init__(self, topk: TopKAbsReducer, best: float) -> None:
+        self._t = topk
+        self._best = float(best)
+        self._count = 0
+
+    def init(self) -> None:
+        self._count = 0
+
+    def update(self, rid_arr: np.ndarray, col_id_arr: np.ndarray, coef_arr: np.ndarray) -> None:
+        if coef_arr.size == 0:
+            return
+        post = _scaled_abs(rid_arr, col_id_arr, coef_arr, self._t._scale)
+        model = np.abs(coef_arr.astype(np.float64, copy=False))
+        self.update_magnitudes(post, model, rid_arr, col_id_arr)
+
+    def update_magnitudes(self, post, model, rid_arr, col_id_arr) -> None:
+        t = self._t
+        n = post.size
+        if n == 0:
+            return
+        col_id_arr = np.full(n, -1, dtype=np.int64) if col_id_arr is None else col_id_arr
+        mask = np.isfinite(post) & (post != 0) & (post < t.infinite)
+        if t.side == "min" and t.floor > 0.0:
+            mask &= model >= t.floor
+        if t.columns != "all":
+            on_int = np.zeros(n, dtype=bool)
+            if t.integer_cols is not None:
+                valid = col_id_arr >= 0
+                on_int[valid] = t.integer_cols[col_id_arr[valid]]
+            mask &= on_int if t.columns == "integer" else ~on_int
+        mask &= t._within(post, self._best)
+        self._count += int(np.count_nonzero(mask))
+
+    def finalize(self) -> int:
+        return self._count
 
 
 # Per-bucket accumulator tuple: (sum_log2, count, abs_min, abs_max).

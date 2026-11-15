@@ -14,7 +14,8 @@ Public surface:
 * :func:`assess_scaling` — judge a report under a plan against the
   solver's tolerance window (a :class:`ScalingVerdict`; the caller decides
   what a warning or an error means); :func:`bound_scale_window` gives the
-  window of ``user_bound_scale`` exponents for a bound / RHS pool.
+  window of ``user_bound_scale`` exponents for a bound / RHS pool;
+  :func:`locate_extremes` names the entries at one end of one family.
 * :class:`ScalingMode` / :class:`ScalingConfig` — library-level policy
   primitives.  Callers decide what each mode does in practice.
 
@@ -26,7 +27,7 @@ The legacy ``polar_high.engine._recommend_user_bound_scale`` and the
 been retired in favour of this package.
 """
 
-from ._coef_walk import FlooredMinMax, FlooredMinMaxAbsReducer
+from ._coef_walk import FlooredMinMax, FlooredMinMaxAbsReducer, TopKAbsReducer
 from ._config import (
     RESIDUE_FLOOR_FACTOR,
     USER_SCALE_CLAMP_HI,
@@ -48,6 +49,7 @@ from ._layer3 import (
     bound_scale_window,
     recommend_scaling,
 )
+from ._locate import locate_extremes
 from ._precedence import (
     feasibility_tolerances_from_options,
     get_explicit_option,
@@ -78,6 +80,7 @@ __all__ = [
     "ScalingConfig",
     "ScalingMode",
     "ScalingVerdict",
+    "TopKAbsReducer",
     "USER_SCALE_CLAMP_HI",
     "USER_SCALE_CLAMP_LO",
     "apply_scaling",
@@ -88,6 +91,7 @@ __all__ = [
     "get_explicit_option",
     "has_explicit_option",
     "infinite_bound_from_options",
+    "locate_extremes",
     "mode_enables_layer1",
     "mode_enables_layer3",
     "ranges_from_arrays",
