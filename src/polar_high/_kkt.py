@@ -77,8 +77,21 @@ def tolerance_violation(
     Without one it takes the relative infeasibilities and residuals, and the
     P-D error when it exceeds its tolerance.  HiGHS keeps an ``"Optimal"``
     status for 1 < X <= 100 ("no more than X") and turns it ``"Unknown"``
-    above 100.  The rule is the same in HiGHS 1.16."""
+    above 100.  The rule is the same in HiGHS 1.16.
+
+    Without a basis HiGHS' rule needs the residuals: a *values* whose
+    residuals were not computed (a residual count ``-1``, as in
+    ``getInfo()`` after a user-scaled solve, which HiGHS recomputes
+    without them) raises :class:`ValueError`; use :func:`kkt_report` there."""
     t, pd = tolerances, float(_get(values, "primal_dual_objective_error"))
+    if not basis_valid and -1 in (
+        _get(values, "num_primal_residual_errors"),
+        _get(values, "num_dual_residual_errors"),
+    ):
+        raise ValueError(
+            "tolerance_violation: no basis and the residuals were not computed "
+            "(count -1); HiGHS' X needs them: use kkt_report(h)"
+        )
     pairs = (("primal", t.primal_feasibility), ("dual", t.dual_feasibility))
     if basis_valid:
         terms = [
@@ -103,7 +116,7 @@ def tolerance_violation(
     return max((v for _n, v in terms), default=0.0), tuple(terms)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class KktReport:
     """HiGHS' KKT check of a solution, in the space HiGHS solved.
 
@@ -112,7 +125,7 @@ class KktReport:
     ``max_tolerance_relative_violation`` is HiGHS' X, ``terms`` what enters
     it (see :func:`tolerance_violation`).  ``bound_norm`` / ``cost_norm`` are
     the norms of the relative measures (``highs_norm_bounds`` /
-    ``highs_norm_costs``)."""
+    ``highs_norm_costs``).  Keyword-only: fields may be added."""
 
     num_primal_infeasibilities: int
     max_primal_infeasibility: float
@@ -170,15 +183,55 @@ def _matrix(lp) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return outer, index, value
 
 
+def _sums(key: np.ndarray, terms: np.ndarray, size: int) -> np.ndarray:
+    """``sum(terms[key == i])`` for each ``i < size``, rounded once from an
+    almost exact sum, as HiGHS' ``HighsCDouble`` sums (``productQuad``).
+
+    Error-free split (Rump, Ogita and Oishi, "Accurate floating-point
+    summation", 2008): with ``sigma`` a power of two >= 2 * sum |terms| of
+    the key, ``hi = (sigma + t) - sigma`` are multiples of eps * sigma, so
+    their float64 sum is exact; ``lo = t - hi`` is exact too, and its sum
+    errs by at most ~4 k**2 eps**2 sum |terms| (k terms of the key)."""
+    sigma = np.ldexp(1.0, np.frexp(2.0 * np.bincount(key, np.abs(terms), size))[1])[key]
+    hi = (sigma + terms) - sigma
+    return np.bincount(key, hi, size) + np.bincount(key, terms - hi, size)
+
+
+# HiGHS judges (and prints X for) these statuses only; X turns a kUnknown
+# with X <= 100 into kOptimal (``lpKktCheck``).
+_JUDGED = (highspy.HighsModelStatus.kOptimal, highspy.HighsModelStatus.kUnknown)
+
+
 def _unsupported(h) -> tuple[str | None, Any]:
-    if (h.versionMajor(), h.versionMinor()) != (1, 15):
-        return f"HiGHS {h.version()}: definitions not implemented (HiGHS 1.15 only)", None
+    if (h.versionMajor(), h.versionMinor()) != (1, 15) or h.versionPatch() < 1:
+        return f"HiGHS {h.version()}: definitions implemented for 1.15.x, x >= 1", None
     sol = h.getSolution()
     if not (sol.value_valid and sol.dual_valid):
         return "no valid primal and dual solution", None
+    status = h.getModelStatus()
+    if status not in _JUDGED:
+        return f"model status {h.modelStatusToString(status)}: not judged by HiGHS", None
     if h.getHessianNumNz() > 0:
         return "the model has a Hessian (LP only)", None
     return None, sol
+
+
+def _integral(lp) -> bool:
+    return any(v != highspy.HighsVarType.kContinuous for v in lp.integrality_)
+
+
+def _bounds_and_costs(h, n: int, m: int):
+    """Costs, column and row bounds, objective sense and offset off *h*
+    without the ``getLp()`` copy (which holds the matrix)."""
+    _st, _n, cost, col_lo, col_up, _nz = h.getCols(n, np.arange(n, dtype=np.int32))
+    _st, _m, row_lo, row_up, _nz = h.getRows(m, np.arange(m, dtype=np.int32))
+    return (
+        cost,
+        (col_lo, row_lo),
+        (col_up, row_up),
+        h.getObjectiveSense()[1],
+        h.getObjectiveOffset()[1],
+    )
 
 
 def kkt_report(h) -> KktReport | None:
@@ -187,10 +240,18 @@ def kkt_report(h) -> KktReport | None:
     are set, otherwise as is).  HiGHS 1.15 definitions; LP only.
 
     Reproduces ``getKktFailures`` (``HighsSolution.cpp:73-560``) and the X of
-    ``lpKktCheck``.  With a valid basis, residuals are not computed (as in
-    HiGHS) and the matrix is not read.  ``None`` (reason at DEBUG) when HiGHS
-    is not 1.15.x, there is no valid primal and dual solution, a column is
+    ``lpKktCheck``.  ``None`` (reason at DEBUG) when HiGHS is not 1.15.x with
+    x >= 1 (tested on 1.15.1), there is no valid primal and dual solution,
+    the model status is not ``kOptimal`` or ``kUnknown`` (the statuses HiGHS
+    judges; e.g. ``kUnbounded`` has valid vectors but no check), a column is
     not continuous, or the model has a Hessian.
+
+    Memory: with a valid basis the residuals are not computed (as in HiGHS)
+    and the matrix is not read: costs and bounds come from ``getCols`` /
+    ``getRows``, O(rows + cols).  Without one, ``getLp()`` copies the LP
+    (about 12 bytes per nonzero, plus names), and reading it and computing
+    the residuals peaks at about 90 bytes per nonzero of Python / numpy
+    memory (measured; freed on return).
 
     Rules, over the columns then the rows (``getVariableKktFailures``,
     ``:567-661``; ``infeasibility()``, ``HighsUtils.h:219-250``):
@@ -208,21 +269,30 @@ def kkt_report(h) -> KktReport | None:
       (1 + measure), measure ``cost_norm``, raised to |cost| for a column
       with ``cost != 0`` and ``dual**2 >= dtol`` (``:366-378``).
     - Residuals (no basis): ``|Ax - r|`` / (1 + ``bound_norm``) and
-      ``|A'y - c + d|`` / (1 + ``cost_norm``) (``:388-423``).  HiGHS sums in
-      quad precision, this in float64: an absolute residual below about
-      ``k * eps * sum_j |a_ij x_j|`` (k entries in the row) is rounding noise
-      and can differ from HiGHS'; counts can differ only when a residual
-      tolerance sits at that floor.  X uses the relative residuals, whose
-      floor (~1e-16) is far below the tolerances.
+      ``|(A'y - c) + d|`` / (1 + ``cost_norm``) (``:388-423``).  The float64
+      products are summed to an almost exact sum rounded once, as HiGHS'
+      quad-precision sums (``productQuad``), so the residuals equal HiGHS'
+      up to the last bit of ``Ax`` / ``A'y``, also on rows whose activity
+      is far above ``bound_norm`` (free rows, inactive rows with large
+      coefficients), where plain float64 sums err by up to
+      ``k * eps * sum_j |a_ij x_j|`` and can move X across 1 or 100.
     - P-D objective error = ``|p - d| / (1 + |p| + |d|)``, ``p = offset +
       c'x``, ``d = offset + sum bound * dual`` over columns and rows: the
       lower bound below the midpoint, else the upper, 1 for a free entry
-      (``:469-494``, ``:1345-1389``).
+      (``:469-494``, ``:1345-1389``).  The dot products are float64 in a
+      different order than HiGHS': the two differ by rounding, about
+      ``eps * sum |c_j x_j| / (1 + |p| + |d|)``, which is far below the
+      optimality tolerance unless the objective cancels heavily.
     """
     reason, sol = _unsupported(h)
-    lp = h.getLp() if reason is None else None
-    if lp is not None and set(lp.integrality_) - {highspy.HighsVarType.kContinuous}:
-        reason = "a column is not continuous (LP only)"
+    basis_valid = reason is None and bool(h.getBasis().valid)
+    lp = None
+    if reason is None and (not basis_valid or _highs_int_option(h, "solve_relaxation", 0)):
+        # Valid duals with integrality need solve_relaxation (a MIP solve
+        # has no duals; changing integrality resets the status).
+        lp = h.getLp()
+        if _integral(lp):
+            reason = "a column is not continuous (LP only)"
     if reason is not None:
         _logger.debug("kkt_report: None: %s", reason)
         return None
@@ -231,11 +301,16 @@ def kkt_report(h) -> KktReport | None:
     bscale = _highs_int_option(h, "user_bound_scale", 0)
     oscale = _highs_int_option(h, "user_objective_scale", 0)
     fb, fo = 2.0**bscale, 2.0**oscale
-    n = int(lp.num_col_)
-    sense = -1.0 if lp.sense_ == highspy.ObjSense.kMaximize else 1.0
-    offset = float(lp.offset_)
-    cost = _vec(lp.col_cost_) * fo
-    lo, up = _cat(lp.col_lower_, lp.row_lower_) * fb, _cat(lp.col_upper_, lp.row_upper_) * fb
+    n, m = int(h.getNumCol()), int(h.getNumRow())
+    if lp is not None:
+        cost, obj_sense, offset = lp.col_cost_, lp.sense_, lp.offset_
+        lower, upper = (lp.col_lower_, lp.row_lower_), (lp.col_upper_, lp.row_upper_)
+    else:
+        cost, lower, upper, obj_sense, offset = _bounds_and_costs(h, n, m)
+    sense = -1.0 if obj_sense == highspy.ObjSense.kMaximize else 1.0
+    offset = float(offset)
+    cost = _vec(cost) * fo
+    lo, up = _cat(*lower) * fb, _cat(*upper) * fb
     val, dual = _cat(sol.col_value, sol.row_value) * fb, _cat(sol.col_dual, sol.row_dual) * fo
     col_dual = dual[:n]
     with np.errstate(invalid="ignore", over="ignore"):
@@ -271,17 +346,16 @@ def kkt_report(h) -> KktReport | None:
         ("relative_dual_infeasibilit", rel_dinf, dtol),
     ):
         values[f"num_{name}ies"], values[f"max_{name}y"] = _num_max(measure, t)
-    basis_valid = bool(h.getBasis().valid)
     if basis_valid:
         for name in ("primal_residual_error", "dual_residual_error"):
             for rel in ("", "relative_"):
                 values[f"num_{rel}{name}s"], values[f"max_{rel}{name}"] = -1, np.inf
     else:
         col, row, a = _matrix(lp)
-        ax = np.bincount(row, weights=a * val[:n][col], minlength=val.size - n)
-        pres = np.abs(ax - val[n:])
-        aty = np.bincount(col, weights=a * dual[n:][row], minlength=n)
-        dres = np.abs(aty - cost + col_dual)
+        del lp
+        pres = np.abs(_sums(row, a * val[:n][col], m) - val[n:])
+        # double(A'y) - c, then + d, in float64 (HighsSolution.cpp:262-266, :409).
+        dres = np.abs((_sums(col, a * dual[n:][row], n) - cost) + col_dual)
         for name, res, norm, t in (
             ("primal_residual_error", pres, bound_norm, tol.primal_residual),
             ("dual_residual_error", dres, cost_norm, tol.dual_residual),

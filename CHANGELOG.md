@@ -21,16 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `KktReport` with the 16 HighsInfo KKT fields (same names and
   conventions), `primal_dual_objective_error`,
   `max_tolerance_relative_violation`, the terms that enter it,
-  `basis_valid`, the effective tolerances and the scales.  With a valid
-  basis it does not read the matrix.  HiGHS 1.15 definitions, LP only:
-  `None` on other HiGHS versions (1.16 changed the cost norm), without a
-  valid primal and dual solution, for a MIP or a QP.
+  `basis_valid`, the effective tolerances and the scales (keyword-only
+  fields).  Without a basis the residuals sum the float64 products to an
+  almost exact sum rounded once, as HiGHS' quad-precision sums do, so they
+  equal HiGHS' also on rows whose activity is far above the bound norm
+  (plain float64 sums can be off by more than the residual tolerance
+  there and move X across 1 or 100).  With a valid basis it reads costs
+  and bounds only (`getCols` / `getRows`, no `getLp()` copy); without one
+  `getLp()` copies the LP (about 12 bytes per nonzero) and the residuals
+  peak at about 90 bytes per nonzero while computed.  HiGHS 1.15 definitions
+  (1.15.x with x >= 1, tested on 1.15.1), LP only: `None` on other HiGHS
+  versions (1.16 changed the cost norm), without a valid primal and dual
+  solution, for a model status other than Optimal / Unknown (HiGHS judges
+  only those; e.g. Unbounded has valid vectors), for a MIP or a QP.
 - **`tolerance_violation(values, basis_valid=, tolerances=)`**: HiGHS'
   rule from the measures to X, for a `HighsInfo`, a `KktReport` or a
-  mapping (unchanged in HiGHS 1.16); **`kkt_tolerances(h)`**: the five
+  mapping (unchanged in HiGHS 1.16).  Without a basis it raises
+  `ValueError` when the residuals were not computed (count -1, as in
+  `getInfo()` after a user-scaled solve).  **`kkt_tolerances(h)`**: the five
   tolerances of the check after the `kkt_tolerance` override
   (`KktTolerances`).
-- CI job `test-highs-115` runs the HiGHS-oracle tests on `highspy==1.15.1`.
+- CI job `test-highs-115` runs the whole suite on `highspy==1.15.1` and
+  fails (instead of skipping the HiGHS-oracle tests) on another version.
 
 ## [3.15.0] — 2026-11-15
 
