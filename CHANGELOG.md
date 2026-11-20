@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.16.0] — 2026-11-20
+
+### Added
+
+- **`kkt_report(h)`**: HiGHS' KKT measures and its tolerance-violation
+  factor X (the "no more than X" of HiGHS' log) for the solution on a
+  handle, in the space HiGHS solved: user scaling
+  (`user_bound_scale` / `user_objective_scale`) applied, where `getInfo()`
+  holds the unscaled numbers and no residuals.  Returns a frozen
+  `KktReport` with the 16 HighsInfo KKT fields (same names and
+  conventions), `primal_dual_objective_error`,
+  `max_tolerance_relative_violation`, the terms that enter it,
+  `basis_valid`, the effective tolerances and the scales.  With a valid
+  basis it does not read the matrix.  HiGHS 1.15 definitions, LP only:
+  `None` on other HiGHS versions (1.16 changed the cost norm), without a
+  valid primal and dual solution, for a MIP or a QP.
+- **`tolerance_violation(values, basis_valid=, tolerances=)`**: HiGHS'
+  rule from the measures to X, for a `HighsInfo`, a `KktReport` or a
+  mapping (unchanged in HiGHS 1.16); **`kkt_tolerances(h)`**: the five
+  tolerances of the check after the `kkt_tolerance` override
+  (`KktTolerances`).
+- CI job `test-highs-115` runs the HiGHS-oracle tests on `highspy==1.15.1`.
+
 ## [3.15.0] — 2026-11-15
 
 ### Behaviour changes for existing users

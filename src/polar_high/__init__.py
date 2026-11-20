@@ -15,6 +15,13 @@ if "polars" not in _sys.modules:
     _os.environ.setdefault("POLARS_MAX_THREADS", "1")
 
 from polar_high import objective_options
+from polar_high._kkt import (
+    KktReport,
+    KktTolerances,
+    kkt_report,
+    kkt_tolerances,
+    tolerance_violation,
+)
 from polar_high._warm_basis import (
     NamedBasis,
     basis_fingerprint,
@@ -94,6 +101,11 @@ __all__ = [
     "WarmProblem",
     "Solution",
     "SolveDiagnostics",
+    "KktReport",
+    "KktTolerances",
+    "kkt_report",
+    "kkt_tolerances",
+    "tolerance_violation",
     "ObjectiveTransform",
     "objective_options",
     "translate_objective_options",
