@@ -2818,16 +2818,19 @@ def _resolve_var_bound(
     return bound
 
 
-def _mps_col_bound_lines(nm: str, lo: float, hi: float, fmt) -> str:
+def _mps_col_bound_lines(nm: str, lo: float, hi: float, fmt, integer: bool = False) -> str:
     """BOUNDS-section lines for ONE column with bounds ``[lo, hi]``.
 
     The same bound-shape ladder :meth:`Problem.write_mps` applies per
     scalar-bound family, evaluated for a single column (used for
     families with per-element bounds).  Returns ``""`` for the MPS
-    default ``[0, +inf]``.
+    default ``[0, +inf]`` of a continuous column; an *integer* column
+    with ``[0, +inf]`` gets an explicit `` PL`` line, because MPS readers
+    (HiGHS, CPLEX) read an integer column without bounds as binary
+    ``[0, 1]``.
     """
     if math.isfinite(lo) and lo == 0.0 and math.isinf(hi) and hi > 0:
-        return ""
+        return f" PL bnd  {nm}\n" if integer else ""
     if math.isinf(lo) and lo < 0 and math.isinf(hi) and hi > 0:
         return f" FR bnd  {nm}\n"
     if math.isinf(lo) and lo < 0 and math.isfinite(hi):
@@ -6279,11 +6282,16 @@ class Problem:
                     lo_arr = np.broadcast_to(np.asarray(v.col_lower(), dtype=np.float64), (n_v,))
                     hi_arr = np.broadcast_to(np.asarray(v.col_upper(), dtype=np.float64), (n_v,))
                     for cid, lo, hi in zip(ids.tolist(), lo_arr.tolist(), hi_arr.tolist()):
-                        f.write(_mps_col_bound_lines(cn(int(cid)), lo, hi, _fmt))
+                        f.write(_mps_col_bound_lines(cn(int(cid)), lo, hi, _fmt, v.integer))
                     continue
                 lo = float(v.lower)
                 hi = float(v.upper)
                 if math.isfinite(lo) and lo == 0.0 and math.isinf(hi) and hi > 0:
+                    # MPS default [0, +inf] -- except for an integer column, which readers
+                    # (HiGHS, CPLEX) take as binary [0, 1] without a bound line.
+                    if v.integer:
+                        for cid in v.frame["col_id"].to_numpy().tolist():
+                            f.write(f" PL bnd  {cn(int(cid))}\n")
                     continue
                 ids = v.frame["col_id"].to_numpy()
                 if math.isinf(lo) and lo < 0 and math.isinf(hi) and hi > 0:

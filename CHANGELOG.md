@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--changelog-start-->
 
-## [Unreleased]
+## [3.16.1] — 2026-11-22
+
+### Fixed
+
+- **`write_mps`: an integer column with bounds `[0, +inf]` was read back as
+  binary.**  The writer left such a column out of `BOUNDS` (the MPS default
+  for a continuous column), but MPS readers (HiGHS, CPLEX) read an integer
+  column without a bound line as `[0, 1]`.  Every solve that went through
+  an MPS file (the subprocess and commercial-solver paths) could cap such a
+  column at 1 or report a feasible model infeasible.  The column now gets an
+  explicit `PL` line, in the scalar-bound and per-element-bound paths.
 
 ## [3.16.0] — 2026-11-20
 
