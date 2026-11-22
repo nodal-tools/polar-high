@@ -466,3 +466,39 @@ def test_write_mps_param_chain_term_does_not_explode(tmp_path) -> None:
     status, obj, _ = _solve_via_mps(str(mps_path))
     assert status == highspy.HighsModelStatus.kOptimal
     assert abs(obj - direct.obj) < 1e-9, (obj, direct.obj)
+
+
+@pytest.mark.parametrize("elementwise", [False, True])
+def test_integer_var_without_upper_bound_stays_unbounded(tmp_path, elementwise) -> None:
+    """An integer column with bounds ``[0, +inf]`` must not come back as binary.
+
+    MPS readers (HiGHS, CPLEX) read an integer column that has no BOUNDS
+    line as ``[0, 1]``.  With ``z >= 3`` and cost 1 the optimum is z = 3;
+    read back as binary the model is infeasible.  Covers both the scalar
+    bound path and the per-element bound path of the writer.
+    """
+    pb = Problem()
+    idx = pl.DataFrame({"i": [0, 1]})
+    if elementwise:
+        z = pb.add_var("z", dims=("i",), index=idx,
+                       lower=Param(("i",), pl.DataFrame({"i": [0, 1], "value": [0.0, 0.0]})),
+                       upper=Param(("i",), pl.DataFrame({"i": [0, 1], "value": [math.inf, math.inf]})),
+                       integer=True)
+        assert z.has_elementwise_bounds
+    else:
+        z = pb.add_var("z", dims=("i",), index=idx, lower=0.0, upper=math.inf, integer=True)
+    pb.add_cstr("g", over=idx, sense=">=", lhs_terms={"z": z}, rhs_terms={"r": 3.0})
+    pb.set_objective(z, sense="min")
+
+    mps_path = tmp_path / "int_unbounded.mps"
+    pb.write_mps(str(mps_path))
+
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.readModel(str(mps_path))
+    lp = h.getLp()
+    assert list(lp.col_lower_) == [0.0, 0.0]
+    assert all(math.isinf(u) and u > 0 for u in lp.col_upper_), list(lp.col_upper_)
+    h.run()
+    assert h.getModelStatus() == highspy.HighsModelStatus.kOptimal
+    assert list(h.getSolution().col_value) == pytest.approx([3.0, 3.0])
