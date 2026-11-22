@@ -480,10 +480,14 @@ def test_integer_var_without_upper_bound_stays_unbounded(tmp_path, elementwise) 
     pb = Problem()
     idx = pl.DataFrame({"i": [0, 1]})
     if elementwise:
-        z = pb.add_var("z", dims=("i",), index=idx,
-                       lower=Param(("i",), pl.DataFrame({"i": [0, 1], "value": [0.0, 0.0]})),
-                       upper=Param(("i",), pl.DataFrame({"i": [0, 1], "value": [math.inf, math.inf]})),
-                       integer=True)
+        z = pb.add_var(
+            "z",
+            dims=("i",),
+            index=idx,
+            lower=Param(("i",), pl.DataFrame({"i": [0, 1], "value": [0.0, 0.0]})),
+            upper=Param(("i",), pl.DataFrame({"i": [0, 1], "value": [math.inf, math.inf]})),
+            integer=True,
+        )
         assert z.has_elementwise_bounds
     else:
         z = pb.add_var("z", dims=("i",), index=idx, lower=0.0, upper=math.inf, integer=True)
